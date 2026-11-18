@@ -61,10 +61,11 @@ _SYMBOLS = {
 }
 
 
-def _ensure_engine(font_path, size_px, ink):
+def _ensure_engine(font_path, size_px, ink, math_font_path=None):
     """按 (字体, 字号, 墨色) 缓存引擎——它内部要做字形笔画提取，比较贵。"""
     global _engine, _renderer, _engine_key
-    key = (font_path, size_px, ink)
+    math_font_path = math_font_path or font_path
+    key = (font_path, math_font_path, size_px, ink)
     if _engine_key == key and _renderer is not None:
         return _renderer
     with _lock:
@@ -80,7 +81,7 @@ def _ensure_engine(font_path, size_px, ink):
 
         cfg = mconfig.HandwritingConfig(
             font_path=font_path,
-            math_font_path=font_path,
+            math_font_path=math_font_path,
             fallback_font_path=font_path,
             ink_color="#%02x%02x%02x" % tuple(ink),
             body_font_pt=size_px / 4.0,
@@ -90,35 +91,38 @@ def _ensure_engine(font_path, size_px, ink):
         )
         _engine = HandwritingEngine(cfg, reference_size_px=int(size_px),
                                     math_reference_size_px=int(size_px))
+        # 公式里的 Ω φ π ∑ √ 等符号同样来自印刷体字形，改成笔迹绘制
+        import handstroke
+        handstroke.inline_patch(_engine)
         _renderer = mr.FormulaRenderer(_engine, seed="pdf-layer")
         _engine_key = key
         return _renderer
 
 
-def _box(latex, size_px, font_path, ink):
-    r = _ensure_engine(font_path, size_px, ink)
+def _box(latex, size_px, font_path, ink, math_font_path=None):
+    r = _ensure_engine(font_path, size_px, ink, math_font_path)
     # max_width 给足：公式自身的换行交给 hwrender 的 wrap 处理
     return r.render_inline(latex, int(round(size_px)), 100000)
 
 
 @lru_cache(maxsize=512)
-def _cached_box(latex, size_px, font_path, ink):
+def _cached_box(latex, size_px, font_path, ink, math_font_path):
     """公式渲染不便宜（要提取字形笔画），而 measure 与 draw 会各调一次，必须缓存。
 
     返回的 MathBox.image 只被 alpha_composite 读取，不会被修改，可安全复用。
     """
-    return _box(latex, size_px, font_path, ink)
+    return _box(latex, size_px, font_path, ink, math_font_path)
 
 
-def measure(latex, size_px, font_path, ink=(30, 44, 70)):
+def measure(latex, size_px, font_path, ink=(16, 16, 18), math_font_path=None):
     """返回 (宽, 基线以上高度, 基线以下高度)，单位 px。"""
-    b = _cached_box(latex, size_px, font_path, tuple(ink))
+    b = _cached_box(latex, size_px, font_path, tuple(ink), math_font_path)
     return b.width, b.baseline, b.height - b.baseline
 
 
-def draw(img, latex, x, baseline, size_px, font_path, ink=(30, 44, 70)):
+def draw(img, latex, x, baseline, size_px, font_path, ink=(16, 16, 18), math_font_path=None):
     """把公式画到 img 上，使公式基线与 baseline 对齐；返回宽度（px）。"""
-    b = _cached_box(latex, size_px, font_path, tuple(ink))
+    b = _cached_box(latex, size_px, font_path, tuple(ink), math_font_path)
     img.alpha_composite(b.image, (int(round(x)), int(round(baseline - b.baseline))))
     return b.width
 

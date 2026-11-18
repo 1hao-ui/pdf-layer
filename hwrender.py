@@ -18,6 +18,7 @@ import random
 from PIL import Image, ImageDraw, ImageFont
 
 import formula
+import handstroke
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FONT_DIR = os.path.join(HERE, "fonts")
@@ -25,7 +26,7 @@ FONT_DIR = os.path.join(HERE, "fonts")
 SCALE = 4                      # 1pt = 4px
 DEFAULT_SIZE_PT = 10.9
 DEFAULT_LINE_PT = 20.2
-INK = (30, 44, 70)             # 墨色 RGB（alpha 逐字抖动）
+INK = (16, 16, 18)             # 墨色 RGB：黑笔（alpha 逐字抖动）
 PAGE_LEFT_PT = 64.0
 PAGE_RIGHT_PT = 468.0
 BLOCK_GAP_PT = 15.0
@@ -42,6 +43,21 @@ _SYM_CP = set(ord(c) for c in "Ωφω√≈∠²³·×−°θΔΣπ±≤≥≠�
 _font_cache = {}
 
 
+def _pick_math_font(font_path):
+    """给公式挑一款拉丁字形更清楚的手写字体。
+
+    正文用的马善政楷书是连笔毛笔体，拉丁 `I` 会被读成 `9`；公式里 I（电流）极常见，
+    所以默认换成同目录下的龙藏体（同样 OFL、同样是手写），字形清楚得多。
+    找不到就退回正文字体。
+    """
+    d = os.path.dirname(os.path.abspath(font_path))
+    for name in ("LongCang-Regular-merged.ttf", "LongCang-Regular.ttf"):
+        p = os.path.join(d, name)
+        if os.path.exists(p) and os.path.abspath(p) != os.path.abspath(font_path):
+            return p
+    return font_path
+
+
 def _ttf(path, px):
     key = (path, px)
     f = _font_cache.get(key)
@@ -55,12 +71,15 @@ class Hand:
     """一套手写字体 + 渲染参数。"""
 
     def __init__(self, font_path, size_pt=DEFAULT_SIZE_PT, ink=INK,
-                 jitter=1.0, seed=20261118):
+                 jitter=1.0, seed=20261118, math_font_path=None):
         self.font_path = font_path
         self.size_pt = size_pt
         self.ink = ink
         self.jitter = jitter          # 全局扰动强度倍率，0 = 印刷体
         self.rng = random.Random(seed)
+        # 公式里的拉丁字母/数字换一款字形更清楚的同族手写字体（默认龙藏体）：
+        # 马善政楷书的连笔 I 会被读成 9，公式里 I（电流）出现频率极高，必须可辨。
+        self.math_font_path = math_font_path or _pick_math_font(font_path)
 
     # 6.1 每个字的独立形变参数
     def _char_params(self, ch, px):
@@ -75,11 +94,20 @@ class Hand:
             rgb=tuple(max(0, min(255, c + r.randint(-6, 6) * (1 if j > 0 else 0)))
                       for c in self.ink),
             adv_jit=r.uniform(-0.12, 0.12) * j,                # em
+            seed=r.randrange(1 << 30),                         # 供符号笔迹采样用
         )
 
     def _char_tile(self, ch, px, p):
         boost = 1.15 if ord(ch) in _SYM_CP else 1.0     # 符号字形偏小，放大一点才和汉字同高
-        f = _ttf(self.font_path, max(4, int(round(px * p["scale"] * boost))))
+        size = max(4, int(round(px * p["scale"] * boost)))
+        # 合并字体里的数学符号是印刷体轮廓，走「骨架 → 变宽笔道」重绘，
+        # 才能和周围手写字迹看起来是同一支笔写出来的。
+        if handstroke.available(ch):
+            tile, ox, oy = handstroke.tile(
+                ch, size, self.ink + (p["alpha"],), self.font_path, seed=p.get("seed", 0))
+            if tile is not None:
+                return tile, ox, oy
+        f = _ttf(self.font_path, size)
         try:
             l, t, r, b = f.getbbox(ch)
         except Exception:
@@ -137,7 +165,8 @@ class Hand:
     def _token_width(self, tk, font, px):
         """一个 token 的排版宽度：普通文本按字宽累加，$...$ 交给公式层量。"""
         if _is_formula(tk):
-            return formula.measure(tk[1:-1], px, self.font_path, self.ink)[0]
+            return formula.measure(tk[1:-1], px, self.font_path, self.ink,
+                                   self.math_font_path)[0]
         return font.getlength(tk)
 
     # -------------------------------------------------------- 渲染一个块
@@ -147,7 +176,8 @@ class Hand:
         w = 0.0
         for kind, val in _atoms(line):
             if kind == "f":
-                fw, fa, fd = formula.measure(val, px, self.font_path, self.ink)
+                fw, fa, fd = formula.measure(val, px, self.font_path, self.ink,
+                                             self.math_font_path)
                 w += fw
                 asc = max(asc, fa)
                 desc = max(desc, fd)
@@ -165,27 +195,30 @@ class Hand:
         base_lh = DEFAULT_LINE_PT * SCALE
         font = _ttf(self.font_path, int(round(px)))
 
-        # 逐行算行框：含公式的行会比纯文本行高（分式/根号要占上下空间）
-        plans = []
-        for line in lines:
-            w, asc, desc = self._line_box(line, font, px)
+        # 逐行按自身高度排布：纯文本行保持 20.2pt 行距，含分式/根号的行自动加高。
+        # 若改成「按最高行统一行距」，一条嵌套分式会把整段撑成双倍行距，反而更难看。
+        metrics = [self._line_box(line, font, px) for line in lines]
+        heights, baselines = [], []
+        for _w, asc, desc in metrics:
             h_i = max(base_lh, asc + desc + 4)
-            baseline = int(max(h_i * 0.78, asc + 2))
-            h_i = int(max(h_i, baseline + desc + 2))
-            plans.append((line, w, h_i, baseline))
+            b_i = int(max(h_i * 0.78, asc + 2))
+            h_i = int(max(h_i, b_i + desc + 2))
+            heights.append(h_i)
+            baselines.append(b_i)
 
         # 画布先给足（标点悬挂会略超列宽，抖动还有随机外扩），渲染后按墨迹裁边
-        need = max([p[1] for p in plans] + [width_pt * SCALE])
+        need = max([m[0] for m in metrics] + [width_pt * SCALE])
         W = int(math.ceil(need * 1.06 + 8))
-        H = sum(p[2] for p in plans) or int(base_lh)
+        H = sum(heights) or int(base_lh)
         canvas = Image.new("RGBA", (W, H), (0, 0, 0, 0))
 
         y = 0
-        for line, _w, h_i, baseline in plans:
+        for i, line in enumerate(lines):
             if line:
                 canvas.alpha_composite(
-                    self._render_line(line, font, px, baseline, W / SCALE, h_i), (0, y))
-            y += h_i
+                    self._render_line(line, font, px, baselines[i], W / SCALE, heights[i]),
+                    (0, y))
+            y += heights[i]
         out = canvas.crop((0, 0, W, y))
         bb = out.getbbox()
         if bb:
@@ -204,10 +237,12 @@ class Hand:
         for k, (kind, val) in enumerate(atoms):
             if kind == "f":
                 # 公式整体当一个原子：不可拆、不与前后字重叠
-                fw, _fa, _fd = formula.measure(val, px, self.font_path, self.ink)
+                fw, _fa, _fd = formula.measure(val, px, self.font_path, self.ink,
+                                               self.math_font_path)
                 if x < right:
                     x = right
-                formula.draw(img, val, x, baseline, px, self.font_path, self.ink)
+                formula.draw(img, val, x, baseline, px, self.font_path, self.ink,
+                             self.math_font_path)
                 right = x + fw
                 x += fw
                 continue

@@ -56,23 +56,36 @@ H.paste_into_pdf("src.pdf", "out.pdf", {0: [(img, 226, w_pt, h_pt)]})
 ## 实现要点
 
 - **坐标单位**：外部一律 pt，内部 `SCALE=4` 超采样（1pt=4px）。
+- **墨色**：黑笔 `(16,16,18)`，逐字 alpha 抖动 220–255。
 - **排版护栏**：防重叠按「墨迹」边缘判断，不能把贴图的透明内边距算进字距
   （否则字距从 11pt 被撑到 15.4pt，行宽膨胀 40%，长行右侧被画布裁掉）。
 - **画布宽度**：先按行宽给足再按实际墨迹裁边，保证任何字号/种子下都不裁字。
+- **符号笔迹化**（`handstroke.py`）：合并字体里的 Ω √ ≈ × ° ∑ π φ 是 Segoe UI Symbol 的
+  **印刷体轮廓**，直接贴会显得不是同一支笔。做法是栅格化 → Zhang-Suen 细化取骨架 →
+  变宽笔道重绘（起收笔渐细、笔压抖动、轻微旋转）。少数骨架拓扑会坏的符号
+  （`∠ ≤ ≥ ° ∘`）改用人工描的笔道路径。
+  注意 PIL 的 `font.getbbox()` 是**布局框**不是墨迹框，用它缩放骨架会把上标 ² ³ 撑成正常大小。
 - **公式**：手写字体没有 OpenType MATH 表，画不出分式/根号结构。因此复用
   [MarkdownToHandwrite](https://github.com/lyc07/MarkdownToHandwrite)（MIT）的
   2D 公式排版内核（`vendor/mthw/`，见 `vendor/LICENSE-MarkdownToHandwrite`），
   只保留「解析 → 盒式布局 → 笔画化渲染」，输出透明 RGBA + 基线，贴到同一张 4x 画布。
-  上游默认把希腊字母映射成形近汉字，本项目的 `formula.py` 改回真希腊字符。
+  上游默认把希腊字母映射成形近汉字，本项目的 `formula.py` 改回真希腊字符；
+  公式里的符号同样走 `handstroke` 笔迹化。
+- **公式字体**：公式里的拉丁字母/数字默认用龙藏体（`math_font_path`），
+  因为马善政楷书的连笔 `I` 会被读成 `9`，而公式里 I（电流）出现频率极高。
+- **行距**：逐行按自身高度排布——纯文本行保持 20.2pt，含分式/根号的行自动加高；
+  不采用「按最高行统一行距」，否则一条嵌套分式会把整段撑成双倍行距。
 
 ## 目录
 
 ```
 hwrender.py        手写层渲染引擎（换行 / 逐字扰动 / 行内公式 / 注回 PDF）
+handstroke.py      符号笔迹化（骨架提取 + 变宽笔道重绘）
 formula.py         公式层适配器（复用 vendor/mthw，改符号映射，带缓存）
 merge_symbols.py   把数学符号字形并入中文手写字体
 fetch_fonts.ps1    下载字体并触发合并
 demo.py            端到端演示（合成页面 → 手写层 → 注回 PDF）
+preview.py         不依赖 PyMuPDF 的预览（输出 PNG）
 vendor/mthw/       第三方公式排版内核（MIT，见 vendor/LICENSE-MarkdownToHandwrite）
 docs/交接说明.md   项目背景、调研结论、计算口径与 TODO
 STATUS.md          当前进度与已知阻塞
