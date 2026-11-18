@@ -17,6 +17,8 @@ import random
 
 from PIL import Image, ImageDraw, ImageFont
 
+import formula
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 FONT_DIR = os.path.join(HERE, "fonts")
 
@@ -31,6 +33,8 @@ PAGE_BOTTOM_PT = 676.0         # 触发降字号重排的底限（页码在 ~690
 
 NO_LINE_START = "，。；、：？！）》」』”’%,.;:?!)]}"
 NO_LINE_END = "（《「『“‘([{"
+_TILE_PAD = 6                   # 单字贴图四周的透明内边距（px），排版时不能算进字距
+_JITTER_INFLATE = 0.02          # 逐字扰动（缩放/位移/防重叠右推）平均把行宽撑大的比例
 _SYM_CP = set(ord(c) for c in "Ωφω√≈∠²³·×−°θΔΣπ±≤≥≠∞→∘⌀")
 
 
@@ -80,7 +84,7 @@ class Hand:
             l, t, r, b = f.getbbox(ch)
         except Exception:
             return None, 0, 0
-        pad = 6
+        pad = _TILE_PAD
         w = max(1, r - l) + pad * 2
         h = max(1, b - t) + pad * 2
         img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
@@ -94,7 +98,9 @@ class Hand:
     def wrap(self, text, width_pt):
         px = self.size_pt * SCALE
         font = _ttf(self.font_path, int(round(px)))
-        max_px = width_pt * SCALE
+        # 逐字扰动会把实际行宽撑大几个百分点，换行时按同一比例预留，
+        # 否则渲染出来会越过列宽（旧版就是因此每行右侧被裁掉约三成）。
+        max_px = width_pt * SCALE / (1.0 + _JITTER_INFLATE * self.jitter)
         lines = []
         for para in text.split("\n"):
             if not para.strip():
@@ -103,7 +109,7 @@ class Hand:
             tokens = _tokenize(para)
             cur, cur_w = "", 0.0
             for tk in tokens:
-                w = font.getlength(tk)
+                w = self._token_width(tk, font, px)
                 if cur and cur_w + w > max_px:
                     # 标点悬挂：行首禁则字符挤回上一行
                     if tk and tk[0] in NO_LINE_START:
@@ -116,7 +122,7 @@ class Hand:
                         cur = cur[:-1]
                         lines.append(cur)
                         cur = carry + tk
-                        cur_w = font.getlength(cur)
+                        cur_w = self._token_width(cur, font, px)
                         continue
                     lines.append(cur)
                     cur, cur_w = tk, w
@@ -127,7 +133,28 @@ class Hand:
                 lines.append(cur)
         return lines
 
+    # -------------------------------------------------------- 公式支持
+    def _token_width(self, tk, font, px):
+        """一个 token 的排版宽度：普通文本按字宽累加，$...$ 交给公式层量。"""
+        if _is_formula(tk):
+            return formula.measure(tk[1:-1], px, self.font_path, self.ink)[0]
+        return font.getlength(tk)
+
     # -------------------------------------------------------- 渲染一个块
+    def _line_box(self, line, font, px):
+        """返回一行所需的 (宽, 基线以上, 基线以下)，公式会撑高行框。"""
+        asc, desc = font.getmetrics()
+        w = 0.0
+        for kind, val in _atoms(line):
+            if kind == "f":
+                fw, fa, fd = formula.measure(val, px, self.font_path, self.ink)
+                w += fw
+                asc = max(asc, fa)
+                desc = max(desc, fd)
+            else:
+                w += font.getlength(val)
+        return w, asc, desc
+
     def render_block(self, text, width_pt=None, size_pt=None):
         """返回 (RGBA Image, 宽pt, 高pt)。"""
         if size_pt:
@@ -135,44 +162,76 @@ class Hand:
         width_pt = width_pt or (PAGE_RIGHT_PT - PAGE_LEFT_PT)
         lines = self.wrap(text, width_pt)
         px = self.size_pt * SCALE
-        lh = DEFAULT_LINE_PT * SCALE
-        W = int(width_pt * SCALE)
-        H = int(max(1, len(lines)) * lh + lh)
-        canvas = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        base_lh = DEFAULT_LINE_PT * SCALE
         font = _ttf(self.font_path, int(round(px)))
-        ascent = font.getmetrics()[0]
 
-        for i, line in enumerate(lines):
-            if not line:
-                continue
-            line_img = self._render_line(line, font, px, ascent, width_pt)
-            canvas.alpha_composite(line_img, (0, int(round(i * lh))))
-        out = canvas.crop((0, 0, W, int(len(lines) * lh)))
-        return out, width_pt, out.size[1] / SCALE
+        # 逐行算行框：含公式的行会比纯文本行高（分式/根号要占上下空间）
+        plans = []
+        for line in lines:
+            w, asc, desc = self._line_box(line, font, px)
+            h_i = max(base_lh, asc + desc + 4)
+            baseline = int(max(h_i * 0.78, asc + 2))
+            h_i = int(max(h_i, baseline + desc + 2))
+            plans.append((line, w, h_i, baseline))
 
-    def _render_line(self, line, font, px, ascent, width_pt):
+        # 画布先给足（标点悬挂会略超列宽，抖动还有随机外扩），渲染后按墨迹裁边
+        need = max([p[1] for p in plans] + [width_pt * SCALE])
+        W = int(math.ceil(need * 1.06 + 8))
+        H = sum(p[2] for p in plans) or int(base_lh)
+        canvas = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+
+        y = 0
+        for line, _w, h_i, baseline in plans:
+            if line:
+                canvas.alpha_composite(
+                    self._render_line(line, font, px, baseline, W / SCALE, h_i), (0, y))
+            y += h_i
+        out = canvas.crop((0, 0, W, y))
+        bb = out.getbbox()
+        if bb:
+            out = out.crop((0, 0, min(out.width, bb[2] + 2), out.height))
+        return out, out.size[0] / SCALE, out.size[1] / SCALE
+
+    def _render_line(self, line, font, px, baseline, width_pt, line_h):
         W = int(width_pt * SCALE)
-        lh = int(DEFAULT_LINE_PT * SCALE)
+        lh = int(line_h)
         img = Image.new("RGBA", (W, lh), (0, 0, 0, 0))
-        baseline = int(lh * 0.78)
+        ascent = font.getmetrics()[0]
         x = self.rng.uniform(0, 3.0) * self.jitter      # 每行起笔位置随机
-        n = max(1, len(line))
+        atoms = _atoms(line)
+        n = max(1, len(atoms))
         right = -1e9
-        for k, ch in enumerate(line):
+        for k, (kind, val) in enumerate(atoms):
+            if kind == "f":
+                # 公式整体当一个原子：不可拆、不与前后字重叠
+                fw, _fa, _fd = formula.measure(val, px, self.font_path, self.ink)
+                if x < right:
+                    x = right
+                formula.draw(img, val, x, baseline, px, self.font_path, self.ink)
+                right = x + fw
+                x += fw
+                continue
+            ch = val
             p = self._char_params(ch, px)
             tile, ox, oy = self._char_tile(ch, px, p)
             if tile is None:
+                continue
+            bb = tile.getbbox()          # 贴图内的真实墨迹范围（旋转后也算得准）
+            if bb is None:
                 continue
             # 6.2 字距渐变：行首略宽，行末略紧
             drift = (0.06 - 0.12 * (k / n)) * px * self.jitter
             adv = font.getlength(ch) * p["scale"] + p["adv_jit"] * px + drift
             px_x = x + p["dx"]
             px_y = baseline - ascent + p["dy"]
-            # 防重叠：字与字之间至少留 0.02em（负字距会把「220」压成一团）
-            if px_x - ox < right:
-                px_x = right + ox
+            # 防重叠：按「墨迹」边缘判断。贴图四周有 _TILE_PAD 的透明边距，
+            # 若把边距算进字距，每个字都会被推开一个 padding，行宽膨胀约 40%，
+            # 长行会被画布右边界直接裁掉。这里用 bb 反推墨迹的绝对位置。
+            ink_left = px_x - ox + bb[0]
+            if ink_left < right:
+                px_x += right - ink_left
             img.alpha_composite(tile, (int(round(px_x - ox)), int(round(px_y - oy))))
-            right = px_x - ox + tile.size[0]
+            right = px_x - ox + bb[2]
             x += adv
         # 6.2 整行低频弯曲 + 剪切
         img = _sine_warp(img, amp=1.5 * self.jitter, lam=300.0, phase=self.rng.uniform(0, 6.28))
@@ -184,10 +243,43 @@ class Hand:
 
 
 # ---------------------------------------------------------------- 工具函数
+def _is_formula(tk):
+    """$...$ 形式的 token 视为公式。"""
+    return len(tk) >= 3 and tk[0] == "$" and tk[-1] == "$"
+
+
+def _atoms(line):
+    """把一行拆成原子：('c', 单字) 或 ('f', 公式源码)。
+
+    公式用 $...$ 包住，作为一个整体参与排版（不可在中间断行）。
+    """
+    out, i, n = [], 0, len(line)
+    while i < n:
+        if line[i] == "$":
+            j = line.find("$", i + 1)
+            if j > i:
+                out.append(("f", line[i + 1:j]))
+                i = j + 1
+                continue
+        out.append(("c", line[i]))
+        i += 1
+    return out
+
+
 def _tokenize(s):
-    """中文逐字，连续 ASCII / 数字串不拆（避免把 220 拆开）。"""
-    out, buf = [], ""
-    for ch in s:
+    """中文逐字，连续 ASCII / 数字串不拆（避免把 220 拆开）；$...$ 整体保留。"""
+    out, buf, i, n = [], "", 0, len(s)
+    while i < n:
+        ch = s[i]
+        if ch == "$":
+            j = s.find("$", i + 1)
+            if j > i:
+                if buf:
+                    out.append(buf)
+                    buf = ""
+                out.append(s[i:j + 1])       # 含两端 $
+                i = j + 1
+                continue
         if ch.isascii() and (ch.isalnum() or ch in ".,+-=%/×√"):
             buf += ch
         else:
@@ -195,6 +287,7 @@ def _tokenize(s):
                 out.append(buf)
                 buf = ""
             out.append(ch)
+        i += 1
     if buf:
         out.append(buf)
     return out

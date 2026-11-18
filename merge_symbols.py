@@ -15,7 +15,10 @@ from fontTools.ttLib import TTFont
 from fontTools.pens.ttGlyphPen import TTGlyphPen
 from fontTools.pens.recordingPen import DecomposingRecordingPen
 
-SYMS = [ord(c) for c in "Ωφω√≈∠²³·×−°θΔΣπ±≤≥≠∞→∘⌀"]
+SYMS = [ord(c) for c in (
+    "Ωφω√≈∠²³·×−°θΔΣπ±≤≥≠∞→∘⌀"      # 初版：希腊 + 常见运算符
+    "∑∫∏∂∇∈⊂∪∩∀∃←⇒⇔⊥∥⟨⟩⌈⌉⌊⌋⋯⋮⁄"      # 公式需要：大运算符 / 集合 / 箭头 / 括号件
+)]
 DEFAULT_SYM = r"C:\Windows\Fonts\seguisym.ttf"
 
 

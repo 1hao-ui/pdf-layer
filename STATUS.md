@@ -14,7 +14,23 @@
 | **6.2 笔画层扰动** | `hwrender.py` `Hand._render_line` + `_sine_warp` | ✅ 整行正弦弯 A=1.5px λ=300px、±0.15° 剪切、行首宽行尾紧的字距渐变 |
 | 排版（贪心换行 + ASCII 不拆 + 标点悬挂） | `hwrender.py` `Hand.wrap` | ✅ 行首禁则、行尾禁则都已实现；另加防重叠护栏 |
 | 注回 PDF | `hwrender.py` `paste_into_pdf` | ✅ `insert_image(overlay=True)` |
-| 端到端验证 | `demo.py` → `out/demo_page.pdf`、`out/detail2x.png` | ✅ 4.3.5 全段（含 Ω √ ≈ ² ³ φ）已写入 A4 |
+| 端到端验证 | `preview.py` → `out/preview_page.png`；`demo.py` → `out/demo_page.pdf` | ✅ 4.3.5 全段（含公式）已写入 A4 |
+| **公式支持（2026-11-18 二次修复）** | `formula.py` + `vendor/mthw/` | ✅ 分式/根式/上下标/∑∫上下限/矩阵/cases，行内 `$...$` 混排 |
+
+## 1.1 二次修复记录（2026-11-18 晚）
+
+接手后修掉的问题，按严重度：
+
+| 问题 | 根因 | 修复 |
+|---|---|---|
+| **每行右侧约 1/3 文字被裁掉** | `_render_line` 的防重叠护栏把贴图的 6px 透明内边距算进了字距，每个字被推开一个 padding（56px 而非 44px），字距从 11pt 撑到 15.4pt，行宽膨胀约 40% | 改用贴图实际墨迹 bbox（`tile.getbbox()`）反推墨迹绝对位置，只在墨迹真会重叠时右推 |
+| 行宽仍比 wrap 估算宽 6.7% | 抖动（缩放/位移/字距）会让实际行宽略超估算 | `wrap` 按 `_JITTER_INFLATE=0.02` 预留；画布先给足再按墨迹裁边，任何字号/种子都不裁字 |
+| 长行右侧被画布切掉 | 画布固定按列宽开，标点悬挂/抖动一超出就被裁 | 画布按 `max(行宽)*1.06+8` 开，渲染后裁到墨迹右缘 |
+| `demo.py` 预览图坐标错 | pt/px 混用（`226` 当 px 用），且 `crop.width*2//2` 等于没放大 | 统一 `k = dpi/72` 换算；真正 2x；产物改名 `detail2x.png` 与文档一致 |
+| 公式打不出来 | 手写字体没有 OpenType MATH 表，画不出分式/根号结构 | 引入 `formula.py`，复用 MarkdownToHandwrite（MIT）的 2D 布局内核，符号表改回真希腊字符 |
+| 合并字体缺大运算符 | `SYMS` 只并了 25 个符号，缺 `∑ ∫ ∏ ∈ ⊂ ⇒ ⟨⟩` 等 | `SYMS` 扩到 45 个，实测零缺失 |
+
+**验收数据**：字距 11.00pt（设计值一致）；纯文本块 399.0×160.0pt，右缘 1594/1596 不裁切；公式块（10 条公式）0 空渲染；17 个数学符号全部有墨迹；9.5/10.9/12.0 三种字号 × 3 个种子均无裁切；含公式块渲染 0.02s/次（带缓存）。
 
 ## 2. 符号缺字是怎么解决的（原交接稿的 P2）
 
@@ -46,6 +62,8 @@ python -c "import fitz;d=fitz.open(r'<SRC>');[d[i].get_pixmap(dpi=120).save(f'ou
 - **P3 版面自动分析**：`page.get_drawings()` + 视觉模型出 `{bbox, 类型, 可写入}`，再与既有块 bbox 求交做碰撞检测。本机没有视觉模型通道，需要用 `ego_*` 浏览器读 PDF 渲染图，或让模型直接看 `out/p*.png`。
 - **P4 笔迹轨迹合成**：RNN（Graves 2013）/ fontTools 笔画中心线变宽描边 / pix2pix。二期。
 - 遗留口径问题（交接稿第 7 节）：4.3.1 的 1.5kW 是每相还是三相合计；4.2.2 用 381V 还是取整 380V。**未定稿前不写死。**
+- **公式层的风格统一**：公式笔画来自上游内核（`vendor/mthw`），与正文 `Hand` 是两套扰动参数，放大看能看出差异；要统一得把 `Hand` 的扰动接进公式内核的渲染路径。
+- **跨平台 / 授权**：`merge_symbols.py` 依赖 `C:\Windows\Fonts\seguisym.ttf`（微软专有），合并产物不可再分发，且 Linux/macOS 直接失效；应换 DejaVu Sans 或 Noto Sans Symbols（OFL）。
 
 ## 6. 关键参数（当前生效值）
 

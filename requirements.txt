@@ -1,0 +1,6 @@
+# PDF-Layer 运行依赖
+# Python >= 3.10（开发环境 3.14）
+PyMuPDF>=1.24        # 读扫描 PDF、把 PNG 注回原页
+Pillow>=10.0         # 手写层渲染（4x 超采样）
+fontTools>=4.40      # 字形合并（把数学符号并入中文手写字体）
+numpy>=1.24          # 公式内核（vendor/mthw）的笔画处理需要
