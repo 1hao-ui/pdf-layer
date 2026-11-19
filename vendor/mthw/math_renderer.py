@@ -1412,10 +1412,12 @@ class FormulaRenderer:
             if self.engine.uses_sdt_trajectories
             else 0.0
         )
+        # 本地改动：0.22 -> 0.06。原 taper 让笔画两端明显收细，
+        # 根号/分数线看起来比字库字形「虚」。
         taper = (
             min(0.8, max(0.0, self.engine.config.sdt_taper))
             if self.engine.uses_sdt_trajectories
-            else 0.22
+            else 0.06
         )
         pressure_phase = self._ink_random.uniform(0.0, math.tau)
         pressure_cycles = self._ink_random.uniform(0.6, 1.4)
@@ -1449,7 +1451,9 @@ class FormulaRenderer:
         for (x, y), radius in zip(points, radii):
             draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=stroke_fill)
         layer = layer.resize(local_size, Image.Resampling.LANCZOS)
-        if self.engine.config.second_layer_enabled:
+        # 本地改动：程序画的规则笔画（分数线 / 根号）不加墨量抖动与枯笔。
+        # dry_brush 是为手写符号设计的飞白，用在横线上会变成断口、颜色不均。
+        if self.engine.config.second_layer_enabled and not self._weight_seed_extra:
             alpha = _vary_ink_density(
                 layer.getchannel("A"),
                 self._ink_random,
@@ -1473,7 +1477,10 @@ class FormulaRenderer:
     def _stroke_width(self, size_px: int) -> float:
         if self.engine.uses_sdt_trajectories:
             return self.engine.uniform_pen_width_px()
-        return max(1, round(size_px * 0.024))
+        # 本地改动：0.024 -> 0.050。
+        # 程序画的根号/分数线要和字库字形同粗：实测字形笔画 8-10px（18pt），
+        # 原 0.024 只有 4.6px，细了一半，看着「根号很虚」。
+        return max(1, round(size_px * 0.050))
 
     def _rule_curve(
         self,
@@ -1494,7 +1501,9 @@ class FormulaRenderer:
         offsets = [0.0]
         offsets.extend(self._rule_jitter_offset(jitter) for _ in range(jitter_count))
         offsets.append(0.0)
-        steps = max(8, (jitter_count + 1) * 8)
+        # 本地改动：采样密度跟长度挂钩（每 1px 一个点）。
+        # 原来固定 8~16 点，长分数线点距大于笔宽，逐点画圆时会出现断口。
+        steps = max(8, (jitter_count + 1) * 8, int(distance))
         points: list[tuple[float, float]] = []
         for step in range(steps + 1):
             ratio = step / steps
