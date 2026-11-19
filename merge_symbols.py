@@ -91,7 +91,11 @@ def main():
         jobs = [(sys.argv[1], sys.argv[2], sys.argv[3])]
     else:
         jobs = []
-        for fam in ["MaShanZheng-Regular", "LongCang-Regular", "ZhiMangXing-Regular"]:
+        # 与 fetch_fonts.ps1 的下载列表保持一致（四款都生成 merged 版）。
+        # 注：交接说明 §3 认为刘建毛草连笔过重（x 易看成 p），不建议作正文；
+        #     这里仍生成 merged 版，只为保留可选项，默认正文仍用马善政。
+        for fam in ["MaShanZheng-Regular", "LongCang-Regular",
+                    "LiuJianMaoCao-Regular", "ZhiMangXing-Regular"]:
             jobs.append((os.path.join(d, "fonts", fam + ".ttf"), DEFAULT_SYM,
                          os.path.join(d, "fonts", fam + "-merged.ttf")))
     for cn, sym, out in jobs:

@@ -71,7 +71,8 @@ class Hand:
     """一套手写字体 + 渲染参数。"""
 
     def __init__(self, font_path, size_pt=DEFAULT_SIZE_PT, ink=INK,
-                 jitter=1.0, seed=20261118, math_font_path=None):
+                 jitter=1.0, seed=20261118, math_font_path=None,
+                 variant_fonts=None, symbol_font_path=None):
         self.font_path = font_path
         self.size_pt = size_pt
         self.ink = ink
@@ -80,6 +81,70 @@ class Hand:
         # 公式里的拉丁字母/数字换一款字形更清楚的同族手写字体（默认龙藏体）：
         # 马善政楷书的连笔 I 会被读成 9，公式里 I（电流）出现频率极高，必须可辨。
         self.math_font_path = math_font_path or _pick_math_font(font_path)
+        # 同字多形：额外几套「真人笔迹」字库（典型是用字嗨写 4 遍导出的 4 份 OTF）。
+        # 主字体恒为第 0 套，并始终作为换行/字距的度量基准——多套字库的
+        # advance 可能略有差异，若逐字按各自字宽度量，行宽会漂移、禁则也会错位。
+        self.variant_fonts = [font_path]
+        for p in (variant_fonts or []):
+            if os.path.abspath(p) != os.path.abspath(font_path):
+                self.variant_fonts.append(p)
+        self._char_seen = {}          # 字符 -> 已出现次数（决定下一次用哪套）
+        self._cmap_cache = {}         # 字体路径 -> Unicode 覆盖集合
+        self.symbol_font_path = symbol_font_path or self._pick_symbol_font(font_path)
+
+    def _pick_symbol_font(self, font_path):
+        """挑一份「肯定含数学符号」的字体，供缺字时兜底。
+
+        用户手写的 OTF 通常只写了正文那几十个字，不会去描 Ω √ ∑ 这类符号；
+        若主字体和变体字体都缺符号，笔迹化会拿不到轮廓，渲染出豆腐块。
+        主字体若已是 *-merged.ttf（已注入 45 个符号）就直接用它，保持旧行为不变。
+        """
+        c = self._cmap(font_path)
+        if c is not None and all(ord(s) in c for s in "Ω√≈"):
+            return font_path
+        for name in ("MaShanZheng-Regular-merged.ttf", "LongCang-Regular-merged.ttf",
+                     "ZhiMangXing-Regular-merged.ttf", "LiuJianMaoCao-Regular-merged.ttf"):
+            p = os.path.join(FONT_DIR, name)
+            if os.path.exists(p):
+                return p
+        return font_path
+
+    def _cmap(self, path):
+        """字库的 Unicode 覆盖集合，用于缺字回退；读不到则返回 None（不回退）。"""
+        key = os.path.abspath(path)
+        if key not in self._cmap_cache:
+            try:
+                from fontTools.ttLib import TTFont
+                self._cmap_cache[key] = set(TTFont(path).getBestCmap() or {})
+            except Exception:
+                self._cmap_cache[key] = None
+        return self._cmap_cache[key]
+
+    def _variant_for(self, ch):
+        """按「该字第几次出现」循环挑一套字库；自动跳过缺字的套。
+
+        例：'电' 第 1 次 -> 套 0，第 2 次 -> 套 1，第 3 次 -> 套 2 …
+        计数是确定性的，配合 seed 可完整复现；缺字的套不参与循环。
+        若所有字库都缺该字（用户字表没覆盖到），回退到全字表的保底字体
+        （symbol_font_path，通常是 *-merged.ttf），否则会渲染出豆腐块。
+        """
+        n = self._char_seen.get(ch, 0)
+        self._char_seen[ch] = n + 1
+        cp = ord(ch)
+        usable = []
+        for p in self.variant_fonts:
+            c = self._cmap(p)
+            if c is None or cp in c:
+                usable.append(p)
+        if not usable:
+            fb = self.symbol_font_path
+            fc = self._cmap(fb)
+            usable = [fb if (fc is None or cp in fc) else self.font_path]
+        return usable[n % len(usable)]
+
+    def reset_variants(self):
+        """清空同字多形出现计数（同一 Hand 渲染多篇独立文档时调用）。"""
+        self._char_seen.clear()
 
     # 6.1 每个字的独立形变参数
     def _char_params(self, ch, px):
@@ -97,17 +162,24 @@ class Hand:
             seed=r.randrange(1 << 30),                         # 供符号笔迹采样用
         )
 
-    def _char_tile(self, ch, px, p):
+    def _char_tile(self, ch, px, p, font_path=None):
+        font_path = font_path or self.font_path
         boost = 1.15 if ord(ch) in _SYM_CP else 1.0     # 符号字形偏小，放大一点才和汉字同高
         size = max(4, int(round(px * p["scale"] * boost)))
         # 合并字体里的数学符号是印刷体轮廓，走「骨架 → 变宽笔道」重绘，
         # 才能和周围手写字迹看起来是同一支笔写出来的。
+        # 用户手写导出的 OTF 通常没写数学符号，此时符号回退到专门的符号字体
+        # （*-merged.ttf，已注入 45 个符号），否则会变豆腐块。
         if handstroke.available(ch):
+            sym_path = font_path
+            c = self._cmap(font_path)
+            if c is not None and ord(ch) not in c:
+                sym_path = self.symbol_font_path
             tile, ox, oy = handstroke.tile(
-                ch, size, self.ink + (p["alpha"],), self.font_path, seed=p.get("seed", 0))
+                ch, size, self.ink + (p["alpha"],), sym_path, seed=p.get("seed", 0))
             if tile is not None:
                 return tile, ox, oy
-        f = _ttf(self.font_path, size)
+        f = _ttf(font_path, size)
         try:
             l, t, r, b = f.getbbox(ch)
         except Exception:
@@ -248,7 +320,7 @@ class Hand:
                 continue
             ch = val
             p = self._char_params(ch, px)
-            tile, ox, oy = self._char_tile(ch, px, p)
+            tile, ox, oy = self._char_tile(ch, px, p, self._variant_for(ch))
             if tile is None:
                 continue
             bb = tile.getbbox()          # 贴图内的真实墨迹范围（旋转后也算得准）
