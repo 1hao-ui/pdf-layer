@@ -111,13 +111,19 @@ def _ensure_engine(font_path, size_px, ink, math_font_path=None):
         return _renderer
 
 
-def _box(latex, size_px, font_path, ink, math_font_path=None):
+def _box(latex, size_px, font_path, ink, math_font_path=None, display=False):
     r = _ensure_engine(font_path, size_px, ink, math_font_path)
     # 字号补偿：公式内核的度量体系与 PIL 字号不同，直接传 size_px 时公式主字符
     # 只有汉字的 62% 高（实测 28px vs 45px），看起来「又小又糊又粗」。
     # 1.65 倍后字高与汉字齐平（45px vs 45px）。
-    box = r.render_inline(latex, int(round(size_px * MATH_SIZE_COMP)),
-                          100000)
+    px = int(round(size_px * MATH_SIZE_COMP))
+    if display:
+        # 大型运算式：走 display 布局，∑ ∫ 的上下限才会「上下堆叠」而不是侧挂，
+        # 分式/根号也会按 display 尺寸放大。
+        box = r._layout_with_weight_group(
+            _parse_display(latex), px, "display", display_style=True)
+    else:
+        box = r.render_inline(latex, px, 100000)
     # 公式墨色比正文淡（实测平均 alpha≈110 vs 汉字≈170），提亮到同一水平
     import handstroke
     boosted = handstroke._alpha_boost(box.image, handstroke.FORMULA_GAMMA)
@@ -127,24 +133,32 @@ def _box(latex, size_px, font_path, ink, math_font_path=None):
     return box
 
 
+def _parse_display(latex):
+    """把 LaTeX 源码解析成节点树（display 模式用）。"""
+    from mthw.math_renderer import LatexMathParser
+    return LatexMathParser(latex).parse()
+
+
 @lru_cache(maxsize=512)
-def _cached_box(latex, size_px, font_path, ink, math_font_path):
+def _cached_box(latex, size_px, font_path, ink, math_font_path, display=False):
     """公式渲染不便宜（要提取字形笔画），而 measure 与 draw 会各调一次，必须缓存。
 
     返回的 MathBox.image 只被 alpha_composite 读取，不会被修改，可安全复用。
     """
-    return _box(latex, size_px, font_path, ink, math_font_path)
+    return _box(latex, size_px, font_path, ink, math_font_path, display)
 
 
-def measure(latex, size_px, font_path, ink=(16, 16, 18), math_font_path=None):
+def measure(latex, size_px, font_path, ink=(16, 16, 18), math_font_path=None,
+            display=False):
     """返回 (宽, 基线以上高度, 基线以下高度)，单位 px。"""
-    b = _cached_box(latex, size_px, font_path, tuple(ink), math_font_path)
+    b = _cached_box(latex, size_px, font_path, tuple(ink), math_font_path, display)
     return b.width, b.baseline, b.height - b.baseline
 
 
-def draw(img, latex, x, baseline, size_px, font_path, ink=(16, 16, 18), math_font_path=None):
+def draw(img, latex, x, baseline, size_px, font_path, ink=(16, 16, 18),
+         math_font_path=None, display=False):
     """把公式画到 img 上，使公式基线与 baseline 对齐；返回宽度（px）。"""
-    b = _cached_box(latex, size_px, font_path, tuple(ink), math_font_path)
+    b = _cached_box(latex, size_px, font_path, tuple(ink), math_font_path, display)
     img.alpha_composite(b.image, (int(round(x)), int(round(baseline - b.baseline))))
     return b.width
 
