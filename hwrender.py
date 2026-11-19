@@ -96,6 +96,7 @@ class Hand:
         self._char_seen = {}          # 字符 -> 已出现次数（决定下一次用哪套）
         self._cmap_cache = {}         # 字体路径 -> Unicode 覆盖集合
         self.symbol_font_path = symbol_font_path or self._pick_symbol_font(font_path)
+        self._variants_active = True  # 风格一致性护栏，见 _check_style_consistency
 
     def _pick_symbol_font(self, font_path):
         """挑一份「肯定含数学符号」的字体，供缺字时兜底。
@@ -131,7 +132,12 @@ class Hand:
         返回 None 表示沿用引擎默认的 _font_for(ch)（不启用同字多形）。
         拉丁字母/数字默认不参与循环：引擎专门让它们走 math_font_path 的硬笔
         写法以避免毛笔连笔刷体，这里不能把那条调参覆盖掉。
+
+        注意：字库覆盖率不足时会被 _check_style_consistency 整体关掉——
+        混排毛笔体（主字体）与硬笔体（ZTi）会明显风格割裂。
         """
+        if not self._variants_active:
+            return None
         if ch.isascii() and ch.isalnum():
             return None
         n = self._char_seen.get(ch, 0)
@@ -143,12 +149,44 @@ class Hand:
             if c is None or cp in c:
                 usable.append(p)
         if not usable:
-            # 所有套都缺这个字（用户字表没覆盖）：回退到全字表保底字体，
-            # 否则会渲染出豆腐块。
+            # 所有套都缺这个字：回退到全字表保底字体，否则会渲染出豆腐块。
             fb = self.symbol_font_path
             fc = self._cmap(fb)
             usable = [fb if (fc is None or cp in fc) else self.font_path]
         return usable[n % len(usable)]
+
+    def _check_style_consistency(self, text, threshold=0.75):
+        """风格一致性护栏：字库风格不符或覆盖率不足时关掉多套循环。
+
+        两道检查，风格指纹在前（更根本）：
+        1. **风格指纹**：校准只能统一色号/粗细/字号，改不了书写工具。
+           毛笔体的笔画有粗细起伏、墨迹占比高；硬笔体是等宽线、墨迹占比低。
+           实测马善政 vs ZTi：笔画宽只有 0.36–0.45 倍、墨迹占比 0.29–0.41 倍，
+           放大+膨胀只会得到「变粗的硬笔线」，风格照样割裂。
+        2. **覆盖率**：ZTi 只覆盖 137 个汉字，未覆盖的字回退到主字体，同样割裂。
+
+        任何一项不通过就整体退回单套（保持风格统一）。
+        """
+        if len(self.variant_fonts) <= 1:
+            self._variants_active = False
+            self.style_note = "单套模式"
+            return 0.0
+
+        # 1) 风格指纹：与主字体不是同一种书写工具就拒绝混排
+        for p in self.variant_fonts[1:]:
+            ok, why = fontcal.style_compatible(self.font_path, p)
+            if not ok:
+                self._variants_active = False
+                self.style_note = "%s %s，已退回单套" % (os.path.basename(p), why)
+                return 0.0
+
+        # 2) 覆盖率
+        cov = fontcal.coverage(self.variant_fonts, text)
+        self._variants_active = cov >= threshold
+        self.style_note = ("多套循环（覆盖率 %.0f%%）" % (cov * 100)
+                           if self._variants_active
+                           else "覆盖率仅 %.0f%%，已退回单套" % (cov * 100))
+        return cov
 
     def reset_variants(self):
         """清空同字多形出现计数（同一 Hand 渲染多篇独立文档时调用）。"""
@@ -325,10 +363,14 @@ class Hand:
     def _advance(self, ch, px):
         """单字前进宽度（px）。拉丁字母/数字走 math_font_path，汉字走 font_path。
 
-        必须和 _font_for 保持一致：正文里 ASCII 用龙藏体渲染，若还按马善政量宽度，
-        字距会错位（马善政的拉丁是连笔刷体，宽度和龙藏差很多）。
+        必须和 _font_for / _char_tile 保持一致：
+        · 字体要一致（正文 ASCII 用龙藏体渲染，若按马善政量宽度字距会错位）
+        · 字号要一致（fontcal 会把某些字体放大 1.3–1.5 倍，advance 不跟着放大
+          就会出现「数字挤在一起」——实测 380V 的 3 和 8 几乎粘连）
         """
-        return _ttf(self._font_for(ch), int(round(px))).getlength(ch)
+        path = self._font_for(ch)
+        scale = fontcal.params_for(path).get("size_scale", 1.0)
+        return _ttf(path, max(4, int(round(px * scale)))).getlength(ch)
 
     def _text_width(self, s, px):
         return sum(self._advance(ch, px) for ch in s)
@@ -361,6 +403,8 @@ class Hand:
         if size_pt:
             self.size_pt = size_pt
         width_pt = width_pt or (PAGE_RIGHT_PT - PAGE_LEFT_PT)
+        # 风格一致性护栏：多套字库覆盖不到正文时关掉循环，避免毛笔/硬笔混排
+        self._check_style_consistency(text)
         lines = self.wrap(text, width_pt)
         px = self.size_pt * SCALE
         base_lh = DEFAULT_LINE_PT * SCALE
