@@ -368,14 +368,25 @@ class App:
         ch = max(50, self.canvas.winfo_height())
         img = self.last_image
         if self.cfg["page"]:
-            # 贴到 A4 白纸上，按 pt 比例摆放（页面 595×842pt，2 倍像素）
-            scale = 2
-            page = Image.new("RGBA", (595 * scale, 842 * scale), (255, 255, 255, 255))
-            page.alpha_composite(img, (int(64 * scale), int(226 * scale)))
+            # 贴到 A4 白纸上。**必须用和手写块相同的 SCALE**（4 px/pt）：
+            # 之前按 2 px/pt 建页面，把 4x 的块贴上去等于放大一倍，
+            # 右侧 28% 会溢出页面被切掉——这就是「显示不完整、明显截断」的原因。
+            k = H.SCALE
+            page = Image.new("RGBA", (int(595 * k), int(842 * k)), (255, 255, 255, 255))
+            page.alpha_composite(img, (int(64 * k), int(226 * k)))
             img = page.convert("RGB")
         zoom = float(self.var_zoom.get()) if hasattr(self, "var_zoom") else 0.0
         if zoom <= 0.001:
-            zoom = min(cw / img.width, ch / img.height)
+            # 自动：以「手写块本身」为准算缩放，页面模式下再限制不超过页面可视高度。
+            # 之前按整页算，4x 页面（2380×3368）会被缩到 17%，字小到看不清。
+            if self.cfg["page"] and self.last_image is not None:
+                bw, bh = self.last_image.size
+                fit_block = min(cw / bw, ch / bh) * 0.9
+                page_h = 842 * H.SCALE
+                fit_page = ch / page_h
+                zoom = min(fit_block, fit_page * 2.2)
+            else:
+                zoom = min(cw / img.width, ch / img.height)
         zoom = max(0.05, min(8.0, zoom))
         disp = img.resize((max(1, int(img.width * zoom)), max(1, int(img.height * zoom))),
                           Image.LANCZOS)
