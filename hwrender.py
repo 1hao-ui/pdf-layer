@@ -92,8 +92,9 @@ class Hand:
             scale=1.0 + r.uniform(-0.035, 0.035) * j,
             # 单字旋转要小：±1.2° 叠在整行剪切上会让字看起来「东倒西歪」
             rot=r.uniform(-0.22, 0.22) * j,
-            alpha=int(r.uniform(220, 255) if j > 0 else 240),
-            rgb=tuple(max(0, min(255, c + r.randint(-6, 6) * (1 if j > 0 else 0)))
+            # 墨色深浅抖动收窄：220–255 时同段落里有字明显偏淡，看起来「粗细不统一」
+            alpha=int(r.uniform(242, 255) if j > 0 else 250),
+            rgb=tuple(max(0, min(255, c + r.randint(-3, 3) * (1 if j > 0 else 0)))
                       for c in self.ink),
             adv_jit=r.uniform(-0.12, 0.12) * j,                # em
             seed=r.randrange(1 << 30),                         # 供符号笔迹采样用

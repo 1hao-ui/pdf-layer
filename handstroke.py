@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """handstroke.py — 把印刷体数学符号「笔迹化」。
 
 问题：`*-merged.ttf` 里的 Ω √ ≈ × ° ∑ π φ 等字形是从 Segoe UI Symbol 搬来的**印刷体轮廓**，
@@ -42,12 +42,18 @@ STYLE = TrajectoryStyle(
     supersample=3,
 )
 
-# 笔宽相对字号的比值。手写笔道比印刷笔画粗，太细会像细线稿、不像笔。
-_WIDTH_RATIO = 0.068
+# 笔宽相对字号的比值。手写笔道比印刷笔画粗，但太粗会和正文毛笔体脱节：
+# 实测 0.068 时符号笔画中位游程 5–7px，而汉字只有 3–5px，符号看起来更「重」。
+# 0.052 落到 4–5px，与正文一致。
+_WIDTH_RATIO = 0.052
 
 # render_strokes 内部会留 4.5% 的内边距，这里反向补偿，保证符号大小与字面一致
 _FIT = 1.0 / (1.0 - 2 * 0.045)
 _TILE_PAD = 6
+
+# 墨色浓度补偿（alpha 伽马，越小越实）：把符号/公式的墨色补到与正文汉字一致
+_SYMBOL_GAMMA = 0.68
+FORMULA_GAMMA = 0.50
 
 
 @lru_cache(maxsize=256)
@@ -142,6 +148,8 @@ def tile(ch, size_px, ink, font_path, seed=0):
     stroke_w = max(1.2, size_px * _WIDTH_RATIO)
     glyph = render_strokes(strokes, box_w, box_h, stroke_w, ink, rng, STYLE,
                            em_size=size_px)
+    # 墨色补到正文水平（符号原本平均 alpha≈139，正文汉字≈170）
+    glyph = _alpha_boost(glyph, _SYMBOL_GAMMA)
 
     layout_w = max(1, int(round(font_layout_width(font_path, ch, size_px))))
     canvas_w = max(layout_w, ink_w + 2 * _TILE_PAD)
@@ -162,6 +170,22 @@ def tile(ch, size_px, ink, font_path, seed=0):
 def font_layout_width(font_path, ch, size_px):
     font = ImageFont.truetype(font_path, size_px)
     return font.getlength(ch)
+
+
+def _alpha_boost(img, gamma):
+    """保形提亮 alpha：gamma < 1 时中间调变实，形状/边缘抗锯齿不变。
+
+    为什么需要：正文汉字来自马善政毛笔体，笔画本身浓（平均 alpha≈170）；
+    符号是「骨架 + 变宽笔道」重绘、公式走另一套引擎的 alpha 调制，二者墨色都偏淡
+    （实测符号≈139、公式≈110），放在一起就是「粗细不统一」。
+    用 alpha 伽马把它们的浓度补到同一水平，比加粗笔画更自然（不会把字变胖）。
+    """
+    if abs(gamma - 1.0) < 1e-6:
+        return img
+    lut = [min(255, int(round(255.0 * (i / 255.0) ** gamma))) for i in range(256)]
+    out = img.copy()
+    out.putalpha(img.getchannel("A").point(lut))
+    return out
 
 
 def _draw_text(glyph, x, y, char, font, ink):

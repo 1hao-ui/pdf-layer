@@ -88,6 +88,10 @@ def _ensure_engine(font_path, size_px, ink, math_font_path=None):
             math_font_pt=size_px / 4.0,
             sdt_trajectory_enabled=False,     # 不依赖 SDT 轨迹包
             prefer_handright=False,           # 不依赖 handright
+            # 龙藏体笔画比正文马善政毛笔体细（实测平均 alpha 90–128 vs 130–150），
+            # 用字重倍率补到与正文一致，避免「公式看起来比正文淡」。
+            stroke_weight_base_scale=1.22,
+            ink_density_jitter=0.04,          # 墨浓淡抖动减半，减少逐字深浅差异
         )
         _engine = HandwritingEngine(cfg, reference_size_px=int(size_px),
                                     math_reference_size_px=int(size_px))
@@ -102,7 +106,14 @@ def _ensure_engine(font_path, size_px, ink, math_font_path=None):
 def _box(latex, size_px, font_path, ink, math_font_path=None):
     r = _ensure_engine(font_path, size_px, ink, math_font_path)
     # max_width 给足：公式自身的换行交给 hwrender 的 wrap 处理
-    return r.render_inline(latex, int(round(size_px)), 100000)
+    box = r.render_inline(latex, int(round(size_px)), 100000)
+    # 公式墨色比正文淡（实测平均 alpha≈110 vs 汉字≈170），提亮到同一水平
+    import handstroke
+    boosted = handstroke._alpha_boost(box.image, handstroke.FORMULA_GAMMA)
+    if boosted is not box.image:
+        from mthw.math_renderer import MathBox
+        box = MathBox(boosted, box.baseline)
+    return box
 
 
 @lru_cache(maxsize=512)
