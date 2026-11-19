@@ -105,6 +105,9 @@ def make_hand(han_font, size_pt=None, seed=20261118, weights=None,
                 return None
             if "\u4e00" <= ch <= "\u9fff":      # 汉字交给 han_font
                 return None
+            # 按权重**随机**挑一套，而不是 n % len 的确定性循环。
+            # 循环的问题：pass2,pass2,pass2,pass3,pass3,pass4,pass4,pass1 严格重复，
+            # 同一个字连续出现时字形变化是周期性的，看起来像「没随机」。
             n = self._char_seen.get(ch, 0)
             self._char_seen[ch] = n + 1
             cp = ord(ch)
@@ -112,7 +115,9 @@ def make_hand(han_font, size_pt=None, seed=20261118, weights=None,
                       if (c := self._cmap(p)) is None or cp in c]
             if not usable:
                 return None
-            return usable[n % len(usable)]
+            if len(usable) == 1:
+                return usable[0]
+            return self.rng.choice(usable)
 
     return _SymHand()
 

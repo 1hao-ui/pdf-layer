@@ -678,14 +678,17 @@ class Hand:
                 continue
             ch = val
             if _formula_ready(ch):
-                # 走公式渲染：与 $...$ 同源，粗细墨色一致
+                # 走公式渲染：与 $...$ 同源，粗细墨色一致。
+                # 关键：把轮换选中的那套字体传给公式层，否则公式固定用
+                # math_font_path（pass2），4 套轮换等于没生效。
                 tex = _tex_char(ch)
+                used_f = self._variant_for(ch) or self.math_font_path
                 fw, _fa, _fd = formula.measure(tex, px, self.font_path, self.ink,
-                                               self.math_font_path)
+                                               used_f)
                 if x < right:
                     x = right
                 formula.draw(img, tex, x, baseline, px, self.font_path, self.ink,
-                             self.math_font_path)
+                             used_f)
                 right = x + fw
                 x += fw
                 continue
