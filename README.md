@@ -12,6 +12,7 @@
 | 字迹合成 | 中文手写字体 + 逐字扰动（基线/字号/旋转/墨色）+ 整行正弦弯曲 | ✅ |
 | 字形合并 | 把数学符号并入中文手写字体，消除「中文手写 + 符号印刷体」混排 | ✅ |
 | 公式排版 | 分式、根式、上下标、∑/∫ 上下限、矩阵、cases、自适应括号 | ✅ |
+| **Z体** | 作者本人的手写笔迹字库，同一个字有最多 4 种不同写法 | ✅ 见下文 |
 | 版面分析 | 自动定位空白区、碰撞检测 | ❌ 未做，坐标目前手工给 |
 | 笔迹轨迹合成 | RNN/笔画中心线变宽描边 | ❌ 二期 |
 
@@ -53,6 +54,80 @@ H.paste_into_pdf("src.pdf", "out.pdf", {0: [(img, 226, w_pt, h_pt)]})
 `cases`、`\left( \right)` 自适应括号、希腊字母、`\mathrm{}`、`\text{}`（可夹中文）。
 不支持：自定义宏包、`\newcommand`、TikZ。
 
+## Z体（ZTi）— 作者手写笔迹字库
+
+`fonts/ZTi/` 是本项目自带的**真人笔迹字库**：字形全部来自作者本人的手写，
+不是开源手写字体，也不是合成笔迹。字体家族名中文 **「Z体」**、英文 **ZTi**，
+8 个文件同属一个家族，用 style 区分套次。
+
+同一个字有多套不同形态时，`Hand` 会按「该字在本段里第几次出现」循环切换字库，
+于是重复字不会每次长得一模一样——这是真人手写的自然特征。
+
+| 子系列 | 文件 | 来源 | 覆盖 | 形态 |
+|---|---|---|---|---|
+| 主字库 | `ZTi-01.otf` … `ZTi-04.otf` | 用[字嗨](https://buttaiwan.github.io/writemyfont/)把同一张字表**亲笔写 4 遍**导出 | 35 个汉字 | **每字 4 个不同形态** |
+| 扩充库 | `ZTi-Scan-01.ttf` … `ZTi-Scan-04.ttf` | 14 张平时写的真实手稿扫描、切字、轮廓化 | 115 个汉字 | 高频字 4 形态，其余为单形态复用 |
+
+两系列并集 **137 个汉字**。字表清单与逐字形态数见 `fonts/ZTi/CHARS.txt`。
+
+| 主字库（字嗨亲写 4 遍） | 扩充库（真实手稿切字） |
+|---|---|
+| ![Z体主字库](fonts/ZTi/preview_hand.png) | ![Z体扩充库](fonts/ZTi/preview_scan.png) |
+
+### 用法
+
+**推荐：只用主字库 4 套**，风格统一、每个字都有 4 个形态：
+
+```python
+import glob
+import hwrender as H
+
+fonts = sorted(glob.glob("fonts/ZTi/ZTi-0*.otf"))     # 4 套
+hand = H.Hand(fonts[0], variant_fonts=fonts[1:], seed=20261118)
+img, w_pt, h_pt = hand.render_block("三相电路中，电压等于电流乘以电阻。", width_pt=404)
+```
+
+想把覆盖字数拉满，可以把 8 套一起挂上（`variant_fonts` 全部传入）。
+代价是两种来源笔迹风格不同，同段里可能看得出「换了一支笔」：
+
+```python
+fonts = sorted(glob.glob("fonts/ZTi/*.otf") + glob.glob("fonts/ZTi/*.ttf"))
+hand = H.Hand(fonts[0], variant_fonts=fonts[1:])
+```
+
+也可以直接用现成工具自检、出对照样张：
+
+```powershell
+python multifont.py check  --fonts fonts/ZTi --expect 8
+python multifont.py render --fonts fonts/ZTi
+```
+
+`check` 必须带 `--expect 8`（默认按 4 套校验）。输出里会看到
+「set 5–8 vs set 1: 135 chars differ」，这是两套来源字表不同所致，属预期；
+末尾 `RESULT: PASS` 即表示 8 套都能被 Pillow 正常加载。
+
+### 缺字与边界
+
+- Z体 只覆盖常用正文用字，**不是全字表字体**。缺字时引擎自动回退到
+  `*-merged.ttf`（四款 OFL 手写体），不会显示豆腐块；符号、拉丁字母与数字
+  同样走回退字体。想让某段完全由 Z体 写出，需先把它包含的字加进字表。
+- 公式里的 `$...$` 由独立公式层渲染，不走 Z体。
+- 扩充库来自连笔行书手稿，少数切字块边缘保留了邻字残影（预览中「平」带
+  「台」等），属已知限制；对观感要求高时请只用主字库。
+- `python pack_ziti.py` 可从私人原件重建发布包：`fonts/user/pass*.otf`
+  与 `out/my_ziti/fonts/pass*.ttf`。脚本只重写字体名（name 表 / CFF
+  topDict），**不改任何字形轮廓**，并会逐字形断言轮廓、cmap、hmtx 一致。
+  这两个源目录属私人资产，已在 `.gitignore` 中排除，不在本仓库内。
+
+### 权利
+
+Z体 是作者本人手写笔迹的数字化成果，**版权归作者所有，保留所有权利**
+（Proprietary / All rights reserved），随本仓库公开仅供本项目使用与展示，
+**未授予再分发或商用许可**。字体文件的 name 表已写入相应版权与授权声明。
+
+> ⚠️ 本仓库为**公开仓库**。字库一经推送，笔迹轮廓即进入 Git 历史，
+> 即便后续删除也仍可从历史或 fork 中取得，无法真正撤回。
+
 ## 实现要点
 
 - **坐标单位**：外部一律 pt，内部 `SCALE=4` 超采样（1pt=4px）。
@@ -84,8 +159,12 @@ handstroke.py      符号笔迹化（骨架提取 + 变宽笔道重绘）
 formula.py         公式层适配器（复用 vendor/mthw，改符号映射，带缓存）
 merge_symbols.py   把数学符号字形并入中文手写字体
 fetch_fonts.ps1    下载字体并触发合并
+multifont.py       多套真人笔迹字库：字表生成 / 自检 / 同字多形对照样张
+scanfont.py        手写稿扫描造字：模板 / 切分 / 生成 TTF / 自测
+pack_ziti.py       把私人笔迹原件打包成公开发布的「Z体」字库
 demo.py            端到端演示（合成页面 → 手写层 → 注回 PDF）
 preview.py         不依赖 PyMuPDF 的预览（输出 PNG）
+fonts/ZTi/         Z体 字库（8 套）+ 字表清单 + 预览样张
 vendor/mthw/       第三方公式排版内核（MIT，见 vendor/LICENSE-MarkdownToHandwrite）
 docs/交接说明.md   项目背景、调研结论、计算口径与 TODO
 STATUS.md          当前进度与已知阻塞

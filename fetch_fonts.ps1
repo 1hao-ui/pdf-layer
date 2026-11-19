@@ -6,10 +6,10 @@ New-Item -ItemType Directory -Force -Path $dir | Out-Null
 
 # 名 -> @(CDN 路径, 期望字节数)
 $fonts = @(
-    @{ f = 'MaShanZheng-Regular.ttf';  u = 'https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/mashanzheng/MaShanZheng-Regular.ttf';  size = 5857936 },
-    @{ f = 'LongCang-Regular.ttf';     u = 'https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/longcang/LongCang-Regular.ttf';        size = 5162508 },
-    @{ f = 'LiuJianMaoCao-Regular.ttf';u = 'https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/liujianmaocao/LiuJianMaoCao-Regular.ttf'; size = 4951804 },
-    @{ f = 'ZhiMangXing-Regular.ttf';  u = 'https://cdn.jsdelivr.net/gh/google/fonts@main/ofl/zhimangxing/ZhiMangXing-Regular.ttf';  size = 4063532 }
+    @{ f = 'MaShanZheng-Regular.ttf';  u = 'https://fastly.jsdelivr.net/gh/google/fonts@main/ofl/mashanzheng/MaShanZheng-Regular.ttf';  size = 5857936 },
+    @{ f = 'LongCang-Regular.ttf';     u = 'https://fastly.jsdelivr.net/gh/google/fonts@main/ofl/longcang/LongCang-Regular.ttf';        size = 5162508 },
+    @{ f = 'LiuJianMaoCao-Regular.ttf';u = 'https://fastly.jsdelivr.net/gh/google/fonts@main/ofl/liujianmaocao/LiuJianMaoCao-Regular.ttf'; size = 4951804 },
+    @{ f = 'ZhiMangXing-Regular.ttf';  u = 'https://fastly.jsdelivr.net/gh/google/fonts@main/ofl/zhimangxing/ZhiMangXing-Regular.ttf';  size = 4063532 }
 )
 
 foreach ($it in $fonts) {
@@ -18,7 +18,9 @@ foreach ($it in $fonts) {
         Write-Host ("skip  {0} (already {1} bytes)" -f $it.f, $it.size); continue
     }
     Write-Host ("get   {0}" -f $it.f)
-    # 必须走 CDN：raw.githubusercontent 会超时截断，cmap 校验直接报错
+    # 必须走 CDN：raw.githubusercontent 会超时截断，cmap 校验直接报错。
+    # 用 fastly.jsdelivr.net：实测 cdn.jsdelivr.net 在部分网络被连接重置，
+    # fastly 是 jsDelivr 官方备用域名，内容一致、可正常拉取大文件。
     Invoke-WebRequest -Uri $it.u -OutFile $p -TimeoutSec 180
     $n = (Get-Item $p).Length
     if ($n -ne $it.size) {
@@ -28,4 +30,4 @@ foreach ($it in $fonts) {
 
 Write-Host 'merge symbols...'
 python (Join-Path $PSScriptRoot 'merge_symbols.py')
-Write-Host 'done. 产物： fonts/*-merged.ttf'
+Write-Host 'done. -> fonts/*-merged.ttf'
