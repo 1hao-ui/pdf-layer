@@ -4,94 +4,82 @@
   "ascii_sample": "0123456789",
   "ascii_height_ratio": 0.86,
   "base": "MaShanZheng-Regular-merged.ttf",
+  "note": "只做字号对齐；墨色/粗细/清晰度不校准",
   "fonts": {
     "MaShanZheng-Regular-merged.ttf": {
       "size_scale": 1.0,
-      "alpha_gain": 1.0,
-      "alpha_gamma": 1.0,
-      "thicken": 0.0,
       "dy": 0.0,
       "dx": 0.0
     },
     "LongCang-Regular-merged.ttf": {
-      "size_scale": 1.5164,
-      "alpha_gain": 0.9768,
-      "alpha_gamma": 1.0,
-      "thicken": 0.0,
+      "size_scale": 1.5145,
       "dy": 0.0,
       "dx": -1.0
     },
     "ZhiMangXing-Regular-merged.ttf": {
       "size_scale": 1.15,
-      "alpha_gain": 0.9882,
-      "alpha_gamma": 1.0,
-      "thicken": 0.0,
       "dy": -1.5,
       "dx": 0.5
     },
     "ZTi-01.otf": {
-      "size_scale": 1.5256,
-      "alpha_gain": 1.049,
-      "alpha_gamma": 1.0,
-      "thicken": 0.8,
+      "size_scale": 1.5862,
       "dy": 0.5,
       "dx": -0.5
     },
     "ZTi-02.otf": {
-      "size_scale": 1.4441,
-      "alpha_gain": 1.076,
-      "alpha_gamma": 1.0,
-      "thicken": 0.8,
+      "size_scale": 1.5333,
       "dy": 1.5,
       "dx": -2.0
     },
     "ZTi-03.otf": {
-      "size_scale": 1.3826,
-      "alpha_gain": 1.0804,
-      "alpha_gamma": 1.0,
-      "thicken": 0.8,
+      "size_scale": 1.4375,
       "dy": -1.5,
       "dx": 1.0
     },
     "ZTi-04.otf": {
-      "size_scale": 1.3795,
-      "alpha_gain": 1.1221,
-      "alpha_gamma": 1.0,
-      "thicken": 0.8,
+      "size_scale": 1.4694,
       "dy": 1.5,
       "dx": -1.5
     },
     "ZTi-Scan-01.ttf": {
-      "size_scale": 1.339,
-      "alpha_gain": 1.0679,
-      "alpha_gamma": 1.0,
-      "thicken": 0.75,
+      "size_scale": 1.4263,
       "dy": -1.5,
       "dx": 10.5
     },
     "ZTi-Scan-02.ttf": {
-      "size_scale": 1.3479,
-      "alpha_gain": 1.0442,
-      "alpha_gamma": 1.0,
-      "thicken": 0.6,
+      "size_scale": 1.3939,
       "dy": -1.5,
       "dx": 12.0
     },
     "ZTi-Scan-03.ttf": {
-      "size_scale": 1.3907,
-      "alpha_gain": 1.089,
-      "alpha_gamma": 1.0,
-      "thicken": 0.9,
+      "size_scale": 1.4375,
       "dy": -2.0,
       "dx": 10.0
     },
     "ZTi-Scan-04.ttf": {
-      "size_scale": 1.3368,
-      "alpha_gain": 1.1059,
-      "alpha_gamma": 1.0,
-      "thicken": 0.9,
+      "size_scale": 1.3529,
       "dy": -1.0,
       "dx": 9.5
+    },
+    "pass1.ttf": {
+      "size_scale": 1.1389,
+      "dy": 0.0,
+      "dx": 0.0
+    },
+    "pass2.ttf": {
+      "size_scale": 1.2827,
+      "dy": 0.0,
+      "dx": 0.25
+    },
+    "pass3.ttf": {
+      "size_scale": 1.3512,
+      "dy": 0.0,
+      "dx": 0.5
+    },
+    "pass4.ttf": {
+      "size_scale": 1.2654,
+      "dy": 0.0,
+      "dx": 0.5
     }
   }
 }
