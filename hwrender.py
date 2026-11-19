@@ -55,6 +55,11 @@ _SUB_DROP = 0.12           # 下标基线下移量（em）
 _RAISE_CHARS = "⁰¹²³⁴⁵⁶⁷⁸⁹°′″ⁿ˚"
 _RAISE_EM = 0.38
 
+# 贴底标点：它们没有「字高」概念，只需坐在基线附近。
+# 不能参与逐字高度闭环——闭环会把它们放大，底边跟着上移，
+# 句号就会从底部浮到中间（用户反馈「句号没贴着底部」）。
+_BOTTOM_MARKS = "。，、．,.;:…·"
+
 # 纯文本里哪些字符改用公式渲染（与 $...$ 完全同源，保证粗细墨色一致）。
 # 汉字不走——公式引擎的汉字来自字体度量，和手写汉字库风格不搭。
 _FORMULA_CHARS = set(
@@ -276,7 +281,10 @@ class Hand:
         # 目标高度：主字体在该字号下这个字的墨迹高 × 0.86
         # （中文手写里数字/符号通常比汉字略小）
         target_h = None
-        if base != self.font_path:
+        # 贴底标点不做高度闭环（闭环会把它放大并把底边抬离基线，
+        # 句号就会从底部浮到中间）。但仍按主字体的墨迹高度做一次
+        # 静态缩放，保证大小与主字体一致。
+        if base != self.font_path and ch not in _BOTTOM_MARKS:
             try:
                 # 目标 = 主字体在**当前渲染字号 px** 下这个字的墨迹高 × 0.86。
                 # 注意用 px 而不是 px*size_scale：主字体的 size_scale 恒为 1，
@@ -287,6 +295,16 @@ class Hand:
                     cal["size_scale"] = cal["size_scale"] * fontcal.glyph_scale(base, ch)
             except Exception:
                 target_h = None
+        elif base != self.font_path and ch in _BOTTOM_MARKS:
+            # 贴底标点：只按墨迹高度做静态缩放，不闭环、不动位置
+            try:
+                ref_px = max(4, int(round(px)))
+                tgt = fontcal.ink_height_at(self.font_path, ch, ref_px)
+                cur = fontcal.ink_height_at(base, ch, ref_px)
+                if tgt and cur:
+                    cal["size_scale"] = cal["size_scale"] * (tgt / cur)
+            except Exception:
+                pass
 
         boost = 1.0
         tile = None
