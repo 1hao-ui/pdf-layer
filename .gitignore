@@ -1,5 +1,9 @@
 fonts/*.ttf
 fonts/*.otf
+# 用户手写笔迹字库：私人资产，不入库
+fonts/user/
 out/*
 __pycache__/
 *.pyc
+# 本地工作区数据（记忆、审查副本），不入库
+.workbuddy/
