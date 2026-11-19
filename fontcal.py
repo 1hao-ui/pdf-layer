@@ -158,6 +158,11 @@ def calibrate(fonts, base_font, save=True, rounds=3):
             c["alpha_gamma"] = max(0.6, min(1.0, 1.0 / (ratio ** 0.3)))
         c["dy"] = base["dy"] - m["dy"]
         c["dx"] = base["dx"] - m["dx"]
+        # 只渲染 ASCII 的字体（龙藏体）不做垂直补偿：
+        # 数字应严格坐在基线上，按「墨迹中心对齐」反而会把数字推离基线
+        # （实测下沉 14px、顶部比汉字低 24px）。基线由字号缩放自然对齐即可。
+        if sample is SAMPLE_ASCII or os.path.basename(path) in ASCII_FONTS:
+            c["dy"] = 0.0
 
         # 闭环：只迭代字号/墨色/笔画（三者互相影响）。位置必须在固定字号下测，
         # 否则字号一变基线跟着变，误差会累积放大（实测 dy 会涨到 40+ px）。

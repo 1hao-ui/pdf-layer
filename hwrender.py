@@ -258,7 +258,12 @@ class Hand:
             if cur_adv > 0 and abs(cur_adv - base_adv) > 0.5:
                 pad_x = (base_adv - cur_adv) / 2.0
                 l = l + pad_x
-        return fontcal.finish_tile(img, pad - l, pad - t, cal)
+        # 关键：贴图的 ox/oy 是「相对笔位」的偏移，调用方用原始字号的 ascent 去减。
+        # 但上面的 size 已乘过 size_scale，l/t 是按放大后的字号量的，
+        # 直接返回会让字形整体下移（实测数字下沉 14px、顶部比汉字低 24px）。
+        # 这里把偏移按 size_scale 折回原始字号比例，保持基线一致。
+        s = cal["size_scale"] if cal["size_scale"] > 0 else 1.0
+        return fontcal.finish_tile(img, (pad - l) / s, (pad - t) / s, cal)
 
     def _font_for(self, ch):
         """拉丁字母/数字用「正常人笔写」的字体，汉字用毛笔手写体。
@@ -432,23 +437,30 @@ class Hand:
         gaps = [int(round(self.rng.uniform(-0.9, 0.9) * self.jitter))
                 for _ in lines]
 
-        # 画布先给足（标点悬挂会略超列宽，抖动还有随机外扩），渲染后按墨迹裁边
-        need = max([m[0] for m in metrics] + [width_pt * SCALE])
-        W = int(math.ceil(need * 1.06 + 8))
+        # 画布先给足：估算宽度不可靠（逐字扰动让实际墨迹比估算宽 1–4pt，
+        # 防重叠右推还会继续外扩）。所以渲染后检查「墨迹是否顶到画布右缘」，
+        # 顶到就加宽重画——宁可多画一次，也不能把行末的字切掉半个。
+        est = max([m[0] for m in metrics] + [width_pt * SCALE])
+        W = int(math.ceil(est + 0.02 * px * 8 + 24))
         H = max(1, sum(heights) + sum(gaps))
-        canvas = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-
-        y = 0
-        for i, line in enumerate(lines):
-            if line:
-                canvas.alpha_composite(
-                    self._render_line(line, font, px, baselines[i], W / SCALE, heights[i]),
-                    (0, y))
-            y += heights[i] + gaps[i]
-        out = canvas.crop((0, 0, W, min(H, y)))
-        bb = out.getbbox()
+        for _ in range(3):
+            canvas = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+            y = 0
+            for i, line in enumerate(lines):
+                if line:
+                    canvas.alpha_composite(
+                        self._render_line(line, font, px, baselines[i], W / SCALE,
+                                          heights[i]),
+                        (0, y))
+                y += heights[i] + gaps[i]
+            out = canvas.crop((0, 0, W, min(H, y)))
+            bb = out.getbbox()
+            if not bb or bb[2] < W - 1:      # 没顶到右缘，说明没被裁
+                break
+            W += 48                          # 顶到了，加宽重画
         if bb:
-            out = out.crop((0, 0, min(out.width, bb[2] + 2), out.height))
+            # 右侧留 6px 白边：贴着画布边缘会被误看成「字被切了」
+            out = out.crop((0, 0, min(out.width, bb[2] + 6), out.height))
         return out, out.size[0] / SCALE, out.size[1] / SCALE
 
     def _render_line(self, line, font, px, baseline, width_pt, line_h):
