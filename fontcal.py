@@ -25,6 +25,7 @@ import os
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CAL_PATH = os.path.join(HERE, "fonts", "fontcal.json")
+GLYPH_CAL_PATH = os.path.join(HERE, "fonts", "fontcal_glyph.json")
 
 REF_PX = 54
 SAMPLE = "相电压功率流生电的"          # CJK 样本
@@ -186,6 +187,81 @@ def load():
     except Exception:
         _cache = {}
     return _cache
+
+
+_glyph_cache = None
+
+
+def load_glyph_table():
+    """读逐字校准表 {字体名: {字符: 缩放}}；没有则返回空。"""
+    global _glyph_cache
+    if _glyph_cache is not None:
+        return _glyph_cache
+    try:
+        with open(GLYPH_CAL_PATH, encoding="utf-8") as fp:
+            _glyph_cache = json.load(fp).get("fonts", {})
+    except Exception:
+        _glyph_cache = {}
+    return _glyph_cache
+
+
+def glyph_scale(path, ch):
+    """取某字体下某个字符的逐字缩放系数；没有则 1.0。
+
+    注意：系数是在参考字号下测的，实际渲染字号不同时会有偏差
+    （抗锯齿让墨迹高度非线性）。调用方若需要精确对齐，
+    应使用 glyph_scale_at(path, ch, px, target_h)。
+    """
+    if not path:
+        return 1.0
+    tab = load_glyph_table().get(os.path.basename(path))
+    if not tab:
+        return 1.0
+    return float(tab.get(ch, 1.0))
+
+
+_ink_h_cache = {}
+
+
+def ink_height_at(path, ch, px):
+    """在指定字号下量字符的墨迹高度（px）。"""
+    key = (os.path.basename(path), ch, int(px))
+    if key in _ink_h_cache:
+        return _ink_h_cache[key]
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+        f = ImageFont.truetype(path, max(4, int(px)))
+        bb = f.getbbox(ch)
+        if bb is None:
+            return None
+        w = max(1, bb[2] - bb[0]) + 16
+        h = max(1, bb[3] - bb[1]) + 16
+        im = Image.new("L", (w, h), 0)
+        ImageDraw.Draw(im).text((8 - bb[0], 8 - bb[1]), ch, fill=255, font=f)
+        bb2 = im.getbbox()
+        val = (bb2[3] - bb2[1]) if bb2 else None
+    except Exception:
+        val = None
+    _ink_h_cache[key] = val
+    return val
+
+
+def glyph_scale_at(path, ch, px, target_h):
+    """在实际字号下闭环修正缩放，使墨迹高度逼近 target_h。
+
+    参考字号下算出的系数搬到别的字号会偏（抗锯齿非线性），
+    这里直接在当前字号上迭代两次，保证真正对齐。
+    """
+    base = glyph_scale(path, ch)
+    if not target_h or target_h <= 0:
+        return base
+    k = base
+    for _ in range(2):
+        h = ink_height_at(path, ch, max(4, px * k))
+        if not h:
+            break
+        k *= target_h / h
+    return max(0.5, min(2.0, k))
 
 
 def params_for(path):

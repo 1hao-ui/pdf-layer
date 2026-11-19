@@ -111,12 +111,76 @@ def _ensure_engine(font_path, size_px, ink, math_font_path=None):
         return _renderer
 
 
+def _formula_scale(font_path, size_px, math_font_path):
+    """算公式引擎该用多大字号，才能让公式里的字和正文一样高。
+
+    早先用固定倍数 MATH_SIZE_COMP=1.65，那是为马善政（毛笔体字形偏小）设的。
+    换成手写符号字库后字高本来就接近汉字，再乘 1.65 就明显偏大——
+    实测公式里 380 高 59px、纯文本 380 高 43px（+37%）。
+
+    这里改成实测反推：量「主字体在当前字号下某个汉字的墨迹高」，
+    再量「公式引擎在参考字号下同类字符的墨迹高」，两者比值就是需要的倍数。
+    """
+    try:
+        import fontcal
+        from PIL import ImageFont
+        # 目标高度：主字体该字号下「国」的墨迹高 × 0.86（数字/符号略小于汉字）
+        tgt = fontcal.ink_height_at(font_path, "国", max(4, int(round(size_px))))
+        if not tgt:
+            return MATH_SIZE_COMP
+        # 公式引擎在参考字号下渲染「0」，量出实际墨迹高
+        probe_px = max(8, int(round(size_px)))
+        f = ImageFont.truetype(math_font_path or font_path, probe_px)
+        bb = f.getbbox("0")
+        if not bb:
+            return MATH_SIZE_COMP
+        got = bb[3] - bb[1]
+        if got <= 0:
+            return MATH_SIZE_COMP
+        # 需要的倍数（乘 1.0 是因为引擎内部按 size_px 直接用）
+        k = (tgt * 0.86) / got
+        return max(0.8, min(2.2, k))
+    except Exception:
+        return MATH_SIZE_COMP
+
+
 def _box(latex, size_px, font_path, ink, math_font_path=None, display=False):
     r = _ensure_engine(font_path, size_px, ink, math_font_path)
-    # 字号补偿：公式内核的度量体系与 PIL 字号不同，直接传 size_px 时公式主字符
-    # 只有汉字的 62% 高（实测 28px vs 45px），看起来「又小又糊又粗」。
-    # 1.65 倍后字高与汉字齐平（45px vs 45px）。
-    px = int(round(size_px * MATH_SIZE_COMP))
+    k = _formula_scale(font_path, size_px, math_font_path)
+    box = _render_at(r, latex, size_px, k, display)
+    # 闭环：公式里可能混着上下标/分式/大运算符，单靠一次反推不够准。
+    # 量「纯数字类公式」的墨迹高与正文对齐，差 8% 以上就调倍数重排。
+    try:
+        import fontcal
+        tgt = fontcal.ink_height_at(font_path, "国", max(4, int(round(size_px))))
+        if tgt:
+            want = tgt * 0.86
+            for _ in range(2):
+                bb = box.image.getbbox()
+                if not bb:
+                    break
+                got = bb[3] - bb[1]
+                # 只对「矮公式」做闭环：含分式/根号的本来就该更高
+                if got <= 0 or got > want * 1.6:
+                    break
+                ratio = want / got
+                if abs(ratio - 1.0) <= 0.08:
+                    break
+                k = max(0.8, min(2.2, k * ratio))
+                box = _render_at(r, latex, size_px, k, display)
+    except Exception:
+        pass
+    # 公式墨色比正文淡，提亮到同一水平
+    import handstroke
+    boosted = handstroke._alpha_boost(box.image, handstroke.FORMULA_GAMMA)
+    if boosted is not box.image:
+        from mthw.math_renderer import MathBox
+        box = MathBox(boosted, box.baseline)
+    return box
+
+
+def _render_at(r, latex, size_px, k, display):
+    px = int(round(size_px * k))
     if display:
         # 大型运算式：走 display 布局，∑ ∫ 的上下限才会「上下堆叠」而不是侧挂，
         # 分式/根号也会按 display 尺寸放大。
@@ -124,12 +188,6 @@ def _box(latex, size_px, font_path, ink, math_font_path=None, display=False):
             _parse_display(latex), px, "display", display_style=True)
     else:
         box = r.render_inline(latex, px, 100000)
-    # 公式墨色比正文淡（实测平均 alpha≈110 vs 汉字≈170），提亮到同一水平
-    import handstroke
-    boosted = handstroke._alpha_boost(box.image, handstroke.FORMULA_GAMMA)
-    if boosted is not box.image:
-        from mthw.math_renderer import MathBox
-        box = MathBox(boosted, box.baseline)
     return box
 
 

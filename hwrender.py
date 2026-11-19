@@ -238,20 +238,58 @@ class Hand:
         )
 
     def _char_tile(self, ch, px, p, font_path=None):
-        # 同字多形传入的变体字库优先；不传则沿用引擎的 _font_for(ch)
-        # （拉丁字母/数字走硬笔字体，汉字走毛笔手写体）。
+        """生成单个字符的贴图，返回 (RGBA 图, ox, oy)。
+
+        同字多形时不同字库的同一字符高度差很大（实测 13~31%），
+        轮换起来像「忽大忽小」而不是「同字异形」。所以这里做**贴图闭环**：
+        画完量墨迹高度，与目标高度比，按比例调字号重画（最多 3 轮）。
+        这样只保留笔迹差异，大小严格统一。
+        """
         base = font_path or self._font_for(ch)
-        # 多套字库观感归一化：ZTi 系列实测比主字体小 35–60%、笔画细 2–3 倍、
-        # 墨色淡 30%，逐套按离线测得的系数校正字号/墨色/粗细/中心位置。
-        cal = fontcal.params_for(base)
-        # 符号原本给 1.15 倍补偿「字形偏小」，但实测合并进来的 Ω/∑/∫ 墨迹本来就
-        # 比汉字大 7–31%，再放大就是「符号比字还大」。改为不放大。
+        cal = dict(fontcal.params_for(base))
+
+        # 目标高度：主字体在该字号下这个字的墨迹高 × 0.86
+        # （中文手写里数字/符号通常比汉字略小）
+        target_h = None
+        if base != self.font_path:
+            try:
+                # 目标 = 主字体在**当前渲染字号 px** 下这个字的墨迹高 × 0.86。
+                # 注意用 px 而不是 px*size_scale：主字体的 size_scale 恒为 1，
+                # 拿放大后的字号去量会把目标抬高，闭环就会收敛到偏大。
+                tgt = fontcal.ink_height_at(self.font_path, ch, max(4, int(round(px))))
+                if tgt:
+                    target_h = tgt * 0.86
+                    cal["size_scale"] = cal["size_scale"] * fontcal.glyph_scale(base, ch)
+            except Exception:
+                target_h = None
+
         boost = 1.0
-        size = max(4, int(round(px * p["scale"] * boost * cal["size_scale"])))
-        # 合并字体里的数学符号是印刷体轮廓，走「骨架 → 变宽笔道」重绘，
-        # 才能和周围手写字迹看起来是同一支笔写出来的。
-        # 用户手写/扫描的字库往往没写数学符号，缺字时改用注入过符号的兜底字体，
-        # 否则会变豆腐块。
+        tile = None
+        ox = oy = 0.0
+        k = 1.0
+        for attempt in range(3):
+            size = max(4, int(round(px * p["scale"] * boost * cal["size_scale"] * k)))
+            tile, ox, oy = self._render_glyph_tile(ch, size, p, base, cal, px)
+            if tile is None:
+                return None, 0, 0
+            if target_h is None or attempt == 2:
+                break
+            bb = tile.getbbox()
+            if bb is None:
+                break
+            got = bb[3] - bb[1]
+            if got <= 0:
+                break
+            ratio = target_h / got
+            if abs(ratio - 1.0) <= 0.04:      # 差 4% 以内就够了
+                break
+            k *= ratio
+            k = max(0.5, min(2.5, k))
+        return tile, ox, oy
+
+    def _render_glyph_tile(self, ch, size, p, base, cal, px):
+        """按给定字号画一次贴图（不含量高闭环）。"""
+        # 合并字体里的数学符号是印刷体轮廓，走「骨架 → 变宽笔道」重绘
         if handstroke.available(ch):
             sym_path = base
             c = self._cmap(base)
@@ -275,21 +313,16 @@ class Hand:
         d.text((pad - l, pad - t), ch, font=f, fill=p["rgb"] + (p["alpha"],))
         if abs(p["rot"]) > 0.05:
             img = img.rotate(p["rot"], resample=Image.BICUBIC, expand=True)
-        # 多套字库的字形宽度与主字体不同（advance 按主字体算，保证行宽不漂移），
-        # 若按字体原点摆放，窄字形会贴着左边、视觉上字距不均。
-        # 这里把字形在「主字体 advance」内居中，让字距看起来均匀。
+        # 字形在「主字体 advance」内居中，避免字距忽紧忽松
         if cal["size_scale"] != 1.0:
             base_adv = _ttf(self.font_path, int(round(px))).getlength(ch)
             cur_adv = f.getlength(ch)
             if cur_adv > 0 and abs(cur_adv - base_adv) > 0.5:
-                pad_x = (base_adv - cur_adv) / 2.0
-                l = l + pad_x
-        # 关键：贴图的 ox/oy 是「相对笔位」的偏移，调用方用原始字号的 ascent 去减。
-        # 但上面的 size 已乘过 size_scale，l/t 是按放大后的字号量的，
-        # 直接返回会让字形整体下移（实测数字下沉 14px、顶部比汉字低 24px）。
-        # 这里把偏移按 size_scale 折回原始字号比例，保持基线一致。
-        s = cal["size_scale"] if cal["size_scale"] > 0 else 1.0
-        return fontcal.finish_tile(img, (pad - l) / s, (pad - t) / s, cal)
+                l = l + (base_adv - cur_adv) / 2.0
+        # ox/oy 是「相对笔位」偏移，调用方用原始字号 ascent 去减；
+        # 上面 size 已乘过 size_scale，偏移要折回原始字号比例，否则字形整体下移。
+        sc = cal["size_scale"] if cal["size_scale"] > 0 else 1.0
+        return fontcal.finish_tile(img, (pad - l) / sc, (pad - t) / sc, cal)
 
     def _font_for(self, ch):
         """拉丁字母/数字用「正常人笔写」的字体，汉字用毛笔手写体。
@@ -426,6 +459,20 @@ class Hand:
         path = self._font_for(ch)
         scale = fontcal.params_for(path).get("size_scale", 1.0)
         return _ttf(path, max(4, int(round(px * scale)))).getlength(ch)
+
+    def _advance_with(self, ch, px, font_path):
+        """按**实际使用的那套字体**量前进宽度。
+
+        多套字库模式下，同一字符每出现一次可能换一套字体，各套 advance 不同
+        （新字库窄、主字体宽）。若一律按主字体量，纯文本数字会出现明显间隙
+        （实测 380 渲染成 3 8 0），而公式里却紧凑——两边不一致。
+        """
+        if not font_path or os.path.abspath(font_path) == os.path.abspath(self.font_path):
+            return self._advance(ch, px)
+        scale = fontcal.params_for(font_path).get("size_scale", 1.0)
+        # 逐字校准可能再调一点，advance 要跟着
+        scale *= fontcal.glyph_scale(font_path, ch)
+        return _ttf(font_path, max(4, int(round(px * scale)))).getlength(ch)
 
     def _text_width(self, s, px):
         return sum(self._advance(ch, px) for ch in s)
@@ -578,7 +625,8 @@ class Hand:
                 continue
             ch = val
             p = self._char_params(ch, px)
-            tile, ox, oy = self._char_tile(ch, px, p, self._variant_for(ch))
+            used = self._variant_for(ch)
+            tile, ox, oy = self._char_tile(ch, px, p, used)
             if tile is None:
                 continue
             bb = tile.getbbox()          # 贴图内的真实墨迹范围（旋转后也算得准）
@@ -586,7 +634,14 @@ class Hand:
                 continue
             # 6.2 字距渐变：行首略宽，行末略紧
             drift = (0.06 - 0.12 * (k / n)) * px * self.jitter
-            adv = self._advance(ch, px) * p["scale"] + p["adv_jit"] * px + drift
+            # 字距按「实际贴图宽度」算，而不是字体 advance：
+            # _char_tile 里有闭环放大（对齐字高），字体 advance 不含这部分，
+            # 两者脱节就会出现纯文本数字间的空隙（380 渲染成 3 8 0）。
+            # 贴图四周有 _TILE_PAD 的透明内边距，相邻字会各多出 pad，
+            # 造成「3 8 0」那种空隙。字距里要扣掉这部分。
+            tile_w = (bb[2] - bb[0]) - _TILE_PAD * 2
+            base_adv = self._advance_with(ch, px, used) * p["scale"]
+            adv = max(base_adv * 0.96, tile_w) + p["adv_jit"] * px + drift
             px_x = x + p["dx"]
             px_y = baseline - ascent + p["dy"]
             # ² ³ ° ′ ″ 这类字在字体里被压在基线上，抬起 0.38em 回到角标位置
