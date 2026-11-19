@@ -53,7 +53,32 @@ _SUB_DROP = 0.12           # 下标基线下移量（em）
 # 也就是 ° 只有半个字高且坐在基线上，看着像字母 o（30° 被读成 30o/300）。
 # 这里统一把它们抬起 0.38em，恢复到角标位置。
 _RAISE_CHARS = "⁰¹²³⁴⁵⁶⁷⁸⁹°′″ⁿ˚"
-_RAISE_EM = 0.38       # 行距 = 字号 × 该比例（字号调大时行距自动跟随）
+_RAISE_EM = 0.38
+
+# 纯文本里哪些字符改用公式渲染（与 $...$ 完全同源，保证粗细墨色一致）。
+# 汉字不走——公式引擎的汉字来自字体度量，和手写汉字库风格不搭。
+_FORMULA_CHARS = set(
+    "0123456789"
+    "abcdefghijklmnopqrstuvwxyz"
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "+-−×÷=≠≈≡<>≤≥±∓·/\\"
+    "()[]{}|.,;:!?"
+    "αβγδεζηθικλμνξοπρστυφχψωΓΔΘΛΞΠΣΦΨΩ"
+    "√∞∂∇∑∏∫∬°℃%‰"
+)
+# 这些字符在 LaTeX 里要转义
+_TEX_ESCAPE = {"%": r"\%", "#": r"\#", "&": r"\&", "_": r"\_",
+               "{": r"\{", "}": r"\}", "$": r"\$"}
+
+
+def _formula_ready(ch):
+    """该字符是否适合交给公式渲染。"""
+    return ch in _FORMULA_CHARS
+
+
+def _tex_char(ch):
+    """把单个字符转成可安全解析的 LaTeX 片段。"""
+    return _TEX_ESCAPE.get(ch, ch)       # 行距 = 字号 × 该比例（字号调大时行距自动跟随）
 
 # 常见固定说法：换行时尽量不把它们从中间劈开（真人手写宁可挤一点也不拆词）。
 # 不追求完整词典，只收本科理科作业里高频的搭配，避免 DP 为填满行而硬拆。
@@ -456,9 +481,23 @@ class Hand:
         · 字号要一致（fontcal 会把某些字体放大 1.3–1.5 倍，advance 不跟着放大
           就会出现「数字挤在一起」——实测 380V 的 3 和 8 几乎粘连）
         """
+        if _formula_ready(ch):
+            try:
+                return formula.measure(_tex_char(ch), px, self.font_path, self.ink,
+                                       self.math_font_path)[0]
+            except Exception:
+                pass
         path = self._font_for(ch)
         scale = fontcal.params_for(path).get("size_scale", 1.0)
         return _ttf(path, max(4, int(round(px * scale)))).getlength(ch)
+
+    def _advance_formula(self, ch, px):
+        """字符走公式渲染时的前进宽度。"""
+        try:
+            return formula.measure(_tex_char(ch), px, self.font_path, self.ink,
+                                   self.math_font_path)[0]
+        except Exception:
+            return self._advance(ch, px)
 
     def _advance_with(self, ch, px, font_path):
         """按**实际使用的那套字体**量前进宽度。
@@ -496,6 +535,12 @@ class Hand:
                 fw, fa, fd = formula.measure(val, px, self.font_path, self.ink,
                                              self.math_font_path,
                                              display=(kind == "d"))
+                w += fw
+                asc = max(asc, fa)
+                desc = max(desc, fd)
+            elif kind == "c" and _formula_ready(val):
+                fw, fa, fd = formula.measure(_tex_char(val), px, self.font_path,
+                                             self.ink, self.math_font_path)
                 w += fw
                 asc = max(asc, fa)
                 desc = max(desc, fd)
@@ -624,6 +669,18 @@ class Hand:
                     x += self._advance(c, spx) * p2["scale"]
                 continue
             ch = val
+            if _formula_ready(ch):
+                # 走公式渲染：与 $...$ 同源，粗细墨色一致
+                tex = _tex_char(ch)
+                fw, _fa, _fd = formula.measure(tex, px, self.font_path, self.ink,
+                                               self.math_font_path)
+                if x < right:
+                    x = right
+                formula.draw(img, tex, x, baseline, px, self.font_path, self.ink,
+                             self.math_font_path)
+                right = x + fw
+                x += fw
+                continue
             p = self._char_params(ch, px)
             used = self._variant_for(ch)
             tile, ox, oy = self._char_tile(ch, px, p, used)
