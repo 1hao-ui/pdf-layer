@@ -33,6 +33,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 import hwrender as H          # noqa: E402
+import symbols                # noqa: E402
 import fontcal                # noqa: E402
 from PIL import Image         # noqa: E402
 
@@ -179,6 +180,13 @@ class App:
                         variable=self.var_variants,
                         command=self.render_async).grid(
             row=row, column=0, columnspan=2, sticky="w", pady=(6, 2))
+        row += 1
+
+        self.var_newsym = tk.BooleanVar(value=symbols.available())
+        ttk.Checkbutton(box, text="符号用新手写字库 ZTi-Sym（4 套加权）",
+                        variable=self.var_newsym,
+                        command=self.render_async).grid(
+            row=row, column=0, columnspan=2, sticky="w", pady=(2, 2))
         row += 1
 
         # ---- 书写区域 ----
@@ -369,15 +377,25 @@ class App:
                 return
             font_path = _font_path(self.cfg["font"])
             math_path = _font_path(MATH_FONT_DEFAULT)
-            hand = H.Hand(
-                font_path,
-                size_pt=float(self.cfg["size"]),
-                ink=tuple(self.cfg["ink"]),
-                jitter=float(self.cfg["jitter"]),
-                seed=int(self.cfg["seed"]),
-                math_font_path=math_path,
-                variant_fonts=_variant_fonts() if self.cfg["variants"] else None,
-            )
+            if self.var_newsym.get() and symbols.available():
+                # 汉字走中文字体，数字/拉丁/希腊/符号走 ZTi-Sym 4 套加权
+                hand = symbols.make_hand(
+                    font_path,
+                    size_pt=float(self.cfg["size"]),
+                    ink=tuple(self.cfg["ink"]),
+                    jitter=float(self.cfg["jitter"]),
+                    seed=int(self.cfg["seed"]),
+                )
+            else:
+                hand = H.Hand(
+                    font_path,
+                    size_pt=float(self.cfg["size"]),
+                    ink=tuple(self.cfg["ink"]),
+                    jitter=float(self.cfg["jitter"]),
+                    seed=int(self.cfg["seed"]),
+                    math_font_path=math_path,
+                    variant_fonts=_variant_fonts() if self.cfg["variants"] else None,
+                )
             # 书写区域决定正文宽度（在预览上拖框划定，或用四个数值手填）
             area = [float(v.get()) for v in self.var_area]
             left, top, right, bottom = area[0], area[1], area[2], area[3]

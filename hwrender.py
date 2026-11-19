@@ -41,7 +41,19 @@ _TILE_PAD = 6                   # 单字贴图四周的透明内边距（px）�
 _JITTER_INFLATE = 0.02          # 逐字扰动（缩放/位移/防重叠右推）平均把行宽撑大的比例
 _LINE_HEIGHT_DAMP = 0.80        # 超高行（分式/根号）额外高度的打折系数：
                                 # 1.0=完全按内容给（行距忽大忽小），0.55=压太紧会与下一行相撞
-_LINE_HEIGHT_RATIO = 1.85       # 行距 = 字号 × 该比例（字号调大时行距自动跟随）
+_LINE_HEIGHT_RATIO = 1.85
+
+# ---- 上下标 ----
+_SUP_SCALE = 0.60          # 上下标字号 = 正文 × 0.6
+_SUP_RISE = 0.42           # 上标基线上移量（em）
+_SUB_DROP = 0.12           # 下标基线下移量（em）
+# 字体里本来就按「角标」画的字符。scanfont 建库时把墨迹底边当基线，
+# 所以 ² ³ ° ′ ″ 这些原本该浮在上面的字，全被压到基线上了——
+# 实测 ° 的 bbox 是 81..114（基线 114），而数字是 57..114，
+# 也就是 ° 只有半个字高且坐在基线上，看着像字母 o（30° 被读成 30o/300）。
+# 这里统一把它们抬起 0.38em，恢复到角标位置。
+_RAISE_CHARS = "⁰¹²³⁴⁵⁶⁷⁸⁹°′″ⁿ˚"
+_RAISE_EM = 0.38       # 行距 = 字号 × 该比例（字号调大时行距自动跟随）
 
 # 常见固定说法：换行时尽量不把它们从中间劈开（真人手写宁可挤一点也不拆词）。
 # 不追求完整词典，只收本科理科作业里高频的搭配，避免 DP 为填满行而硬拆。
@@ -437,6 +449,14 @@ class Hand:
                 w += fw
                 asc = max(asc, fa)
                 desc = max(desc, fd)
+            elif kind in ("^", "_"):
+                # 上下标按缩小字号量宽；上标会抬高行框上沿
+                spx = px * _SUP_SCALE
+                w += sum(self._advance(c, spx) for c in val)
+                if kind == "^":
+                    asc = max(asc, asc * _SUP_SCALE + px * _SUP_RISE)
+                else:
+                    desc = max(desc, desc * _SUP_SCALE + px * _SUB_DROP)
             else:
                 w += self._advance(val, px)
         return w, asc, desc
@@ -532,6 +552,26 @@ class Hand:
                 right = x + fw
                 x += fw
                 continue
+            if kind in ("^", "_"):
+                # 上标 / 下标：整组按 0.6 倍字号渲染，基线抬高/压低
+                spx = px * _SUP_SCALE
+                shift = -px * _SUP_RISE if kind == "^" else px * _SUB_DROP
+                for c in val:
+                    p2 = self._char_params(c, spx)
+                    tile2, ox2, oy2 = self._char_tile(c, spx, p2, self._variant_for(c))
+                    if tile2 is None:
+                        continue
+                    bb2 = tile2.getbbox()
+                    if bb2 is None:
+                        continue
+                    if x < right:
+                        x = right
+                    img.alpha_composite(
+                        tile2,
+                        (int(round(x - ox2)), int(round(baseline + shift - oy2))))
+                    right = x - ox2 + bb2[2]
+                    x += self._advance(c, spx) * p2["scale"]
+                continue
             ch = val
             p = self._char_params(ch, px)
             tile, ox, oy = self._char_tile(ch, px, p, self._variant_for(ch))
@@ -545,6 +585,9 @@ class Hand:
             adv = self._advance(ch, px) * p["scale"] + p["adv_jit"] * px + drift
             px_x = x + p["dx"]
             px_y = baseline - ascent + p["dy"]
+            # ² ³ ° ′ ″ 这类字在字体里被压在基线上，抬起 0.38em 回到角标位置
+            if ch in _RAISE_CHARS:
+                px_y -= px * _RAISE_EM
             # 防重叠：按「墨迹」边缘判断。贴图四周有 _TILE_PAD 的透明边距，
             # 若把边距算进字距，每个字都会被推开一个 padding，行宽膨胀约 40%，
             # 长行会被画布右边界直接裁掉。这里用 bb 反推墨迹的绝对位置。
@@ -572,19 +615,57 @@ def _is_formula(tk):
 
 
 def _atoms(line):
-    """把一行拆成原子：('c', 单字) 或 ('f', 公式源码)。
+    """把一行拆成原子：
 
-    公式用 $...$ 包住，作为一个整体参与排版（不可在中间断行）。
+        ('c', 单字)    普通字
+        ('f', latex)   $...$ 公式（整体，不可断行）
+        ('^', 文本)    上标（^ 后面的整组）
+        ('_', 文本)    下标（_ 后面的整组）
+
+    上下标规则（照顾手写输入习惯，不是严格 LaTeX）：
+      · ^{11} / _{ij} 花括号整组
+      · ^11  后面连续的「同类字符」全部当上标——所以 3^11 是 3 的 11 次方，
+        而不是 LaTeX 那样只取一位（用户反馈：只能渲染 1 位，3^11 变成 3¹1）
+      · ^a / ^Ω 单字符
     """
     out, i, n = [], 0, len(line)
     while i < n:
-        if line[i] == "$":
+        ch = line[i]
+        if ch == "$":
             j = line.find("$", i + 1)
             if j > i:
                 out.append(("f", line[i + 1:j]))
                 i = j + 1
                 continue
-        out.append(("c", line[i]))
+        if ch in "^_":
+            i += 1
+            if i >= n:
+                break
+            if line[i] == "{":                      # ^{...} 花括号整组
+                depth, j = 1, i + 1
+                while j < n and depth:
+                    if line[j] == "{":
+                        depth += 1
+                    elif line[j] == "}":
+                        depth -= 1
+                    j += 1
+                out.append((ch, line[i + 1:j - 1]))
+                i = j
+                continue
+            # ^11 / ^abc：取连续的同类字符（数字连数字、字母连字母）
+            j = i
+            if line[j].isdigit():
+                while j < n and line[j].isdigit():
+                    j += 1
+            elif line[j].isalpha():
+                while j < n and line[j].isalpha() and not ("\u4e00" <= line[j] <= "\u9fff"):
+                    j += 1
+            else:
+                j = i + 1
+            out.append((ch, line[i:j]))
+            i = j
+            continue
+        out.append(("c", ch))
         i += 1
     return out
 
