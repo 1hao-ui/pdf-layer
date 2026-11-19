@@ -112,10 +112,11 @@ class Hand:
         # 才能和周围手写字迹看起来是同一支笔写出来的。
         if handstroke.available(ch):
             tile, ox, oy = handstroke.tile(
-                ch, size, self.ink + (p["alpha"],), self.font_path, seed=p.get("seed", 0))
+                ch, size, self.ink + (p["alpha"],), self._font_for(ch),
+                seed=p.get("seed", 0))
             if tile is not None:
                 return tile, ox, oy
-        f = _ttf(self.font_path, size)
+        f = _ttf(self._font_for(ch), size)
         try:
             l, t, r, b = f.getbbox(ch)
         except Exception:
@@ -129,6 +130,17 @@ class Hand:
         if abs(p["rot"]) > 0.05:
             img = img.rotate(p["rot"], resample=Image.BICUBIC, expand=True)
         return img, pad - l, pad - t
+
+    def _font_for(self, ch):
+        """拉丁字母/数字用「正常人笔写」的字体，汉字用毛笔手写体。
+
+        马善政楷书的拉丁小写是连笔刷体（`a` 带大尾巴、`g` 是单层圈），
+        正常人写不出来；龙藏体的拉丁是规整的硬笔写法，更像日常手写。
+        所以正文里 ASCII 字母数字走 math_font_path，CJK 仍走 font_path。
+        """
+        if ch.isascii() and ch.isalnum():
+            return self.math_font_path
+        return self.font_path
 
     # ------------------------------------------------------ 换行与标点悬挂
     def wrap(self, text, width_pt):
@@ -219,12 +231,23 @@ class Hand:
         return lines
 
     # -------------------------------------------------------- 公式支持
+    def _advance(self, ch, px):
+        """单字前进宽度（px）。拉丁字母/数字走 math_font_path，汉字走 font_path。
+
+        必须和 _font_for 保持一致：正文里 ASCII 用龙藏体渲染，若还按马善政量宽度，
+        字距会错位（马善政的拉丁是连笔刷体，宽度和龙藏差很多）。
+        """
+        return _ttf(self._font_for(ch), int(round(px))).getlength(ch)
+
+    def _text_width(self, s, px):
+        return sum(self._advance(ch, px) for ch in s)
+
     def _token_width(self, tk, font, px):
         """一个 token 的排版宽度：普通文本按字宽累加，$...$ 交给公式层量。"""
         if _is_formula(tk):
             return formula.measure(tk[1:-1], px, self.font_path, self.ink,
                                    self.math_font_path)[0]
-        return font.getlength(tk)
+        return self._text_width(tk, px)
 
     # -------------------------------------------------------- 渲染一个块
     def _line_box(self, line, font, px):
@@ -239,7 +262,7 @@ class Hand:
                 asc = max(asc, fa)
                 desc = max(desc, fd)
             else:
-                w += font.getlength(val)
+                w += self._advance(val, px)
         return w, asc, desc
 
     def render_block(self, text, width_pt=None, size_pt=None):
@@ -326,7 +349,7 @@ class Hand:
                 continue
             # 6.2 字距渐变：行首略宽，行末略紧
             drift = (0.06 - 0.12 * (k / n)) * px * self.jitter
-            adv = font.getlength(ch) * p["scale"] + p["adv_jit"] * px + drift
+            adv = self._advance(ch, px) * p["scale"] + p["adv_jit"] * px + drift
             px_x = x + p["dx"]
             px_y = baseline - ascent + p["dy"]
             # 防重叠：按「墨迹」边缘判断。贴图四周有 _TILE_PAD 的透明边距，

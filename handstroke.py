@@ -30,15 +30,19 @@ from mthw.sdt_renderer import font_glyph_strokes, render_strokes, TrajectoryStyl
 STROKE_SYMBOLS = set(
     "Ωφω√≈∠²³·×−°θΔΣπ±≤≥≠∞→∘⌀"
     "∑∫∏∂∇∈⊂∪∩∀∃←⇒⇔⊥∥⟨⟩⌈⌉⌊⌋⋯⋮⁄"
+    # 完整希腊字母：字体里是 Segoe 印刷字形，必须笔迹化，否则会像印刷体
+    "αβγδεζηικλμνξοπρστυχψ"
+    "ΓΔΘΛΞΠΥΦΨ"
 )
 
 # 笔迹风格：轻微旋转 + 低频坐标扰动 + 笔压抖动 + 起收笔渐细
+# taper/width_jitter 不能太大：太大会像马克笔，正常人写希腊字母是细笔道
 STYLE = TrajectoryStyle(
-    rotation_sigma_deg=1.1,
-    coordinate_jitter=0.55,
+    rotation_sigma_deg=0.9,
+    coordinate_jitter=0.45,
     jitter_correlation=9.0,
-    width_jitter=0.14,
-    taper=0.26,
+    width_jitter=0.10,
+    taper=0.18,
     supersample=3,
 )
 
@@ -46,6 +50,11 @@ STYLE = TrajectoryStyle(
 # 实测 0.068 时符号笔画中位游程 5–7px，而汉字只有 3–5px，符号看起来更「重」。
 # 0.052 落到 4–5px，与正文一致。
 _WIDTH_RATIO = 0.052
+
+# 希腊字母用更细的笔道：它们在公式里字号被放大 1.65 倍，
+# 按同一比例算出来的笔宽会粗得像马克笔（实测视觉上比汉字粗一倍）。
+_GREEK = set("αβγδεζηθικλμνξοπρστυφχψωΓΔΘΛΞΠΣΥΦΨΩ")
+_GREEK_WIDTH_RATIO = 0.032
 
 # render_strokes 内部会留 4.5% 的内边距，这里反向补偿，保证符号大小与字面一致
 _FIT = 1.0 / (1.0 - 2 * 0.045)
@@ -145,7 +154,8 @@ def tile(ch, size_px, ink, font_path, seed=0):
     box_w = max(2, int(round(ink_w * _FIT)))
     box_h = max(2, int(round(ink_h * _FIT)))
     rng = np.random.default_rng(abs(hash((ch, size_px, seed))) % (2 ** 63))
-    stroke_w = max(1.2, size_px * _WIDTH_RATIO)
+    ratio = _GREEK_WIDTH_RATIO if ch in _GREEK else _WIDTH_RATIO
+    stroke_w = max(1.2, size_px * ratio)
     glyph = render_strokes(strokes, box_w, box_h, stroke_w, ink, rng, STYLE,
                            em_size=size_px)
     # 墨色补到正文水平（符号原本平均 alpha≈139，正文汉字≈170）

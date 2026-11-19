@@ -18,6 +18,9 @@ from fontTools.pens.recordingPen import DecomposingRecordingPen
 SYMS = [ord(c) for c in (
     "Ωφω√≈∠²³·×−°θΔΣπ±≤≥≠∞→∘⌀"      # 初版：希腊 + 常见运算符
     "∑∫∏∂∇∈⊂∪∩∀∃←⇒⇔⊥∥⟨⟩⌈⌉⌊⌋⋯⋮⁄"      # 公式需要：大运算符 / 集合 / 箭头 / 括号件
+    # 完整希腊字母表：缺字会回退到系统印刷字体，公式里混进印刷字形（如 α 变成细体 a）
+    "αβγδεζηικλμνξοπρστυχψ"
+    "ΓΔΘΛΞΠΥΦΨ"
 )]
 DEFAULT_SYM = r"C:\Windows\Fonts\seguisym.ttf"
 
