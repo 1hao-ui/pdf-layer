@@ -119,23 +119,6 @@ python multifont.py render --fonts fonts/ZTi
   topDict），**不改任何字形轮廓**，并会逐字形断言轮廓、cmap、hmtx 一致。
   这两个源目录属私人资产，已在 `.gitignore` 中排除，不在本仓库内。
 
-### 补写字母与符号
-
-`scanfont.py template` 可以只出「英文字母 + 数字 + 希腊字母 + 数学符号」的模板，
-共 126 字，每字写 4 遍得到 4 个形态：
-
-```powershell
-python scanfont.py template --charset en --cols 10 --out out/ziti_en --preview
-```
-
-- 4 页 A4，每页同一个字表；四角黑块用于扫描后的透视校正，别裁边。
-- 参考字用 Segoe UI Symbol 渲染（内置 CJK 字体画不出 `∂ ∇ ∠`），
-  已做字体子集化，PDF 约 170KB。
-- 切字用 `segment --grid --layout out/ziti_en/layout.json`，字序自动对应，无需人工标注。
-- 空格子会被自动跳过，不会生成没有轮廓的空白字形。
-- 上标 `² ³` 不在字表内：`build` 按墨迹高度归一化会把小号数字拉成全尺寸，
-  上标语义交给公式层缩放着。
-
 ### 权利
 
 Z体 是作者本人手写笔迹的数字化成果，**版权归作者所有，保留所有权利**

@@ -41,6 +41,20 @@ _TILE_PAD = 6                   # 单字贴图四周的透明内边距（px）�
 _JITTER_INFLATE = 0.02          # 逐字扰动（缩放/位移/防重叠右推）平均把行宽撑大的比例
 _LINE_HEIGHT_DAMP = 0.80        # 超高行（分式/根号）额外高度的打折系数：
                                 # 1.0=完全按内容给（行距忽大忽小），0.55=压太紧会与下一行相撞
+_LINE_HEIGHT_RATIO = 1.85       # 行距 = 字号 × 该比例（字号调大时行距自动跟随）
+
+# 常见固定说法：换行时尽量不把它们从中间劈开（真人手写宁可挤一点也不拆词）。
+# 不追求完整词典，只收本科理科作业里高频的搭配，避免 DP 为填满行而硬拆。
+_PHRASES = (
+    "三相电路", "线电压", "相电压", "相电流", "线电流", "有功功率", "无功功率",
+    "视在功率", "功率因数", "星形联结", "三角形联结", "并联接入", "三相电源",
+    "中性线", "阻抗", "电阻", "电感", "电容", "频率", "相位", "有效值",
+    "最大值", "平均值", "瞬时值", "参考方向", "关联参考方向", "基尔霍夫",
+    "节点电压", "回路电流", "叠加定理", "戴维南", "诺顿", "最大功率",
+    "串联", "并联", "混联", "负载", "电源", "电路", "如图", "所示", "已知",
+    "试求", "求", "解", "因此", "所以", "因为", "由于", "可得", "代入",
+    "整理得", "即", "故", "则", "当", "若", "设", "令",
+)
 _SYM_CP = set(ord(c) for c in "Ωφω√≈∠²³·×−°θΔΣπ±≤≥≠∞→∘⌀")
 
 
@@ -299,7 +313,12 @@ class Hand:
         return lines
 
     def _wrap_para(self, tokens, font, px, max_px):
-        """单段落的最优换行：cost = Σ(行尾空白)²，末行空白按 0.25 权重。"""
+        """单段落的最优换行：cost = Σ(行尾空白)² + 拆词惩罚，末行空白按 0.25 权重。
+
+        为什么要加拆词惩罚：只优化「行宽均匀」会排出很机械的结果——为了填满行，
+        它会把「三相电路」「功率因数」这种固定说法从中间劈开，而真人手写到行尾
+        宁可挤一点也会把词写完（用户反馈原话）。
+        """
         n = len(tokens)
         if not n:
             return []
@@ -316,6 +335,21 @@ class Hand:
             if prev and prev[-1] in NO_LINE_END:
                 return False
             return True
+
+        # 拆词惩罚：若在 j 处断行会切断一个「词」，加一笔代价。
+        # 罚金与 slack² 同量级（slack 最大约 max_px，平方后 max_px²），
+        # 所以这里用 max_px² 的系数——太小会被「填满行」的收益盖过去。
+        def break_penalty(j):
+            if j <= 0 or j >= n:
+                return 0.0
+            left = "".join(tokens[max(0, j - 6):j])
+            right = "".join(tokens[j:j + 6])
+            for ph in _PHRASES:
+                for cut in range(1, len(ph)):
+                    if left.endswith(ph[:cut]) and right.startswith(ph[cut:]):
+                        # 越长的词被拆罚得越重；2 字词罚 0.25，6 字词罚 0.65
+                        return max_px * max_px * (0.15 + 0.08 * len(ph))
+            return 0.0
 
         INF = float("inf")
         best = [INF] * (n + 1)
@@ -338,6 +372,8 @@ class Hand:
                 else:
                     weight = 0.25 if i == n else 1.0   # 末行不追求填满
                     cost = weight * slack * slack
+                # 拆词惩罚：宁可留白也不把固定说法劈开（真人手写的习惯）
+                cost += break_penalty(j)
                 total = best[j] + cost
                 if total < best[i]:
                     best[i] = total
@@ -403,8 +439,8 @@ class Hand:
                 w += self._advance(val, px)
         return w, asc, desc
 
-    def render_block(self, text, width_pt=None, size_pt=None):
-        """返回 (RGBA Image, 宽pt, 高pt)。"""
+    def render_block(self, text, width_pt=None, size_pt=None, line_pt=None):
+        """返回 (RGBA Image, 宽pt, 高pt)。line_pt 不传时按字号自动算（1.85 倍）。"""
         if size_pt:
             self.size_pt = size_pt
         width_pt = width_pt or (PAGE_RIGHT_PT - PAGE_LEFT_PT)
@@ -412,8 +448,15 @@ class Hand:
         self._check_style_consistency(text)
         lines = self.wrap(text, width_pt)
         px = self.size_pt * SCALE
-        base_lh = DEFAULT_LINE_PT * SCALE
         font = _ttf(self.font_path, int(round(px)))
+        # 行距跟随字号：DEFAULT_LINE_PT 是按 12.4pt 定的一对常量，
+        # 字号调大后若仍用 23pt 行距，行框装不下字，上半截会被画布裁掉
+        # （实测 24pt 以上墨迹顶到 y=0）。这里按「字号 × 1.85」动态算，
+        # 显式传了 line_pt 则优先用它。
+        if line_pt:
+            base_lh = float(line_pt) * SCALE
+        else:
+            base_lh = self.size_pt * _LINE_HEIGHT_RATIO * SCALE
 
         # 逐行按自身高度排布，但对「超出基准的部分」打折：分式/根号行确实需要更多
         # 垂直空间，但完全按内容给（最高到基准的 1.7 倍）会让整段行距忽大忽小。
@@ -425,9 +468,10 @@ class Hand:
             need = asc + desc
             h_i = base_lh + max(0.0, need - base_lh) * _LINE_HEIGHT_DAMP
             h_i = max(base_lh, h_i)
-            # 基线取「行框 0.78」与「保证 descender 不越界」的较大值，
-            # 但上限不超过基准行的基线，避免把整段撑开。
-            b_i = int(min(max(h_i * 0.78, asc + 2), base_lh * 0.78 + 2))
+            # 基线要同时满足：不低于行框 0.78 处（保证重心）、字的上伸不出画布。
+            # 早先这里还夹了个 base_lh*0.78 的上限，字号一大就把基线压死，
+            # 字顶穿画布——去掉上限，改成「至少要容下 asc」。
+            b_i = int(max(h_i * 0.78, asc + 2))
             h_i = int(max(h_i, b_i + desc + 2))
             heights.append(h_i)
             baselines.append(b_i)
