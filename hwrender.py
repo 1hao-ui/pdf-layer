@@ -90,7 +90,8 @@ class Hand:
             dy=r.uniform(-0.3, 0.3) * j * SCALE / 4.0,
             dx=r.uniform(-0.6, 0.6) * j * SCALE / 4.0,
             scale=1.0 + r.uniform(-0.035, 0.035) * j,
-            rot=r.uniform(-1.2, 1.2) * j,
+            # 单字旋转要小：±1.2° 叠在整行剪切上会让字看起来「东倒西歪」
+            rot=r.uniform(-0.22, 0.22) * j,
             alpha=int(r.uniform(220, 255) if j > 0 else 240),
             rgb=tuple(max(0, min(255, c + r.randint(-6, 6) * (1 if j > 0 else 0)))
                       for c in self.ink),
@@ -279,7 +280,9 @@ class Hand:
         # 6.2 整行低频弯曲 + 剪切
         img = _sine_warp(img, amp=1.5 * self.jitter, lam=300.0, phase=self.rng.uniform(0, 6.28))
         if abs(self.jitter) > 0:
-            sh = self.rng.uniform(-0.15, 0.15) * self.jitter
+            # 剪切系数 sh 就是倾斜角的正切：0.15 约 8.5°，整行会明显歪；
+            # 收到 0.021（约 1.2°）只留一点自然的行倾，不破坏版面观感。
+            sh = self.rng.uniform(-0.021, 0.021) * self.jitter
             img = img.transform(img.size, Image.AFFINE,
                                 (1, sh, -sh * lh / 2, 0, 1, 0), resample=Image.BICUBIC)
         return img
