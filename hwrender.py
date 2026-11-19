@@ -17,6 +17,7 @@ import random
 
 from PIL import Image, ImageDraw, ImageFont
 
+import fontcal
 import formula
 import handstroke
 
@@ -176,10 +177,13 @@ class Hand:
         # 同字多形传入的变体字库优先；不传则沿用引擎的 _font_for(ch)
         # （拉丁字母/数字走硬笔字体，汉字走毛笔手写体）。
         base = font_path or self._font_for(ch)
+        # 多套字库观感归一化：ZTi 系列实测比主字体小 35–60%、笔画细 2–3 倍、
+        # 墨色淡 30%，逐套按离线测得的系数校正字号/墨色/粗细/中心位置。
+        cal = fontcal.params_for(base)
         # 符号原本给 1.15 倍补偿「字形偏小」，但实测合并进来的 Ω/∑/∫ 墨迹本来就
         # 比汉字大 7–31%，再放大就是「符号比字还大」。改为不放大。
         boost = 1.0
-        size = max(4, int(round(px * p["scale"] * boost)))
+        size = max(4, int(round(px * p["scale"] * boost * cal["size_scale"])))
         # 合并字体里的数学符号是印刷体轮廓，走「骨架 → 变宽笔道」重绘，
         # 才能和周围手写字迹看起来是同一支笔写出来的。
         # 用户手写/扫描的字库往往没写数学符号，缺字时改用注入过符号的兜底字体，
@@ -193,7 +197,7 @@ class Hand:
                 ch, size, self.ink + (p["alpha"],), sym_path,
                 seed=p.get("seed", 0))
             if tile is not None:
-                return tile, ox, oy
+                return fontcal.finish_tile(tile, ox, oy, cal)
         f = _ttf(base, size)
         try:
             l, t, r, b = f.getbbox(ch)
@@ -207,7 +211,16 @@ class Hand:
         d.text((pad - l, pad - t), ch, font=f, fill=p["rgb"] + (p["alpha"],))
         if abs(p["rot"]) > 0.05:
             img = img.rotate(p["rot"], resample=Image.BICUBIC, expand=True)
-        return img, pad - l, pad - t
+        # 多套字库的字形宽度与主字体不同（advance 按主字体算，保证行宽不漂移），
+        # 若按字体原点摆放，窄字形会贴着左边、视觉上字距不均。
+        # 这里把字形在「主字体 advance」内居中，让字距看起来均匀。
+        if cal["size_scale"] != 1.0:
+            base_adv = _ttf(self.font_path, int(round(px))).getlength(ch)
+            cur_adv = f.getlength(ch)
+            if cur_adv > 0 and abs(cur_adv - base_adv) > 0.5:
+                pad_x = (base_adv - cur_adv) / 2.0
+                l = l + pad_x
+        return fontcal.finish_tile(img, pad - l, pad - t, cal)
 
     def _font_for(self, ch):
         """拉丁字母/数字用「正常人笔写」的字体，汉字用毛笔手写体。
