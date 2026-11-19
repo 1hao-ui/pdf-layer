@@ -191,21 +191,6 @@ GRID_ENVIRONMENTS = {
 }
 INTEGRAL_SYMBOLS = {"∫", "∬", "∭", "∮"}
 LIMIT_OPERATOR_SYMBOLS = INTEGRAL_SYMBOLS | {"∑", "∏"}
-
-# 本地改动：大运算符放大系数。
-# 新字库的 ∑ ∏ ∫ 归一化后只有 0.5em 字高（实测 ∑ 60px vs 字母 91px），
-# 大运算符反而比字母矮；这里按 display / inline 分别放大。
-BIGOP_SCALE_INLINE = 1.0
-BIGOP_SCALE_DISPLAY = 1.0
-
-# 本地开关：display 模式下是否把 ∑ 上下限堆叠起来。
-# 默认 False —— 手写习惯是把上下限写在侧边；置 True 则按印刷体堆叠。
-STACK_LIMITS_IN_DISPLAY = False
-
-# 大运算符「随内容变高」的参数
-BIGOP_STRETCH_MAX = 1.0      # 最多放大到原字号的 2.4 倍
-BIGOP_STRETCH_SLACK = 1.06   # 略微超过内容高度，避免看起来比内容矮
-BIGOP_STRETCH_MIN = 1.0      # 至少保持原样（不缩小）
 LIMIT_OPERATOR_NAMES = {"lim", "max", "min", "sup", "inf"}
 
 
@@ -764,18 +749,6 @@ class FormulaRenderer:
         )
 
     def _layout(self, node: MathNode, size_px: int, seed_extra: str, display_style: bool = False) -> MathBox:
-        # 大运算符单独放大：∑ ∏ ∫ 在字库里只有 0.5em 高，不放大就比字母还矮。
-        # 用 _bigop_done 标记防止递归放大（否则无限循环）。
-        if (isinstance(node, TextNode)
-                and getattr(node, "text", "") in LIMIT_OPERATOR_SYMBOLS
-                and not getattr(self, "_bigop_done", False)):
-            k = BIGOP_SCALE_DISPLAY if display_style else BIGOP_SCALE_INLINE
-            self._bigop_done = True
-            try:
-                box = self._layout(node, int(round(size_px * k)), seed_extra, display_style)
-            finally:
-                self._bigop_done = False
-            return box
 
         if isinstance(node, TextNode):
             return self._text_box(node.text, size_px, seed_extra)
@@ -791,28 +764,13 @@ class FormulaRenderer:
         if isinstance(node, LimitsNode):
             return self._layout(node.base, size_px, seed_extra, display_style)
         if isinstance(node, RowNode):
-            # 两遍布局：先量出「非大运算符」子项的最大高度，
-            # 再据此把 ∑/∏/∫ 拉伸到那个高度（和根号一样随内容变长）。
-            items = []
+            boxes: list[MathBox] = []
             current_style = display_style
             for index, child in enumerate(node.items):
                 if isinstance(child, StyleNode):
                     current_style = child.display_style
                     continue
-                items.append((index, child, current_style))
-            target_h = 0
-            for index, child, st in items:
-                if self._bigop_base_symbol(child) is not None:
-                    continue
-                b = self._layout(child, size_px, f"{seed_extra}:pre:{index}", st)
-                target_h = max(target_h, b.height)
-            boxes: list[MathBox] = []
-            for index, child, st in items:
-                if self._bigop_base_symbol(child) is not None and target_h > 0:
-                    boxes.append(self._layout_bigop_stretched(
-                        child, size_px, f"{seed_extra}:row:{index}", st, target_h))
-                else:
-                    boxes.append(self._layout(child, size_px, f"{seed_extra}:row:{index}", st))
+                boxes.append(self._layout(child, size_px, f"{seed_extra}:row:{index}", current_style))
             return self._row_box(boxes, size_px)
         if isinstance(node, FractionNode):
             return self._fraction_box(node, size_px, seed_extra)
@@ -1092,80 +1050,6 @@ class FormulaRenderer:
             image.alpha_composite(superscript.image, (script_x, sup_y))
         if subscript:
             image.alpha_composite(subscript.image, (script_x, sub_y))
-        return MathBox(image, base_y + base.baseline)
-
-    def _bigop_base_symbol(self, node: MathNode) -> str | None:
-        """若节点是（可能带上下限/上下标的）大运算符，返回其符号。"""
-        cur = node
-        for _ in range(3):
-            if isinstance(cur, (ScriptNode, LimitsNode)):
-                cur = cur.base
-            else:
-                break
-        if isinstance(cur, TextNode):
-            t = getattr(cur, "text", "")
-            if t in LIMIT_OPERATOR_SYMBOLS:
-                return t
-        return None
-
-    def _layout_bigop_stretched(self, node: MathNode, size_px: int, seed_extra: str,
-                                display_style: bool, target_h: int) -> MathBox:
-        """按目标高度放大大运算符（上下限不跟着放大）。"""
-        sym = self._bigop_base_symbol(node)
-        if sym is None or target_h <= 0:
-            return self._layout(node, size_px, seed_extra, display_style)
-        probe = self._layout(node, size_px, seed_extra + ":probe", display_style)
-        if probe.height <= 0:
-            return probe
-        want = target_h * BIGOP_STRETCH_SLACK
-        if probe.height >= want:
-            return probe
-        k = min(BIGOP_STRETCH_MAX, max(BIGOP_STRETCH_MIN, want / probe.height))
-        if k <= 1.02:
-            return probe
-        has_script = (isinstance(node, (ScriptNode, LimitsNode))
-                      and (node.superscript or node.subscript))
-        if has_script:
-            return self._layout_scripts_with_bigop(node, int(round(size_px * k)),
-                                                   size_px, seed_extra, display_style)
-        return self._layout(node, int(round(size_px * k)), seed_extra, display_style)
-
-    def _layout_scripts_with_bigop(self, node, big_size: int, base_size: int,
-                                   seed_extra: str, display_style: bool) -> MathBox:
-        """运算符本体用 big_size，上下限仍按 base_size 的比例（不跟着放大）。"""
-        base = self._layout(node.base, big_size, f"{seed_extra}:bigbase", display_style)
-        script_size = max(9, round(base_size * 0.54))
-        sup = self._layout(node.superscript, script_size, f"{seed_extra}:sup") \
-            if node.superscript else None
-        sub = self._layout(node.subscript, script_size, f"{seed_extra}:sub") \
-            if node.subscript else None
-        gap = max(1, round(base_size * 0.05))
-        script_x = max(1, base.width - round(base_size * 0.06))
-        base_top = base.baseline - _ink_asc(base)
-        sup_y = 0
-        base_y = 0
-        if sup:
-            sup_y = base_top - sup.height + round(base_size * 0.08)
-            if sup_y < 0:
-                base_y = -sup_y
-                sup_y = 0
-        sub_y = 0
-        if sub:
-            sub_y = base_y + base.baseline + gap - _ink_asc(sub)
-        width = max(base.width,
-                    script_x + sup.width if sup else 0,
-                    script_x + sub.width if sub else 0)
-        height = base_y + base.height
-        if sup:
-            height = max(height, sup_y + sup.height)
-        if sub:
-            height = max(height, sub_y + sub.height)
-        image = Image.new("RGBA", (max(1, width), max(1, height)), (0, 0, 0, 0))
-        image.alpha_composite(base.image, (0, base_y))
-        if sup:
-            image.alpha_composite(sup.image, (script_x, sup_y))
-        if sub:
-            image.alpha_composite(sub.image, (script_x, sub_y))
         return MathBox(image, base_y + base.baseline)
 
     def _operator_limit_mode(self, node: MathNode) -> tuple[str | None, str | None]:
