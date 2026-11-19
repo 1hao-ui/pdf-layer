@@ -167,12 +167,18 @@ def global_scale(mask_paths):
     模板稿里每个字都写在同样大的格子里，自由稿里则按同一行高切分——
     因此不能每个字各自按 bbox 放大到 700 高：那样 '-' '.' '1' 这种墨迹很小的
     字符会被吹成大黑方块。用全部字块尺寸的中位数定一个全局缩放系数。
+
+    注意必须量「墨迹包围盒」而不是「掩膜画布」：网格模式下每块都是整格
+    （含大片空白），用画布高度算会把所有字缩到格子的 1/3，笔画细到看不清。
     """
     hs, ws = [], []
     for p in mask_paths:
         m = load_mask(p)
-        hs.append(m.shape[0])
-        ws.append(m.shape[1])
+        ys, xs = np.where(m)
+        if len(ys) == 0:
+            continue
+        hs.append(int(ys.max() - ys.min() + 1))
+        ws.append(int(xs.max() - xs.min() + 1))
     if not hs:
         return 1.0
     return min(TARGET_H / float(np.median(hs)), MAX_W / float(np.median(ws)))
@@ -267,12 +273,90 @@ def build_ttf(path, char_to_mask_path, family, ps_name):
 
 
 # ---------------------------------------------------------------- template
+# 英文字母 + 常见物理/数学符号字表（按类分组，顺序即模板格子顺序）
+# 说明：
+#   · 希腊字母取物理公式高频集（α–ω 全留，大小写都收）
+#   · 减号用 U+2212（数学减号）而非 ASCII '-'，与 merge_symbols 的符号表一致
+#   · 上标 ² ³ 不收：scanfont.build 会把每个字形按墨迹高度归一化到 700 units，
+#     手写的小号 2/3 会被拉成全尺寸，上标语义反而丢了。上标交给公式层缩放。
+EN_GROUPS = [
+    ("大写 A-Z", "ABCDEFGHIJKLMNOPQRSTUVWXYZ"),
+    ("小写 a-z", "abcdefghijklmnopqrstuvwxyz"),
+    ("数字 0-9", "0123456789"),
+    ("希腊小写", "αβγδεζηθικλμνξοπρστυφχψω"),
+    ("希腊大写", "ΓΔΘΛΞΠΣΥΦΨΩ"),
+    ("运算符", "+−×÷±=≠≈≤≥∝"),
+    ("微积分", "∑∫∏∂∇√∞"),
+    ("几何角", "°∠⊥∥"),
+    ("集合箭头", "∈⊂∪∩→"),
+    ("括号件", "⟨⟩"),
+]
+EN_CHARSET = "".join(g[1] for g in EN_GROUPS)
+
+
+def pick_ref_font(explicit=None):
+    """参考字字体：必须能画希腊字母和数学符号，否则模板上会是豆腐块。
+
+    只用 Segoe UI Symbol（实测 Ω√≈∑∫∂∇αβγ≤≥∠⊥ 全覆盖）；跨平台退 DejaVu Sans。
+    Segoe 是微软专有字体，仅嵌入本地打印用的 PDF，不随仓库分发。
+    """
+    if explicit:
+        return explicit if os.path.exists(explicit) else None
+    for p in (r"C:\Windows\Fonts\seguisym.ttf",
+              "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+              r"C:\Windows\Fonts\arial.ttf"):
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def _legend_lines(groups, fontsize, x0, x1):
+    """把「分类名(数量)」排成若干行，返回 [(seg, x), ...] 的行列表。
+
+    网格起点要按行数下移，绘制时又要按同样的断行画，所以两处必须共用这一份计算。
+    """
+    lines, cur, gx = [], [], x0
+    for name, s in groups:
+        seg = "%s(%d)" % (name, len(s))
+        w = fitz.get_text_length(seg + "  ", fontname="china-s", fontsize=fontsize)
+        if cur and gx + w > x1:
+            lines.append(cur)
+            cur, gx = [], x0
+        cur.append((seg, gx))
+        gx += w
+    if cur:
+        lines.append(cur)
+    return lines
+
+
 def cmd_template(args):
-    chars = charset_from_text(load_text(args))
-    rows = int(math.ceil(len(chars) / float(COLS)))
-    cw = (GRID_RIGHT - GRID_LEFT) / COLS
-    ch = (GRID_BOTTOM - GRID_TOP) / rows
+    # 字表来源：--chars 自定义 > --charset en 内置英文/符号表 > 默认从正文提取
+    groups = None
+    if getattr(args, "chars", None):
+        chars = [c for c in dict.fromkeys(args.chars) if not c.isspace()]
+    elif getattr(args, "charset", "default") == "en":
+        chars = list(dict.fromkeys(EN_CHARSET))
+        groups = EN_GROUPS
+    else:
+        chars = charset_from_text(load_text(args))
+
+    cols = getattr(args, "cols", COLS) or COLS
+
+    # 图例占几行会影响网格起点，先算出来，绘制时按同一份断行画
+    lf = 6.8
+    legend = _legend_lines(groups, lf, GRID_LEFT, GRID_RIGHT) if groups else []
+    grid_top = GRID_TOP
+    if legend:
+        grid_top = 74 + (len(legend) - 1) * 8.5 + 14
+
+    rows = int(math.ceil(len(chars) / float(cols)))
+    cw = (GRID_RIGHT - GRID_LEFT) / cols
+    ch = (GRID_BOTTOM - grid_top) / rows
     os.makedirs(args.out, exist_ok=True)
+
+    ref_path = pick_ref_font(getattr(args, "ref_font", None))
+    if ref_path is None and groups is not None:
+        print("WARN: 没找到符号字体，参考字可能显示为空白（不影响格子）")
 
     doc = fitz.open()
     for p in range(1, args.passes + 1):
@@ -280,17 +364,30 @@ def cmd_template(args):
         page.insert_text((GRID_LEFT, 50),
                          "第 %d 遍 / Pass %d    共 %d 字" % (p, p, len(chars)),
                          fontname="china-s", fontsize=11, color=(0.1, 0.1, 0.1))
-        page.insert_text((GRID_LEFT, 66),
-                         "请用黑色/深蓝中性笔写满格、居中；浅灰的是参考字，不用描它。",
-                         fontname="china-s", fontsize=8, color=(0.45, 0.45, 0.45))
+        page.insert_text((GRID_LEFT, 64),
+                         "每格写一个，写满格、居中；浅灰是参考字，不用描它。空格会变成缺字。",
+                         fontname="china-s", fontsize=7.5, color=(0.45, 0.45, 0.45))
+        if legend:
+            # 分类图例：告诉用户格子按什么顺序排，写的时候不用来回翻 chars.txt
+            for li, line in enumerate(legend):
+                for seg, gx in line:
+                    page.insert_text((gx, 74 + li * 8.5), seg, fontname="china-s",
+                                     fontsize=lf, color=(0.5, 0.5, 0.55))
+
         for (x, y) in ((MARGIN, MARGIN), (PAGE_W - MARGIN - MARK, MARGIN),
                        (MARGIN, PAGE_H - MARGIN - MARK),
                        (PAGE_W - MARGIN - MARK, PAGE_H - MARGIN - MARK)):
             page.draw_rect(fitz.Rect(x, y, x + MARK, y + MARK),
                            color=None, fill=(0, 0, 0))
+        # 每页只注册一次字体：放在逐字循环里会让 PDF 把整个字体重复嵌入上百次
+        rf = None
+        if ref_path:
+            page.insert_font(fontname="ref", fontfile=ref_path)
+            rf = fitz.Font(fontfile=ref_path)
+
         for i, c in enumerate(chars):
-            col, row = i % COLS, i // COLS
-            x0, y0 = GRID_LEFT + col * cw, GRID_TOP + row * ch
+            col, row = i % cols, i // cols
+            x0, y0 = GRID_LEFT + col * cw, grid_top + row * ch
             page.draw_rect(fitz.Rect(x0, y0, x0 + cw, y0 + ch),
                            color=(0.82, 0.82, 0.82), width=0.6)
             page.draw_line((x0 + cw / 2, y0), (x0 + cw / 2, y0 + ch),
@@ -298,13 +395,21 @@ def cmd_template(args):
             page.draw_line((x0, y0 + ch / 2), (x0 + cw, y0 + ch / 2),
                            color=(0.93, 0.93, 0.93), width=0.4)
             fs = min(cw, ch) * 0.42
-            try:
-                w = fitz.get_text_length(c, fontname="china-s", fontsize=fs)
-            except Exception:
-                w = fs
-            page.insert_text((x0 + (cw - w) / 2, y0 + ch / 2 + fs * 0.35),
-                             c, fontname="china-s", fontsize=fs,
-                             color=(0.87, 0.87, 0.87))
+            if rf is not None:
+                # 嵌入字体：希腊字母/数学符号才画得出来，且能用真实字宽度量居中
+                w = rf.text_length(c, fontsize=fs)
+                base = y0 + ch / 2 + (rf.ascender + rf.descender) / 2 * fs
+                page.insert_text((x0 + (cw - w) / 2, base), c,
+                                 fontname="ref", fontsize=fs,
+                                 color=(0.87, 0.87, 0.87))
+            else:
+                try:
+                    w = fitz.get_text_length(c, fontname="china-s", fontsize=fs)
+                except Exception:
+                    w = fs
+                page.insert_text((x0 + (cw - w) / 2, y0 + ch / 2 + fs * 0.35),
+                                 c, fontname="china-s", fontsize=fs,
+                                 color=(0.87, 0.87, 0.87))
             page.insert_text((x0 + 2, y0 + 8), str(i + 1),
                              fontname="helv", fontsize=5.5,
                              color=(0.72, 0.72, 0.72))
@@ -313,19 +418,34 @@ def cmd_template(args):
                          fontname="helv", fontsize=7, color=(0.5, 0.5, 0.5))
 
     pdf = os.path.join(args.out, "scan_template.pdf")
-    doc.save(pdf, deflate=True)
+    # 参考字字体（Segoe UI Symbol 约 2.4MB）整份嵌入会让 PDF 涨到 1.7MB；
+    # 子集化只保留实际用到的百来个字形，压到 0.2MB 左右，打印效果不变。
+    if ref_path:
+        try:
+            doc.subset_fonts()
+        except Exception:
+            pass
+    doc.save(pdf, deflate=True, garbage=4)
+    if getattr(args, "preview", False):
+        doc[0].get_pixmap(dpi=140).save(os.path.join(args.out, "template_preview.png"))
     doc.close()
 
     layout = {
         "page": {"w": PAGE_W, "h": PAGE_H, "dpi": args.dpi},
-        "grid": {"left": GRID_LEFT, "top": GRID_TOP, "cols": COLS,
+        "grid": {"left": GRID_LEFT, "top": grid_top, "cols": cols,
                  "rows": rows, "cell_w": cw, "cell_h": ch, "pad": PAD},
         "markers": {"margin": MARGIN, "size": MARK},
         "chars": chars, "count": len(chars), "passes": args.passes,
     }
+    if groups:
+        layout["groups"] = [{"name": n, "count": len(s)} for n, s in groups]
     with open(os.path.join(args.out, "layout.json"), "w", encoding="utf-8") as f:
         json.dump(layout, f, ensure_ascii=False, indent=2)
     with open(os.path.join(args.out, "chars.txt"), "w", encoding="utf-8") as f:
+        if groups:
+            for n, s in groups:
+                f.write("# %s（%d 字）\n%s\n\n" % (n, len(s), s))
+            f.write("\n")
         for i in range(0, len(chars), 20):
             f.write("".join(chars[i:i + 20]) + "\n")
         f.write("\n")
@@ -333,7 +453,9 @@ def cmd_template(args):
             f.write("%3d  %s  U+%04X\n" % (i, c, ord(c)))
 
     print("template -> %s  (%d pages, %d chars, %d cols x %d rows)" %
-          (pdf, args.passes, len(chars), COLS, rows))
+          (pdf, args.passes, len(chars), cols, rows))
+    print("glyphs   -> %d x %d pt each" % (round(cw, 1), round(ch, 1)))
+    print("ref font -> %s" % (ref_path or "china-s (无符号覆盖风险)"))
     print("layout   -> %s/layout.json" % args.out)
     print("chars    -> %s/chars.txt" % args.out)
     return 0
@@ -424,10 +546,17 @@ def cmd_segment(args):
                 y1 = (g["top"] + (row + 1) * g["cell_h"] - PAD) * k
                 crop = gray.crop((int(x0), int(y0), int(x1), int(y1)))
                 m = to_mask(crop, args.threshold)
+                # 空格子（用户跳过的字）不写进 labels：否则会生成一个没有轮廓的
+                # 字形，渲染时该字变成空白，比缺字回退更难查。
+                if mask_ink_pixels(m) < args.min_ink:
+                    print("  pass%d: 第 %d 格（%s）几乎无墨迹，跳过" % (pi, i + 1, ch))
+                    continue
                 name = "p%d_%03d" % (pi, i)
                 save_mask(m, os.path.join(args.out, name + ".png"))
                 labels[name] = ch
-            print("  pass%d: 切出 %d 块 <- %s" % (pi, len(chars), os.path.basename(ipath)))
+            print("  pass%d: 切出 %d 块 <- %s" %
+                  (pi, sum(1 for k in labels if k.startswith("p%d_" % pi)),
+                   os.path.basename(ipath)))
     else:
         # 自由稿：投影法切行 + 按估计字宽找谷点切字；边界可手工改 boxes.json 后再切
         for pi, ipath in enumerate(images, 1):
@@ -678,6 +807,12 @@ def main():
     p.add_argument("--out", default=DEFAULT_OUT)
     p.add_argument("--passes", type=int, default=4)
     p.add_argument("--dpi", type=int, default=200)
+    p.add_argument("--charset", choices=["default", "en"], default="default",
+                   help="default=从正文提取；en=英文字母 + 数字 + 希腊字母 + 物理符号")
+    p.add_argument("--chars", help="直接给字表字符串（会去重，空格忽略）")
+    p.add_argument("--cols", type=int, default=COLS, help="每行格数")
+    p.add_argument("--ref-font", help="参考字字体（默认自动找 Segoe UI Symbol）")
+    p.add_argument("--preview", action="store_true", help="额外导出第一页 PNG 预览")
     p.set_defaults(func=cmd_template)
 
     p = sub.add_parser("segment", help="切分扫描图 → 字块 + 联系表 + labels.json")
