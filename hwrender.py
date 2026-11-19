@@ -86,7 +86,8 @@ class Hand:
         r = self.rng
         j = self.jitter
         return dict(
-            dy=r.uniform(-0.8, 0.8) * j * SCALE / 4.0 * 1.0,   # px（以 4x 计）
+            # 上下起伏要克制：±0.8px 时每个字像各写各的，收到 ±0.3px 更像同一支笔
+            dy=r.uniform(-0.3, 0.3) * j * SCALE / 4.0,
             dx=r.uniform(-0.6, 0.6) * j * SCALE / 4.0,
             scale=1.0 + r.uniform(-0.035, 0.035) * j,
             rot=r.uniform(-1.2, 1.2) * j,
@@ -206,10 +207,15 @@ class Hand:
             heights.append(h_i)
             baselines.append(b_i)
 
+        # 行距微抖动：完全等距看起来像排版软件，真人写不出这么准的间距。
+        # 幅度取 ±0.9px（≈±0.22pt），只破坏「机械等距」的观感，不影响阅读。
+        gaps = [int(round(self.rng.uniform(-0.9, 0.9) * self.jitter))
+                for _ in lines]
+
         # 画布先给足（标点悬挂会略超列宽，抖动还有随机外扩），渲染后按墨迹裁边
         need = max([m[0] for m in metrics] + [width_pt * SCALE])
         W = int(math.ceil(need * 1.06 + 8))
-        H = sum(heights) or int(base_lh)
+        H = max(1, sum(heights) + sum(gaps))
         canvas = Image.new("RGBA", (W, H), (0, 0, 0, 0))
 
         y = 0
@@ -218,8 +224,8 @@ class Hand:
                 canvas.alpha_composite(
                     self._render_line(line, font, px, baselines[i], W / SCALE, heights[i]),
                     (0, y))
-            y += heights[i]
-        out = canvas.crop((0, 0, W, y))
+            y += heights[i] + gaps[i]
+        out = canvas.crop((0, 0, W, min(H, y)))
         bb = out.getbbox()
         if bb:
             out = out.crop((0, 0, min(out.width, bb[2] + 2), out.height))
@@ -230,7 +236,9 @@ class Hand:
         lh = int(line_h)
         img = Image.new("RGBA", (W, lh), (0, 0, 0, 0))
         ascent = font.getmetrics()[0]
-        x = self.rng.uniform(0, 3.0) * self.jitter      # 每行起笔位置随机
+        # 每行起笔位置：极其微小的左右偏移（±1.2px≈±0.3pt），只为打散「每行左端齐平」的机械感。
+        # 加 2px 基底偏移，避免负值时贴图左边被画布裁掉。
+        x = 2.0 + self.rng.uniform(-1.2, 1.2) * self.jitter
         atoms = _atoms(line)
         n = max(1, len(atoms))
         right = -1e9
