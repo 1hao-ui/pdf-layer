@@ -1,9 +1,19 @@
+# 下载的 4 款 OFL 手写字体原件（体积大，由 fetch_fonts.ps1 生成）
 fonts/*.ttf
 fonts/*.otf
-# 用户手写笔迹字库：私人资产，不入库
+
+# 私人原件 / 手稿原图：不入库
+#   fonts/user/   字嗨导出的原始 OTF（改名为 Z体 之前的原件）
+#   my-ziti/      14 张真实手稿照片
+#   out/*         切字、标注、样张等中间产物
 fonts/user/
+my-ziti/
 out/*
 __pycache__/
 *.pyc
 # 本地工作区数据（记忆、审查副本），不入库
 .workbuddy/
+
+# 例外：fonts/ZTi/ 是公开发布的「Z体」字库，必须入库
+!fonts/ZTi/
+!fonts/ZTi/**
