@@ -153,7 +153,7 @@ def _formula_scale(font_path, size_px, math_font_path):
         if got <= 0:
             return MATH_SIZE_COMP
         # 需要的倍数（乘 1.0 是因为引擎内部按 size_px 直接用）
-        k = (tgt * 0.86) / got
+        k = (tgt * 0.95) / got
         return max(0.8, min(2.2, k))
     except Exception:
         return MATH_SIZE_COMP
@@ -169,8 +169,11 @@ def _box(latex, size_px, font_path, ink, math_font_path=None, display=False):
         import fontcal
         tgt = fontcal.ink_height_at(font_path, "国", max(4, int(round(size_px))))
         if tgt:
-            want = tgt * 0.86
-            for _ in range(2):
+            want = tgt * 0.95
+            # 含汉字的公式不做闭环：汉字在公式引擎里按字体度量渲染，
+            # 高度本来就不同，硬拉会把它放大到 1.8 倍（实测）。
+            skip_loop = any("\u4e00" <= c <= "\u9fff" for c in latex)
+            for _ in range(0 if skip_loop else 2):
                 bb = box.image.getbbox()
                 if not bb:
                     break
