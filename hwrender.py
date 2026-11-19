@@ -645,14 +645,18 @@ class Hand:
         right = -1e9
         for k, (kind, val) in enumerate(atoms):
             if kind in ("f", "d"):
-                # 公式整体当一个原子：不可拆、不与前后字重叠
+                # 公式整体当一个原子：不可拆、不与前后字重叠。
+                # 公式里的单字符也参与 4 套轮换（用首字符决定，整条公式同一套，
+                # 否则一条式子里字体会跳来跳去）。
                 disp = (kind == "d")
+                first = next((c for c in val if not c.isspace()), "")
+                used_f = (self._variant_for(first) if first else None) or self.math_font_path
                 fw, _fa, _fd = formula.measure(val, px, self.font_path, self.ink,
-                                               self.math_font_path, display=disp)
+                                               used_f, display=disp)
                 if x < right:
                     x = right
                 formula.draw(img, val, x, baseline, px, self.font_path, self.ink,
-                             self.math_font_path, display=disp)
+                             used_f, display=disp)
                 right = x + fw
                 x += fw
                 continue
