@@ -1,6 +1,8 @@
 {
   "ref_px": 54,
   "sample": "相电压功率流生电的",
+  "ascii_sample": "0123456789",
+  "ascii_height_ratio": 0.86,
   "base": "MaShanZheng-Regular-merged.ttf",
   "fonts": {
     "MaShanZheng-Regular-merged.ttf": {
@@ -10,6 +12,22 @@
       "thicken": 0.0,
       "dy": 0.0,
       "dx": 0.0
+    },
+    "LongCang-Regular-merged.ttf": {
+      "size_scale": 1.5164,
+      "alpha_gain": 0.9768,
+      "alpha_gamma": 1.0,
+      "thicken": 0.0,
+      "dy": -5.75,
+      "dx": -1.0
+    },
+    "ZhiMangXing-Regular-merged.ttf": {
+      "size_scale": 1.15,
+      "alpha_gain": 0.9882,
+      "alpha_gamma": 1.0,
+      "thicken": 0.0,
+      "dy": -1.5,
+      "dx": 0.5
     },
     "ZTi-01.otf": {
       "size_scale": 1.5256,
