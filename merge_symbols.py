@@ -88,6 +88,58 @@ def merge(cn_path, sym_path, out_path, extra=()):
     return added
 
 
+# ---------------------------------------------------------------- 字形替换
+# 有些字符字体里本来就有，但写法不符合「正常人写字」。典型是小写 a：
+# 龙藏体/楷体都写成双层 a（印刷体的那种，带顶钩），而日常手写是单层 ɑ
+# （就是 @ 里面那个 a）。这里用 Ink Free（Windows 自带手写体）的单层 a 覆盖掉。
+REPLACE_FONT = r"C:\Windows\Fonts\inkfree.ttf"
+REPLACE_CPS = {0x61: "小写 a 用单层 ɑ"}
+
+
+def replace_glyphs(cn_path, src_path, out_path, cps):
+    """把 cps 里的码位用 src_path 的字形覆盖（不是新增，是替换）。"""
+    dst = TTFont(cn_path)
+    src = TTFont(src_path, fontNumber=0)
+    src_cmap = src.getBestCmap()
+    src_gs = src.getGlyphSet()
+    upem_src = src["head"].unitsPerEm
+    upem_dst = dst["head"].unitsPerEm
+    scale = upem_dst / float(upem_src)
+
+    glyf = dst["glyf"]
+    hmtx = dst["hmtx"]
+    order = list(dst.getGlyphOrder())
+    dst_cmap = dst.getBestCmap()
+    done = []
+    for cp in cps:
+        gname = src_cmap.get(cp)
+        if not gname:
+            continue
+        target = dst_cmap.get(cp)
+        if target is None:
+            target = "uni%04X" % cp
+            order.append(target)
+        rp = DecomposingRecordingPen(src_gs)
+        src_gs[gname].draw(rp)
+        pen = TTGlyphPen(None)
+        from fontTools.pens.transformPen import TransformPen
+        rp.replay(TransformPen(pen, (scale, 0, 0, scale, 0, 0)))
+        g = pen.glyph()
+        glyf.glyphs[target] = g
+        adv = int(round(src["hmtx"][gname][0] * scale))
+        hmtx.metrics[target] = (adv, getattr(g, "xMin", 0) or 0)
+        for tb in dst["cmap"].tables:
+            if tb.format in (4, 12):
+                try:
+                    tb.cmap[cp] = target
+                except Exception:
+                    pass
+        done.append(chr(cp))
+    dst.setGlyphOrder(order)
+    dst.save(out_path)
+    return done
+
+
 def main():
     d = os.path.dirname(os.path.abspath(__file__))
     if len(sys.argv) == 4:
@@ -102,6 +154,13 @@ def main():
             a = merge(cn, sym, out)
             print("%-30s merged %2d glyphs -> %s (%d bytes)"
                   % (os.path.basename(cn), len(a), os.path.basename(out), os.path.getsize(out)))
+            # 替换不符合日常写法的字形（单层 a）
+            if os.path.exists(REPLACE_FONT):
+                rep = replace_glyphs(out, REPLACE_FONT, out, REPLACE_CPS)
+                print("%-30s replaced %d glyphs: %r"
+                      % ("", len(rep), "".join(rep)))
+            else:
+                print("%-30s 跳过字形替换（缺 %s）" % ("", REPLACE_FONT))
         except Exception as e:
             print("%-30s FAIL %r" % (os.path.basename(cn), e))
 
