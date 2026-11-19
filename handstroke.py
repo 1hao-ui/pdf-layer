@@ -62,6 +62,21 @@ _GREEK_WIDTH_RATIO = 0.032
 _BIGOP = set("∑∫∏∬∭")
 _BIGOP_WIDTH_RATIO = 0.040
 
+# 公式里这些字符要额外缩小：公式整体字号有 1.65 倍补偿，字母大小是对的，
+# 但 ∑/Ω 这类本身字形就高的符号会被一起放大到汉字的 1.6 倍，明显过大。
+_UPPER_GREEK = set("ΓΔΘΛΞΠΣΥΦΨΩ")
+_FORMULA_SHRINK_BIGOP = 0.70      # ∑ ∫ ∏：墨迹高原本约为汉字的 1.6 倍
+_FORMULA_SHRINK_CAP = 0.72        # 大写希腊：同上
+
+
+def _formula_shrink(ch):
+    """公式路径下该字符的缩放系数（正文路径不用）。"""
+    if ch in _BIGOP:
+        return _FORMULA_SHRINK_BIGOP
+    if ch in _UPPER_GREEK:
+        return _FORMULA_SHRINK_CAP
+    return 1.0
+
 # render_strokes 内部会留 4.5% 的内边距，这里反向补偿，保证符号大小与字面一致
 _FIT = 1.0 / (1.0 - 2 * 0.045)
 _TILE_PAD = 6
@@ -154,7 +169,7 @@ def _custom_strokes(ch):
     return maker() if maker else None
 
 
-def tile(ch, size_px, ink, font_path, seed=0):
+def tile(ch, size_px, ink, font_path, seed=0, shrink=1.0):
     """返回 (RGBA 贴图, ox, oy)，与 hwrender._char_tile 的契约完全一致。
 
     贴图内：笔位在 (pad - l, pad - t)，墨迹按字体真实位置摆放，
@@ -169,9 +184,16 @@ def tile(ch, size_px, ink, font_path, seed=0):
     if not strokes:
         return None, 0, 0
 
+    # shrink < 1 时把墨迹整体缩小，但仍居中在原墨迹框内——
+    # 这样基线不变，只是符号本身变小（用于公式里被放大 1.65 倍的 ∑/Ω 等）。
+    draw_w = max(1, int(round(ink_w * shrink)))
+    draw_h = max(1, int(round(ink_h * shrink)))
+    inset_x = (ink_w - draw_w) / 2.0
+    inset_y = (ink_h - draw_h) / 2.0
+
     # 骨架按真实墨迹框缩放；_FIT 抵消 render_strokes 的内部留白
-    box_w = max(2, int(round(ink_w * _FIT)))
-    box_h = max(2, int(round(ink_h * _FIT)))
+    box_w = max(2, int(round(draw_w * _FIT)))
+    box_h = max(2, int(round(draw_h * _FIT)))
     rng = np.random.default_rng(abs(hash((ch, size_px, seed))) % (2 ** 63))
     if ch in _GREEK:
         ratio = _GREEK_WIDTH_RATIO
@@ -179,7 +201,8 @@ def tile(ch, size_px, ink, font_path, seed=0):
         ratio = _BIGOP_WIDTH_RATIO
     else:
         ratio = _WIDTH_RATIO
-    stroke_w = max(1.2, size_px * ratio)
+    # 缩小后笔画也应同比例变细，否则小字形配粗笔道会糊成一团
+    stroke_w = max(1.2, size_px * ratio * shrink)
     glyph = render_strokes(strokes, box_w, box_h, stroke_w, ink, rng, STYLE,
                            em_size=size_px)
     # 墨色补到正文水平（符号原本平均 alpha≈139，正文汉字≈170）
@@ -190,12 +213,12 @@ def tile(ch, size_px, ink, font_path, seed=0):
     canvas_h = max(ink_h + 2 * _TILE_PAD, box_h)
     canvas = Image.new("RGBA", (canvas_w, canvas_h), (0, 0, 0, 0))
 
-    # 墨迹左上角在贴图内的位置：笔位(pad - l, pad - t) + 相对偏移(x0, y0)
-    px0 = _TILE_PAD - l + x0
-    py0 = _TILE_PAD - t + y0
+    # 墨迹左上角在贴图内的位置：笔位(pad - l, pad - t) + 相对偏移(x0, y0) + 缩小留白
+    px0 = _TILE_PAD - l + x0 + inset_x
+    py0 = _TILE_PAD - t + y0 + inset_y
     # 以墨迹框中心对齐（box 比墨迹大一点，需要回退半个差值）
-    dx = px0 - (box_w - ink_w) / 2.0
-    dy = py0 - (box_h - ink_h) / 2.0
+    dx = px0 - (box_w - draw_w) / 2.0
+    dy = py0 - (box_h - draw_h) / 2.0
     canvas.alpha_composite(glyph, (int(round(dx)), int(round(dy))))
     return canvas, _TILE_PAD - l, _TILE_PAD - t
 
@@ -272,7 +295,8 @@ def inline_patch(engine):
             glyph_y = baseline - font.getmetrics()[0] + self._glyph_vertical_adjustment(char, size_px)
             if available(char):
                 t, ox, oy = tile(char, size_px, self.ink, font_path,
-                                 seed=rand.randrange(1 << 30))
+                                 seed=rand.randrange(1 << 30),
+                                 shrink=_formula_shrink(char))
                 if t is not None:
                     # 笔位对齐：贴图内笔位在 (pad - l, pad - t)，这里把笔位放到 (pad, glyph_y)
                     glyph.alpha_composite(
