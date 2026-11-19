@@ -281,22 +281,6 @@ class MatrixNode:
 MathNode = TextNode | OperatorNameNode | SpaceNode | IgnoreNode | StyleNode | GeneratedSymbolNode | RowNode | FractionNode | RootNode | ScriptNode | LimitsNode | AccentNode | BinomialNode | MatrixNode
 
 
-def _ink_asc(box) -> int:
-    """墨迹顶到基线的距离（不是字体 ascent）。"""
-    bb = box.image.getbbox()
-    if bb is None:
-        return box.baseline
-    return max(0, box.baseline - bb[1])
-
-
-def _ink_desc(box) -> int:
-    """基线到墨迹底的距离。"""
-    bb = box.image.getbbox()
-    if bb is None:
-        return max(0, box.height - box.baseline)
-    return max(0, bb[3] - box.baseline)
-
-
 @dataclass
 class MathBox:
     image: Image.Image
@@ -749,7 +733,6 @@ class FormulaRenderer:
         )
 
     def _layout(self, node: MathNode, size_px: int, seed_extra: str, display_style: bool = False) -> MathBox:
-
         if isinstance(node, TextNode):
             return self._text_box(node.text, size_px, seed_extra)
         if isinstance(node, OperatorNameNode):
@@ -883,9 +866,7 @@ class FormulaRenderer:
         denominator = self._layout(node.denominator, child_size, f"{seed_extra}:den")
         rule_overhang = max(3, round(size_px * 0.12))
         side_pad = rule_overhang + max(2, round(size_px * 0.05))
-        # 本地改动：垂直间距 0.12 -> 0.07。分式行高直接决定行距，
-        # 原系数在放大字号后让分式行高达基准行距的 1.7 倍，整段行距忽大忽小。
-        gap = max(3, round(size_px * 0.07))
+        gap = max(3, round(size_px * 0.12))
         stroke = self._stroke_width(size_px)
         stroke_extent = max(1, math.ceil(stroke))
         tilt, bend, jitter = self._rule_variation(size_px)
@@ -957,38 +938,19 @@ class FormulaRenderer:
         script_size = max(9, round(size_px * 0.58))
         superscript = self._layout(node.superscript, script_size, f"{seed_extra}:sup") if node.superscript else None
         subscript = self._layout(node.subscript, script_size, f"{seed_extra}:sub") if node.subscript else None
-
-        # 本地改动：按「墨迹盒」定位，不用固定基线偏移。
-        # 扫描字库的字形高低不一，按基线算会让下标掉出去（实测 x_1 的 1
-        # 落到基线下方一整行）。这里直接对齐墨迹边缘：
-        #   上标底边  ≈ base 顶部往下 10%
-        #   下标顶边  ≈ base 基线往下 10%
-        base_top = base.baseline - _ink_asc(base)
-        base_bot = _ink_desc(base)
-        gap = max(1, round(size_px * 0.06))
-        script_x = max(1, base.width - round(size_px * 0.06))
-
-        sup_y = 0
-        base_y = 0
-        if superscript:
-            sup_h = superscript.height
-            sup_top_target = base_top - sup_h + round(size_px * 0.10)
-            sup_y = sup_top_target
-            if sup_y < 0:                       # 上标比 base 高，整体下移
-                base_y = -sup_y
-                sup_y = 0
-        sub_y = 0
-        if subscript:
-            # 关键：要让「下标墨迹顶部」贴着基线下方，而不是「下标盒顶部」。
-            # 下标盒顶部到墨迹顶部有 _ink_asc 那么高的空白，不减掉就会
-            # 把下标推到基线下方一大截（实测 x_1 的 1 掉了将近一行）。
-            sub_y = base_y + base.baseline + gap - _ink_asc(subscript)
-
+        raise_by = round(size_px * 0.34)
+        lower_by = round(size_px * 0.23)
+        initial_sup_y = base.baseline - raise_by - superscript.baseline if superscript else 0
+        base_y = max(0, -initial_sup_y)
+        baseline = base_y + base.baseline
+        script_x = max(1, base.width - round(size_px * 0.09))
+        sup_y = base_y + initial_sup_y
+        sub_y = baseline + lower_by - subscript.baseline if subscript else 0
         height = base_y + base.height
+        if superscript:
+            height = max(height, superscript.height)
         if subscript:
             height = max(height, sub_y + subscript.height)
-        if superscript:
-            height = max(height, sup_y + superscript.height)
         width = base.width + max(
             superscript.width if superscript else 0,
             subscript.width if subscript else 0,
@@ -999,7 +961,7 @@ class FormulaRenderer:
             image.alpha_composite(superscript.image, (script_x, sup_y))
         if subscript:
             image.alpha_composite(subscript.image, (script_x, sub_y))
-        return MathBox(image, base_y + base.baseline)
+        return MathBox(image, baseline)
 
     def _integral_side_scripts_box(
         self,
@@ -1008,37 +970,24 @@ class FormulaRenderer:
         seed_extra: str,
         display_style: bool = False,
     ) -> MathBox:
-        """∑ ∏ ∫ 的上下限写在侧边（手写习惯）。
-
-        定位规则同样按墨迹盒：
-          · 上标底边贴着运算符顶部往下 8%
-          · 下标顶边贴着运算符基线往下 6%
-        这样 i=1 不会掉出运算符底部一整行。
-        """
         base = self._layout(node.base, size_px, f"{seed_extra}:base", display_style)
         script_size = max(9, round(size_px * 0.54))
         superscript = self._layout(node.superscript, script_size, f"{seed_extra}:sup") if node.superscript else None
         subscript = self._layout(node.subscript, script_size, f"{seed_extra}:sub") if node.subscript else None
-
-        base_top = base.baseline - _ink_asc(base)
-        gap = max(1, round(size_px * 0.05))
-        script_x = max(1, base.width - round(size_px * 0.06))
-
-        sup_y = 0
-        base_y = 0
-        if superscript:
-            sup_y = base_top - superscript.height + round(size_px * 0.08)
-            if sup_y < 0:
-                base_y = -sup_y
-                sup_y = 0
-        sub_y = 0
-        if subscript:
-            # 同上：减去下标墨迹到盒顶的空白，让墨迹顶贴基线
-            sub_y = base_y + base.baseline + gap - _ink_asc(subscript)
-
-        width = max(base.width,
-                    script_x + superscript.width if superscript else 0,
-                    script_x + subscript.width if subscript else 0)
+        raise_by = round(size_px * 0.57)
+        lower_by = round(size_px * 0.25)
+        initial_sup_y = base.baseline - raise_by - superscript.baseline if superscript else 0
+        base_y = max(0, -initial_sup_y)
+        baseline = base_y + base.baseline
+        sup_x = max(1, base.width - round(size_px * 0.09))
+        sub_x = max(1, base.width - round(size_px * 0.24))
+        sup_y = base_y + initial_sup_y
+        sub_y = baseline + lower_by - subscript.baseline if subscript else 0
+        width = max(
+            base.width,
+            sup_x + superscript.width if superscript else 0,
+            sub_x + subscript.width if subscript else 0,
+        )
         height = base_y + base.height
         if superscript:
             height = max(height, sup_y + superscript.height)
@@ -1047,10 +996,10 @@ class FormulaRenderer:
         image = Image.new("RGBA", (max(1, width), max(1, height)), (0, 0, 0, 0))
         image.alpha_composite(base.image, (0, base_y))
         if superscript:
-            image.alpha_composite(superscript.image, (script_x, sup_y))
+            image.alpha_composite(superscript.image, (sup_x, sup_y))
         if subscript:
-            image.alpha_composite(subscript.image, (script_x, sub_y))
-        return MathBox(image, base_y + base.baseline)
+            image.alpha_composite(subscript.image, (sub_x, sub_y))
+        return MathBox(image, baseline)
 
     def _operator_limit_mode(self, node: MathNode) -> tuple[str | None, str | None]:
         mode = None
@@ -1064,54 +1013,37 @@ class FormulaRenderer:
         return None, mode
 
     def _should_stack_limits(self, symbol: str, limit_mode: str | None, display_style: bool) -> bool:
-        # 本地改动：默认「侧挂」而不是堆叠。
-        # 真人手写 ∑ 的上下限通常写在右侧（上标/下标位置），很少把 n 和 i=1
-        # 上下摞起来——那样写起来慢、也容易写歪（用户反馈原话）。
-        # 需要堆叠时用 \limits 显式要求，例如 \sum\limits_{i=1}^{n}。
         if limit_mode == "limits":
             return True
         if limit_mode == "nolimits":
             return False
         if limit_mode == "displaylimits":
-            return display_style and STACK_LIMITS_IN_DISPLAY
-        return display_style and STACK_LIMITS_IN_DISPLAY and symbol not in INTEGRAL_SYMBOLS
+            return display_style
+        return display_style and symbol not in INTEGRAL_SYMBOLS
 
     def _operator_limits_box(self, node: ScriptNode, size_px: int, seed_extra: str) -> MathBox:
-        # 本地改动：上下限字号 0.50 -> 0.62、间隙 0.025 -> 0.10。
-        # 原参数下 i=1 几乎贴住 ∑ 底边、上下限也偏小，手写观感很差。
         base = self._layout(node.base, size_px, f"{seed_extra}:base")
-        script_size = max(10, round(size_px * 0.72))
+        script_size = max(9, round(size_px * 0.5))
         superscript = self._layout(node.superscript, script_size, f"{seed_extra}:sup") if node.superscript else None
         subscript = self._layout(node.subscript, script_size, f"{seed_extra}:sub") if node.subscript else None
-        gap = max(2, round(size_px * 0.08))
+        gap = max(1, round(size_px * 0.025))
         symbol, _ = self._operator_limit_mode(node.base)
         is_integral = symbol in INTEGRAL_SYMBOLS
         script_shift = round(size_px * 0.05) if is_integral else 0
-        # 本地改动：上下限按「运算符中心」对齐。
-        # 原实现用 max(各宽度) 作盒宽再各自居中，∑ 放大后 base.width 变大、
-        # 上下限却按旧宽度算，结果 n / i=1 明显偏右。
-        op_cx = base.width / 2.0
-        need_left = op_cx
-        need_right = op_cx
-        if superscript:
-            need_left = max(need_left, superscript.width / 2.0 - script_shift)
-            need_right = max(need_right, superscript.width / 2.0 + script_shift)
-        if subscript:
-            need_left = max(need_left, subscript.width / 2.0 + script_shift)
-            need_right = max(need_right, subscript.width / 2.0 - script_shift)
-        width = int(math.ceil(need_left + need_right))
-        op_x = int(round(need_left - op_cx))
+        width = max(
+            base.width,
+            (superscript.width + abs(script_shift)) if superscript else 0,
+            (subscript.width + abs(script_shift)) if subscript else 0,
+        )
         base_y = superscript.height + gap if superscript else 0
         sub_y = base_y + base.height + gap
         height = base_y + base.height + (gap + subscript.height if subscript else 0)
         image = Image.new("RGBA", (max(1, width), max(1, height)), (0, 0, 0, 0))
-        image.alpha_composite(base.image, (op_x, base_y))
+        image.alpha_composite(base.image, ((width - base.width) // 2, base_y))
         if superscript:
-            sx = int(round(op_x + op_cx - superscript.width / 2.0 + script_shift))
-            image.alpha_composite(superscript.image, (sx, 0))
+            image.alpha_composite(superscript.image, ((width - superscript.width) // 2 + script_shift, 0))
         if subscript:
-            sx = int(round(op_x + op_cx - subscript.width / 2.0 - script_shift))
-            image.alpha_composite(subscript.image, (sx, sub_y))
+            image.alpha_composite(subscript.image, ((width - subscript.width) // 2 - script_shift, sub_y))
         return MathBox(image, base_y + base.baseline)
 
     def _accent_box(self, node: AccentNode, size_px: int, seed_extra: str, display_style: bool = False) -> MathBox:
@@ -1296,12 +1228,10 @@ class FormulaRenderer:
             if self.engine.uses_sdt_trajectories
             else 0.0
         )
-        # 本地改动：0.22 -> 0.06。原 taper 让笔画两端明显收细，
-        # 根号/分数线看起来比字库字形「虚」。
         taper = (
             min(0.8, max(0.0, self.engine.config.sdt_taper))
             if self.engine.uses_sdt_trajectories
-            else 0.06
+            else 0.22
         )
         pressure_phase = self._ink_random.uniform(0.0, math.tau)
         pressure_cycles = self._ink_random.uniform(0.6, 1.4)
@@ -1335,9 +1265,7 @@ class FormulaRenderer:
         for (x, y), radius in zip(points, radii):
             draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=stroke_fill)
         layer = layer.resize(local_size, Image.Resampling.LANCZOS)
-        # 本地改动：程序画的规则笔画（分数线 / 根号）不加墨量抖动与枯笔。
-        # dry_brush 是为手写符号设计的飞白，用在横线上会变成断口、颜色不均。
-        if self.engine.config.second_layer_enabled and not self._weight_seed_extra:
+        if self.engine.config.second_layer_enabled:
             alpha = _vary_ink_density(
                 layer.getchannel("A"),
                 self._ink_random,
@@ -1361,10 +1289,7 @@ class FormulaRenderer:
     def _stroke_width(self, size_px: int) -> float:
         if self.engine.uses_sdt_trajectories:
             return self.engine.uniform_pen_width_px()
-        # 本地改动：0.024 -> 0.050。
-        # 程序画的根号/分数线要和字库字形同粗：实测字形笔画 8-10px（18pt），
-        # 原 0.024 只有 4.6px，细了一半，看着「根号很虚」。
-        return max(1, round(size_px * 0.050))
+        return max(1, round(size_px * 0.024))
 
     def _rule_curve(
         self,
@@ -1385,9 +1310,7 @@ class FormulaRenderer:
         offsets = [0.0]
         offsets.extend(self._rule_jitter_offset(jitter) for _ in range(jitter_count))
         offsets.append(0.0)
-        # 本地改动：采样密度跟长度挂钩（每 1px 一个点）。
-        # 原来固定 8~16 点，长分数线点距大于笔宽，逐点画圆时会出现断口。
-        steps = max(8, (jitter_count + 1) * 8, int(distance))
+        steps = max(8, (jitter_count + 1) * 8)
         points: list[tuple[float, float]] = []
         for step in range(steps + 1):
             ratio = step / steps
