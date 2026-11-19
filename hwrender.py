@@ -411,15 +411,23 @@ class Hand:
         # （用户反馈「右边留白太多，不要都挤到左边」）。
         # 取 max_px² 的 0.04–0.12 量级：能压住「三角形|联结」这种明显拆词，
         # 又不会为了躲拆词把每行都砍到 80% 以下。
-        def break_penalty(j):
+        def break_penalty(j, slack_ratio=0.0):
+            """拆词惩罚：只在「行已经比较满」时才生效。
+
+            早先是无条件惩罚，结果为了不拆词，行写到 85% 就停手，
+            右侧留一大片白（实测区域 575pt 时块宽只有 489pt，空 86pt）。
+            现在加条件：行填充率 < 85% 时不罚——宁可拆一个词也要把行写满；
+            行已经够满（≥85%）时才避免拆词，保留「哪怕挤一点也不拆」的手感。
+            """
             if j <= 0 or j >= n:
+                return 0.0
+            if slack_ratio > 0.15:          # 行还空着，优先填满
                 return 0.0
             left = "".join(tokens[max(0, j - 6):j])
             right = "".join(tokens[j:j + 6])
             for ph in _PHRASES:
                 for cut in range(1, len(ph)):
                     if left.endswith(ph[:cut]) and right.startswith(ph[cut:]):
-                        # 2 字词罚 0.04，6 字词罚 0.12（都是 max_px² 的系数）
                         return max_px * max_px * (0.02 + 0.017 * len(ph))
             return 0.0
 
@@ -444,8 +452,8 @@ class Hand:
                 else:
                     weight = 0.25 if i == n else 1.0   # 末行不追求填满
                     cost = weight * slack * slack
-                # 拆词惩罚：宁可留白也不把固定说法劈开（真人手写的习惯）
-                cost += break_penalty(j)
+                # 拆词惩罚：行接近满时避免拆词；行太空则优先填满
+                cost += break_penalty(j, (slack / max_px) if max_px else 0.0)
                 total = best[j] + cost
                 if total < best[i]:
                     best[i] = total
