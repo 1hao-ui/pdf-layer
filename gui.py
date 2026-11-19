@@ -220,6 +220,14 @@ class App:
         self.canvas = tk.Canvas(parent, background="#9a9a9a", highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
         self.canvas.bind("<Configure>", lambda e: self._redraw())
+        # 滚轮缩放（以光标为中心）、左键拖动平移
+        self.canvas.bind("<MouseWheel>", self._on_wheel)
+        self.canvas.bind("<ButtonPress-1>", self._on_drag_start)
+        self.canvas.bind("<B1-Motion>", self._on_drag_move)
+        self.canvas.bind("<Double-Button-1>", lambda e: self._reset_view())
+        self._drag = None          # (起点x, 起点y, 起始偏移x, 起始偏移y)
+        self._offset = [0, 0]      # 平移量（屏幕像素）
+        self._last_zoom = 1.0
 
     def _build_console(self, parent):
         tk, ttk = self.tk, self.ttk
@@ -331,23 +339,20 @@ class App:
                 return
             font_path = _font_path(self.cfg["font"])
             math_path = _font_path(MATH_FONT_DEFAULT)
-            # 行距是模块级常量，这里临时覆盖（渲染是同步的，改完立刻恢复）
-            old_line = H.DEFAULT_LINE_PT
-            H.DEFAULT_LINE_PT = float(self.cfg["line"])
-            try:
-                hand = H.Hand(
-                    font_path,
-                    size_pt=float(self.cfg["size"]),
-                    ink=tuple(self.cfg["ink"]),
-                    jitter=float(self.cfg["jitter"]),
-                    seed=int(self.cfg["seed"]),
-                    math_font_path=math_path,
-                    variant_fonts=_variant_fonts() if self.cfg["variants"] else None,
-                )
-                img, w_pt, h_pt = hand.render_block(text, width_pt=float(self.cfg["width"]))
-                note = getattr(hand, "style_note", "") or ""
-            finally:
-                H.DEFAULT_LINE_PT = old_line
+            hand = H.Hand(
+                font_path,
+                size_pt=float(self.cfg["size"]),
+                ink=tuple(self.cfg["ink"]),
+                jitter=float(self.cfg["jitter"]),
+                seed=int(self.cfg["seed"]),
+                math_font_path=math_path,
+                variant_fonts=_variant_fonts() if self.cfg["variants"] else None,
+            )
+            # 行距用参数传进去（不再改模块常量，避免多线程互相影响）
+            img, w_pt, h_pt = hand.render_block(
+                text, width_pt=float(self.cfg["width"]),
+                line_pt=float(self.cfg["line"]))
+            note = getattr(hand, "style_note", "") or ""
             self.last_image = img
             self.last_size = (w_pt, h_pt)
             self.root.after(0, lambda: self._on_rendered(img, w_pt, h_pt, note))
@@ -359,6 +364,43 @@ class App:
         self.status.configure(text="块尺寸 %.1f × %.1f pt   %s" % (w_pt, h_pt, note))
         self.log("渲染完成：%.1f × %.1f pt %s" % (w_pt, h_pt, ("｜" + note) if note else ""))
         self._redraw()
+
+    # ------------------------------------------------------------ 缩放/平移
+    def _on_wheel(self, event):
+        """滚轮缩放：以光标位置为中心，手感比「改数值再重算」自然得多。"""
+        cur = float(self.var_zoom.get())
+        if cur <= 0.001:                      # 当前是自动，先固化成实际值
+            cur = self._last_zoom or 1.0
+        factor = 1.15 if event.delta > 0 else 1 / 1.15
+        new = max(0.05, min(8.0, cur * factor))
+        # 让光标下的那个点保持不动
+        cx, cy = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
+        self.var_zoom.set(round(new, 3))
+        self._redraw()
+        # 重绘后按比例补偿偏移
+        if cur > 0:
+            k = new / cur
+            self._offset[0] = int((self._offset[0] + cx) * k - cx)
+            self._offset[1] = int((self._offset[1] + cy) * k - cy)
+            self._redraw()
+
+    def _on_drag_start(self, event):
+        self._drag = (event.x, event.y, self._offset[0], self._offset[1])
+        self.canvas.configure(cursor="fleur")
+
+    def _on_drag_move(self, event):
+        if not self._drag:
+            return
+        x0, y0, ox, oy = self._drag
+        self._offset[0] = ox + (event.x - x0)
+        self._offset[1] = oy + (event.y - y0)
+        self._redraw()
+
+    def _reset_view(self):
+        self._offset = [0, 0]
+        self.var_zoom.set(0)
+        self._redraw()
+        self.canvas.configure(cursor="")
 
     def _redraw(self):
         if self.last_image is None:
@@ -388,13 +430,16 @@ class App:
             else:
                 zoom = min(cw / img.width, ch / img.height)
         zoom = max(0.05, min(8.0, zoom))
+        self._last_zoom = zoom
         disp = img.resize((max(1, int(img.width * zoom)), max(1, int(img.height * zoom))),
                           Image.LANCZOS)
         self._photo = ImageTk.PhotoImage(disp)
         self.canvas.delete("all")
-        self.canvas.create_image(cw // 2, ch // 2, image=self._photo)
+        # 平移量叠加到居中位置（滚轮缩放/左键拖动改的就是这个偏移）
+        self.canvas.create_image(cw // 2 + self._offset[0],
+                                 ch // 2 + self._offset[1], image=self._photo)
         self.canvas.create_text(8, 8, anchor="nw", fill="#f0f0f0",
-                                text="%d%%" % int(zoom * 100))
+                                text="%d%%   滚轮缩放 · 左键拖动 · 双击复位" % int(zoom * 100))
 
     # ------------------------------------------------------------ 导出
     def _ensure_out(self):
