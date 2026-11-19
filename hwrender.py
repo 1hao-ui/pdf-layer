@@ -25,10 +25,9 @@ FONT_DIR = os.path.join(HERE, "fonts")
 
 SCALE = 4                      # 1pt = 4px
 # 手写字要比印刷正文大一号：真人很难把字写得跟印刷体一样小、一样匀。
-# 原 10.9pt 与印刷正文（10.5pt）几乎等高，看起来偏「小气」；
-# 11.8pt 仍偏小，13.5pt 才接近真实手写尺寸（约 4.8mm 见方）。
-DEFAULT_SIZE_PT = 13.5
-DEFAULT_LINE_PT = 25.0         # 行距保持约 1.85 倍字号
+# 13.5pt 偏大（整段占页太多、符号也跟着变大），12.4pt 是「明显大于印刷体」又不夸张的值。
+DEFAULT_SIZE_PT = 12.4
+DEFAULT_LINE_PT = 23.0         # 行距保持约 1.85 倍字号
 INK = (16, 16, 18)             # 墨色 RGB：黑笔（alpha 逐字抖动）
 PAGE_LEFT_PT = 64.0
 PAGE_RIGHT_PT = 468.0
@@ -106,7 +105,9 @@ class Hand:
         )
 
     def _char_tile(self, ch, px, p):
-        boost = 1.15 if ord(ch) in _SYM_CP else 1.0     # 符号字形偏小，放大一点才和汉字同高
+        # 符号原本给 1.15 倍补偿「字形偏小」，但实测合并进来的 Ω/∑/∫ 墨迹本来就
+        # 比汉字大 7–31%，再放大就是「符号比字还大」。改为不放大。
+        boost = 1.0
         size = max(4, int(round(px * p["scale"] * boost)))
         # 合并字体里的数学符号是印刷体轮廓，走「骨架 → 变宽笔道」重绘，
         # 才能和周围手写字迹看起来是同一支笔写出来的。

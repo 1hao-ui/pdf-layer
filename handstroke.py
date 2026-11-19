@@ -35,14 +35,16 @@ STROKE_SYMBOLS = set(
     "ΓΔΘΛΞΠΥΦΨ"
 )
 
-# 笔迹风格：轻微旋转 + 低频坐标扰动 + 笔压抖动 + 起收笔渐细
-# taper/width_jitter 不能太大：太大会像马克笔，正常人写希腊字母是细笔道
+# 笔迹风格：轻微旋转 + 低频坐标扰动 + 笔压抖动
+# taper（起收笔渐细）和 width_jitter（笔压变化）必须很小：
+# 大了会让 Ω ∑ 这类符号看起来像毛笔/马克笔写的「硬刷体」，正常人用中性笔写符号
+# 是一根粗细基本均匀的线。
 STYLE = TrajectoryStyle(
-    rotation_sigma_deg=0.9,
-    coordinate_jitter=0.45,
+    rotation_sigma_deg=0.6,
+    coordinate_jitter=0.35,
     jitter_correlation=9.0,
-    width_jitter=0.10,
-    taper=0.18,
+    width_jitter=0.04,
+    taper=0.05,
     supersample=3,
 )
 
@@ -55,6 +57,10 @@ _WIDTH_RATIO = 0.052
 # 按同一比例算出来的笔宽会粗得像马克笔（实测视觉上比汉字粗一倍）。
 _GREEK = set("αβγδεζηθικλμνξοπρστυφχψωΓΔΘΛΞΠΣΥΦΨΩ")
 _GREEK_WIDTH_RATIO = 0.032
+
+# 大运算符（∑ ∫ ∏）在公式里会被额外放大，笔道再细一点才不会像刷子
+_BIGOP = set("∑∫∏∬∭")
+_BIGOP_WIDTH_RATIO = 0.040
 
 # render_strokes 内部会留 4.5% 的内边距，这里反向补偿，保证符号大小与字面一致
 _FIT = 1.0 / (1.0 - 2 * 0.045)
@@ -116,6 +122,19 @@ _CUSTOM = {
     "°": lambda: (_circle(0.5, 0.5, 0.45),),
     # 复合函数圈：略大一点的圆
     "∘": lambda: (_circle(0.5, 0.5, 0.44),),
+    # 求和号 ∑ / 大写 Σ：上横、斜线、下横 三笔。
+    # 骨架提取对这个字形完全失败（实测被切成 160+ 段碎片，还会凭空长出竖线），
+    # 所以必须人工描。方向要点（照印刷字形简化，去掉上下横右端的竖钩）：
+    #   · 上横：从左端拉到右上角
+    #   · 斜线：从**左上**附近起，向右下走到中点，再折向左下到底边（Σ 的中间折）
+    #   · 下横：从左端拉到右端
+    # 早先两版分别画成「<」形和「Z」形，都不对。
+    "∑": lambda: (_poly((0.06, 0.05), (0.94, 0.05)),
+                  _poly((0.16, 0.09), (0.86, 0.50), (0.16, 0.91)),
+                  _poly((0.06, 0.95), (0.94, 0.95))),
+    "Σ": lambda: (_poly((0.06, 0.05), (0.94, 0.05)),
+                  _poly((0.16, 0.09), (0.86, 0.50), (0.16, 0.91)),
+                  _poly((0.06, 0.95), (0.94, 0.95))),
     # 角：顶点在左下，一条水平射线 + 一条斜射线
     "∠": lambda: (_poly((0.10, 0.86), (0.90, 0.86)),
                   _poly((0.10, 0.86), (0.90, 0.14))),
@@ -154,7 +173,12 @@ def tile(ch, size_px, ink, font_path, seed=0):
     box_w = max(2, int(round(ink_w * _FIT)))
     box_h = max(2, int(round(ink_h * _FIT)))
     rng = np.random.default_rng(abs(hash((ch, size_px, seed))) % (2 ** 63))
-    ratio = _GREEK_WIDTH_RATIO if ch in _GREEK else _WIDTH_RATIO
+    if ch in _GREEK:
+        ratio = _GREEK_WIDTH_RATIO
+    elif ch in _BIGOP:
+        ratio = _BIGOP_WIDTH_RATIO
+    else:
+        ratio = _WIDTH_RATIO
     stroke_w = max(1.2, size_px * ratio)
     glyph = render_strokes(strokes, box_w, box_h, stroke_w, ink, rng, STYLE,
                            em_size=size_px)
