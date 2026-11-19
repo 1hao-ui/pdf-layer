@@ -296,6 +296,22 @@ class MatrixNode:
 MathNode = TextNode | OperatorNameNode | SpaceNode | IgnoreNode | StyleNode | GeneratedSymbolNode | RowNode | FractionNode | RootNode | ScriptNode | LimitsNode | AccentNode | BinomialNode | MatrixNode
 
 
+def _ink_asc(box) -> int:
+    """墨迹顶到基线的距离（不是字体 ascent）。"""
+    bb = box.image.getbbox()
+    if bb is None:
+        return box.baseline
+    return max(0, box.baseline - bb[1])
+
+
+def _ink_desc(box) -> int:
+    """基线到墨迹底的距离。"""
+    bb = box.image.getbbox()
+    if bb is None:
+        return max(0, box.height - box.baseline)
+    return max(0, bb[3] - box.baseline)
+
+
 @dataclass
 class MathBox:
     image: Image.Image
@@ -983,19 +999,38 @@ class FormulaRenderer:
         script_size = max(9, round(size_px * 0.58))
         superscript = self._layout(node.superscript, script_size, f"{seed_extra}:sup") if node.superscript else None
         subscript = self._layout(node.subscript, script_size, f"{seed_extra}:sub") if node.subscript else None
-        raise_by = round(size_px * 0.34)
-        lower_by = round(size_px * 0.23)
-        initial_sup_y = base.baseline - raise_by - superscript.baseline if superscript else 0
-        base_y = max(0, -initial_sup_y)
-        baseline = base_y + base.baseline
-        script_x = max(1, base.width - round(size_px * 0.09))
-        sup_y = base_y + initial_sup_y
-        sub_y = baseline + lower_by - subscript.baseline if subscript else 0
-        height = base_y + base.height
+
+        # 本地改动：按「墨迹盒」定位，不用固定基线偏移。
+        # 扫描字库的字形高低不一，按基线算会让下标掉出去（实测 x_1 的 1
+        # 落到基线下方一整行）。这里直接对齐墨迹边缘：
+        #   上标底边  ≈ base 顶部往下 10%
+        #   下标顶边  ≈ base 基线往下 10%
+        base_top = base.baseline - _ink_asc(base)
+        base_bot = _ink_desc(base)
+        gap = max(1, round(size_px * 0.06))
+        script_x = max(1, base.width - round(size_px * 0.06))
+
+        sup_y = 0
+        base_y = 0
         if superscript:
-            height = max(height, superscript.height)
+            sup_h = superscript.height
+            sup_top_target = base_top - sup_h + round(size_px * 0.10)
+            sup_y = sup_top_target
+            if sup_y < 0:                       # 上标比 base 高，整体下移
+                base_y = -sup_y
+                sup_y = 0
+        sub_y = 0
+        if subscript:
+            # 关键：要让「下标墨迹顶部」贴着基线下方，而不是「下标盒顶部」。
+            # 下标盒顶部到墨迹顶部有 _ink_asc 那么高的空白，不减掉就会
+            # 把下标推到基线下方一大截（实测 x_1 的 1 掉了将近一行）。
+            sub_y = base_y + base.baseline + gap - _ink_asc(subscript)
+
+        height = base_y + base.height
         if subscript:
             height = max(height, sub_y + subscript.height)
+        if superscript:
+            height = max(height, sup_y + superscript.height)
         width = base.width + max(
             superscript.width if superscript else 0,
             subscript.width if subscript else 0,
@@ -1006,7 +1041,7 @@ class FormulaRenderer:
             image.alpha_composite(superscript.image, (script_x, sup_y))
         if subscript:
             image.alpha_composite(subscript.image, (script_x, sub_y))
-        return MathBox(image, baseline)
+        return MathBox(image, base_y + base.baseline)
 
     def _integral_side_scripts_box(
         self,
@@ -1015,24 +1050,37 @@ class FormulaRenderer:
         seed_extra: str,
         display_style: bool = False,
     ) -> MathBox:
+        """∑ ∏ ∫ 的上下限写在侧边（手写习惯）。
+
+        定位规则同样按墨迹盒：
+          · 上标底边贴着运算符顶部往下 8%
+          · 下标顶边贴着运算符基线往下 6%
+        这样 i=1 不会掉出运算符底部一整行。
+        """
         base = self._layout(node.base, size_px, f"{seed_extra}:base", display_style)
         script_size = max(9, round(size_px * 0.54))
         superscript = self._layout(node.superscript, script_size, f"{seed_extra}:sup") if node.superscript else None
         subscript = self._layout(node.subscript, script_size, f"{seed_extra}:sub") if node.subscript else None
-        raise_by = round(size_px * 0.57)
-        lower_by = round(size_px * 0.25)
-        initial_sup_y = base.baseline - raise_by - superscript.baseline if superscript else 0
-        base_y = max(0, -initial_sup_y)
-        baseline = base_y + base.baseline
-        sup_x = max(1, base.width - round(size_px * 0.09))
-        sub_x = max(1, base.width - round(size_px * 0.24))
-        sup_y = base_y + initial_sup_y
-        sub_y = baseline + lower_by - subscript.baseline if subscript else 0
-        width = max(
-            base.width,
-            sup_x + superscript.width if superscript else 0,
-            sub_x + subscript.width if subscript else 0,
-        )
+
+        base_top = base.baseline - _ink_asc(base)
+        gap = max(1, round(size_px * 0.05))
+        script_x = max(1, base.width - round(size_px * 0.06))
+
+        sup_y = 0
+        base_y = 0
+        if superscript:
+            sup_y = base_top - superscript.height + round(size_px * 0.08)
+            if sup_y < 0:
+                base_y = -sup_y
+                sup_y = 0
+        sub_y = 0
+        if subscript:
+            # 同上：减去下标墨迹到盒顶的空白，让墨迹顶贴基线
+            sub_y = base_y + base.baseline + gap - _ink_asc(subscript)
+
+        width = max(base.width,
+                    script_x + superscript.width if superscript else 0,
+                    script_x + subscript.width if subscript else 0)
         height = base_y + base.height
         if superscript:
             height = max(height, sup_y + superscript.height)
@@ -1041,10 +1089,10 @@ class FormulaRenderer:
         image = Image.new("RGBA", (max(1, width), max(1, height)), (0, 0, 0, 0))
         image.alpha_composite(base.image, (0, base_y))
         if superscript:
-            image.alpha_composite(superscript.image, (sup_x, sup_y))
+            image.alpha_composite(superscript.image, (script_x, sup_y))
         if subscript:
-            image.alpha_composite(subscript.image, (sub_x, sub_y))
-        return MathBox(image, baseline)
+            image.alpha_composite(subscript.image, (script_x, sub_y))
+        return MathBox(image, base_y + base.baseline)
 
     def _bigop_base_symbol(self, node: MathNode) -> str | None:
         """若节点是（可能带上下限/上下标的）大运算符，返回其符号。"""
@@ -1066,7 +1114,6 @@ class FormulaRenderer:
         sym = self._bigop_base_symbol(node)
         if sym is None or target_h <= 0:
             return self._layout(node, size_px, seed_extra, display_style)
-        # 先按原字号量一次，得到它自己的高度
         probe = self._layout(node, size_px, seed_extra + ":probe", display_style)
         if probe.height <= 0:
             return probe
@@ -1076,34 +1123,38 @@ class FormulaRenderer:
         k = min(BIGOP_STRETCH_MAX, max(BIGOP_STRETCH_MIN, want / probe.height))
         if k <= 1.02:
             return probe
-        # 只放大运算符本体：把 base 单独放大后排上下限
-        if isinstance(node, (ScriptNode, LimitsNode)) and node.superscript or \
-                isinstance(node, (ScriptNode, LimitsNode)) and node.subscript:
+        has_script = (isinstance(node, (ScriptNode, LimitsNode))
+                      and (node.superscript or node.subscript))
+        if has_script:
             return self._layout_scripts_with_bigop(node, int(round(size_px * k)),
                                                    size_px, seed_extra, display_style)
         return self._layout(node, int(round(size_px * k)), seed_extra, display_style)
 
     def _layout_scripts_with_bigop(self, node, big_size: int, base_size: int,
                                    seed_extra: str, display_style: bool) -> MathBox:
-        """运算符本体用 big_size，上下限仍用 base_size 的比例。"""
+        """运算符本体用 big_size，上下限仍按 base_size 的比例（不跟着放大）。"""
         base = self._layout(node.base, big_size, f"{seed_extra}:bigbase", display_style)
         script_size = max(9, round(base_size * 0.54))
         sup = self._layout(node.superscript, script_size, f"{seed_extra}:sup") \
             if node.superscript else None
         sub = self._layout(node.subscript, script_size, f"{seed_extra}:sub") \
             if node.subscript else None
-        raise_by = round(base_size * 0.57)
-        lower_by = round(base_size * 0.25)
-        initial_sup_y = base.baseline - raise_by - sup.baseline if sup else 0
-        base_y = max(0, -initial_sup_y)
-        baseline = base_y + base.baseline
-        sup_x = max(1, base.width - round(base_size * 0.09))
-        sub_x = max(1, base.width - round(base_size * 0.24))
-        sup_y = base_y + initial_sup_y
-        sub_y = baseline + lower_by - sub.baseline if sub else 0
+        gap = max(1, round(base_size * 0.05))
+        script_x = max(1, base.width - round(base_size * 0.06))
+        base_top = base.baseline - _ink_asc(base)
+        sup_y = 0
+        base_y = 0
+        if sup:
+            sup_y = base_top - sup.height + round(base_size * 0.08)
+            if sup_y < 0:
+                base_y = -sup_y
+                sup_y = 0
+        sub_y = 0
+        if sub:
+            sub_y = base_y + base.baseline + gap - _ink_asc(sub)
         width = max(base.width,
-                    sup_x + sup.width if sup else 0,
-                    sub_x + sub.width if sub else 0)
+                    script_x + sup.width if sup else 0,
+                    script_x + sub.width if sub else 0)
         height = base_y + base.height
         if sup:
             height = max(height, sup_y + sup.height)
@@ -1112,10 +1163,10 @@ class FormulaRenderer:
         image = Image.new("RGBA", (max(1, width), max(1, height)), (0, 0, 0, 0))
         image.alpha_composite(base.image, (0, base_y))
         if sup:
-            image.alpha_composite(sup.image, (sup_x, sup_y))
+            image.alpha_composite(sup.image, (script_x, sup_y))
         if sub:
-            image.alpha_composite(sub.image, (sub_x, sub_y))
-        return MathBox(image, baseline)
+            image.alpha_composite(sub.image, (script_x, sub_y))
+        return MathBox(image, base_y + base.baseline)
 
     def _operator_limit_mode(self, node: MathNode) -> tuple[str | None, str | None]:
         mode = None
