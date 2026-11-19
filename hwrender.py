@@ -337,8 +337,10 @@ class Hand:
             return True
 
         # 拆词惩罚：若在 j 处断行会切断一个「词」，加一笔代价。
-        # 罚金与 slack² 同量级（slack 最大约 max_px，平方后 max_px²），
-        # 所以这里用 max_px² 的系数——太小会被「填满行」的收益盖过去。
+        # 力度要克制：罚太重会让所有行都不敢填满、右侧留一大片白
+        # （用户反馈「右边留白太多，不要都挤到左边」）。
+        # 取 max_px² 的 0.04–0.12 量级：能压住「三角形|联结」这种明显拆词，
+        # 又不会为了躲拆词把每行都砍到 80% 以下。
         def break_penalty(j):
             if j <= 0 or j >= n:
                 return 0.0
@@ -347,8 +349,8 @@ class Hand:
             for ph in _PHRASES:
                 for cut in range(1, len(ph)):
                     if left.endswith(ph[:cut]) and right.startswith(ph[cut:]):
-                        # 越长的词被拆罚得越重；2 字词罚 0.25，6 字词罚 0.65
-                        return max_px * max_px * (0.15 + 0.08 * len(ph))
+                        # 2 字词罚 0.04，6 字词罚 0.12（都是 max_px² 的系数）
+                        return max_px * max_px * (0.02 + 0.017 * len(ph))
             return 0.0
 
         INF = float("inf")

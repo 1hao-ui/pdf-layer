@@ -93,6 +93,10 @@ class App:
             "width": 404.0,
             "variants": False,
             "page": True,
+            # 书写区域（pt，页面坐标）：可以在预览上拖框直接划定。
+            # 默认比正文列宽一些（A4 左右各 56pt 边距），避免右侧留一大片白。
+            "area": [56.0, 180.0, 539.0, 700.0],
+            "area_mode": False,       # 为 True 时在预览上拖框 = 划定书写区域
         }
         self.last_image = None
         self.last_size = (0.0, 0.0)
@@ -177,6 +181,29 @@ class App:
             row=row, column=0, columnspan=2, sticky="w", pady=(6, 2))
         row += 1
 
+        # ---- 书写区域 ----
+        ttk.Separator(box, orient="horizontal").grid(
+            row=row, column=0, columnspan=2, sticky="ew", pady=(6, 2))
+        row += 1
+        area_head = ttk.Frame(box)
+        area_head.grid(row=row, column=0, columnspan=2, sticky="ew")
+        ttk.Label(area_head, text="书写区域（pt）").pack(side="left")
+        ttk.Button(area_head, text="在预览上拖框划定",
+                   command=self._toggle_area_mode).pack(side="right")
+        row += 1
+        self.var_area = [tk.StringVar(value="%.0f" % v) for v in self.cfg["area"]]
+        af = ttk.Frame(box)
+        af.grid(row=row, column=0, columnspan=2, sticky="ew", pady=2)
+        for i, name in enumerate(("左", "上", "右", "下")):
+            ttk.Label(af, text=name).pack(side="left")
+            e = ttk.Entry(af, textvariable=self.var_area[i], width=5)
+            e.pack(side="left", padx=(0, 6))
+            e.bind("<Return>", lambda ev: self.render_async())
+        row += 1
+        ttk.Label(box, text="提示：拖框模式下在预览上按住左键拉出矩形",
+                  foreground="#666").grid(row=row, column=0, columnspan=2, sticky="w")
+        row += 1
+
         ttk.Separator(box, orient="horizontal").grid(
             row=row, column=0, columnspan=2, sticky="ew", pady=6)
         row += 1
@@ -224,10 +251,13 @@ class App:
         self.canvas.bind("<MouseWheel>", self._on_wheel)
         self.canvas.bind("<ButtonPress-1>", self._on_drag_start)
         self.canvas.bind("<B1-Motion>", self._on_drag_move)
+        self.canvas.bind("<ButtonRelease-1>", self._on_drag_end)
         self.canvas.bind("<Double-Button-1>", lambda e: self._reset_view())
         self._drag = None          # (起点x, 起点y, 起始偏移x, 起始偏移y)
         self._offset = [0, 0]      # 平移量（屏幕像素）
         self._last_zoom = 1.0
+        self._disp_img = None
+        self._area_drag = None
 
     def _build_console(self, parent):
         tk, ttk = self.tk, self.ttk
@@ -348,10 +378,13 @@ class App:
                 math_font_path=math_path,
                 variant_fonts=_variant_fonts() if self.cfg["variants"] else None,
             )
+            # 书写区域决定正文宽度（在预览上拖框划定，或用四个数值手填）
+            area = [float(v.get()) for v in self.var_area]
+            left, top, right, bottom = area[0], area[1], area[2], area[3]
+            width_pt = max(60.0, right - left)
             # 行距用参数传进去（不再改模块常量，避免多线程互相影响）
             img, w_pt, h_pt = hand.render_block(
-                text, width_pt=float(self.cfg["width"]),
-                line_pt=float(self.cfg["line"]))
+                text, width_pt=width_pt, line_pt=float(self.cfg["line"]))
             note = getattr(hand, "style_note", "") or ""
             self.last_image = img
             self.last_size = (w_pt, h_pt)
@@ -384,17 +417,107 @@ class App:
             self._offset[1] = int((self._offset[1] + cy) * k - cy)
             self._redraw()
 
+    def _toggle_area_mode(self):
+        """切换「拖框划定书写区域」模式。
+
+        进入时把页面缩放到整页可见——否则页面被放得很大，
+        拖半天也只框到很小一块（实测拖 400 屏幕像素只覆盖 76pt）。
+        """
+        self.cfg["area_mode"] = not self.cfg["area_mode"]
+        if self.cfg["area_mode"]:
+            self.canvas.configure(cursor="crosshair")
+            self.cfg["page"] = True          # 拖框必须在整页视图下进行
+            ch = max(50, self.canvas.winfo_height())
+            cw = max(50, self.canvas.winfo_width())
+            page_w, page_h = 595 * H.SCALE, 842 * H.SCALE
+            self.var_zoom.set(round(min(cw / page_w, ch / page_h) * 0.95, 3))
+            self._offset = [0, 0]
+            self.log("拖框模式：开（已缩放到整页，按住左键拉出矩形）")
+        else:
+            self.canvas.configure(cursor="")
+            self.log("拖框模式：关")
+        self._redraw()
+
+    def _screen_to_page(self, x, y):
+        """画布坐标 -> 页面 pt 坐标。
+
+        链条：画布像素 ->（减偏移、除 zoom）-> 显示图坐标 ->（除 SCALE）-> pt。
+        显示图可能是「整页」也可能是「块」；拖框只在页面模式下有意义，
+        块模式下按块左上角推算。
+        """
+        zoom = self._last_zoom or 1.0
+        cw = max(50, self.canvas.winfo_width())
+        ch = max(50, self.canvas.winfo_height())
+        img = self._disp_img
+        if img is None:
+            return None
+        disp_w = img.width * zoom
+        disp_h = img.height * zoom
+        ox = cw // 2 + self._offset[0] - disp_w / 2
+        oy = ch // 2 + self._offset[1] - disp_h / 2
+        gx = (x - ox) / zoom          # 显示图内的像素
+        gy = (y - oy) / zoom
+        if self.cfg["page"]:
+            return gx / H.SCALE, gy / H.SCALE
+        # 块模式：块图左上角对应区域左上角
+        area = [float(v.get()) for v in self.var_area]
+        return area[0] + gx / H.SCALE, area[1] + gy / H.SCALE
+
     def _on_drag_start(self, event):
+        if self.cfg["area_mode"]:
+            self._area_drag = (event.x, event.y)
+            return
         self._drag = (event.x, event.y, self._offset[0], self._offset[1])
         self.canvas.configure(cursor="fleur")
 
     def _on_drag_move(self, event):
+        if self.cfg["area_mode"]:
+            if not getattr(self, "_area_drag", None):
+                return
+            x0, y0 = self._area_drag
+            self.canvas.delete("area")
+            self.canvas.create_rectangle(x0, y0, event.x, event.y,
+                                         outline="#ff5252", width=2, tags="area")
+            return
         if not self._drag:
             return
         x0, y0, ox, oy = self._drag
         self._offset[0] = ox + (event.x - x0)
         self._offset[1] = oy + (event.y - y0)
         self._redraw()
+
+    def _on_drag_end(self, event):
+        if not self.cfg["area_mode"]:
+            self.canvas.configure(cursor="")
+            return
+        start = getattr(self, "_area_drag", None)
+        self._area_drag = None
+        if not start:
+            return
+        a = self._screen_to_page(*start)
+        b = self._screen_to_page(event.x, event.y)
+        if not a or not b:
+            return
+        left, right = sorted((a[0], b[0]))
+        top, bottom = sorted((a[1], b[1]))
+        # 夹到页面范围内（A4 = 595 x 842 pt），并留 8pt 边
+        left = max(8.0, min(595 - 8, left))
+        right = max(8.0, min(595 - 8, right))
+        top = max(8.0, min(842 - 8, top))
+        bottom = max(8.0, min(842 - 8, bottom))
+        if right - left < 60 or bottom - top < 40:      # 太小当作误触
+            self.log("区域太小（宽 %.0f 高 %.0f），已忽略" % (right - left, bottom - top))
+            return
+        self.cfg["area"] = [round(left, 1), round(top, 1),
+                            round(right, 1), round(bottom, 1)]
+        for i, v in enumerate(self.cfg["area"]):
+            self.var_area[i].set("%.0f" % v)
+        self.cfg["area_mode"] = False
+        self.canvas.configure(cursor="")
+        self.canvas.delete("area")
+        self.log("书写区域：左 %.0f 上 %.0f 右 %.0f 下 %.0f（宽 %.0f 高 %.0f pt）"
+                 % (left, top, right, bottom, right - left, bottom - top))
+        self.render_async()
 
     def _reset_view(self):
         self._offset = [0, 0]
@@ -415,7 +538,13 @@ class App:
             # 右侧 28% 会溢出页面被切掉——这就是「显示不完整、明显截断」的原因。
             k = H.SCALE
             page = Image.new("RGBA", (int(595 * k), int(842 * k)), (255, 255, 255, 255))
-            page.alpha_composite(img, (int(64 * k), int(226 * k)))
+            area = [float(v.get()) for v in self.var_area]
+            page.alpha_composite(img, (int(area[0] * k), int(area[1] * k)))
+            # 画出书写区域边框，便于确认位置
+            from PIL.ImageDraw import Draw as _Draw
+            _Draw(page).rectangle([int(area[0] * k), int(area[1] * k),
+                                 int(area[2] * k), int(area[3] * k)],
+                                outline=(255, 120, 120, 160), width=2)
             img = page.convert("RGB")
         zoom = float(self.var_zoom.get()) if hasattr(self, "var_zoom") else 0.0
         if zoom <= 0.001:
@@ -431,6 +560,7 @@ class App:
                 zoom = min(cw / img.width, ch / img.height)
         zoom = max(0.05, min(8.0, zoom))
         self._last_zoom = zoom
+        self._disp_img = img          # 供 _screen_to_page 换算坐标
         disp = img.resize((max(1, int(img.width * zoom)), max(1, int(img.height * zoom))),
                           Image.LANCZOS)
         self._photo = ImageTk.PhotoImage(disp)
