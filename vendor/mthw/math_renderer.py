@@ -866,7 +866,9 @@ class FormulaRenderer:
         denominator = self._layout(node.denominator, child_size, f"{seed_extra}:den")
         rule_overhang = max(3, round(size_px * 0.12))
         side_pad = rule_overhang + max(2, round(size_px * 0.05))
-        gap = max(3, round(size_px * 0.12))
+        # 本地改动：垂直间距 0.12 -> 0.07。分式行高直接决定行距，
+        # 原系数在放大字号后让分式行高达基准行距的 1.7 倍，整段行距忽大忽小。
+        gap = max(3, round(size_px * 0.07))
         stroke = self._stroke_width(size_px)
         stroke_extent = max(1, math.ceil(stroke))
         tilt, bend, jitter = self._rule_variation(size_px)

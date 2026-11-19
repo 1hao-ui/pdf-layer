@@ -25,10 +25,10 @@ FONT_DIR = os.path.join(HERE, "fonts")
 
 SCALE = 4                      # 1pt = 4px
 # 手写字要比印刷正文大一号：真人很难把字写得跟印刷体一样小、一样匀。
-# 原 10.9pt 与印刷正文（10.5pt）几乎等高，看起来偏「小气」；11.8pt 约大 8%，
-# 观感上明显是手写尺寸，又不至于让行数暴涨（12.6pt 会让这段从 9 行变 11 行）。
-DEFAULT_SIZE_PT = 11.8
-DEFAULT_LINE_PT = 21.8         # 行距保持约 1.85 倍字号
+# 原 10.9pt 与印刷正文（10.5pt）几乎等高，看起来偏「小气」；
+# 11.8pt 仍偏小，13.5pt 才接近真实手写尺寸（约 4.8mm 见方）。
+DEFAULT_SIZE_PT = 13.5
+DEFAULT_LINE_PT = 25.0         # 行距保持约 1.85 倍字号
 INK = (16, 16, 18)             # 墨色 RGB：黑笔（alpha 逐字抖动）
 PAGE_LEFT_PT = 64.0
 PAGE_RIGHT_PT = 468.0
@@ -39,6 +39,8 @@ NO_LINE_START = "，。；、：？！）》」』”’%,.;:?!)]}"
 NO_LINE_END = "（《「『“‘([{"
 _TILE_PAD = 6                   # 单字贴图四周的透明内边距（px），排版时不能算进字距
 _JITTER_INFLATE = 0.02          # 逐字扰动（缩放/位移/防重叠右推）平均把行宽撑大的比例
+_LINE_HEIGHT_DAMP = 0.80        # 超高行（分式/根号）额外高度的打折系数：
+                                # 1.0=完全按内容给（行距忽大忽小），0.55=压太紧会与下一行相撞
 _SYM_CP = set(ord(c) for c in "Ωφω√≈∠²³·×−°θΔΣπ±≤≥≠∞→∘⌀")
 
 
@@ -130,41 +132,90 @@ class Hand:
 
     # ------------------------------------------------------ 换行与标点悬挂
     def wrap(self, text, width_pt):
+        """按「行尾参差最小」做换行（动态规划），而不是贪心塞满。
+
+        贪心换行的毛病：遇到放不下的长 token（尤其公式）就整段提前断，
+        行尾留下大片空白，还容易挤出只有两三个字的孤行——看起来很不自然。
+        这里改为最小化「每行右侧空白量的平方和」，行宽自然趋于均匀，
+        同时保留中文行首/行尾禁则。
+        """
         px = self.size_pt * SCALE
         font = _ttf(self.font_path, int(round(px)))
         # 逐字扰动会把实际行宽撑大几个百分点，换行时按同一比例预留，
         # 否则渲染出来会越过列宽（旧版就是因此每行右侧被裁掉约三成）。
         max_px = width_pt * SCALE / (1.0 + _JITTER_INFLATE * self.jitter)
         lines = []
-        for para in text.split("\n"):
+        for para in _paragraphs(text):
             if not para.strip():
                 lines.append("")
                 continue
-            tokens = _tokenize(para)
-            cur, cur_w = "", 0.0
-            for tk in tokens:
-                w = self._token_width(tk, font, px)
-                if cur and cur_w + w > max_px:
-                    # 标点悬挂：行首禁则字符挤回上一行
-                    if tk and tk[0] in NO_LINE_START:
-                        cur += tk
-                        cur_w += w
-                        continue
-                    # 行尾禁则：把上一行最后一个字符带下来
-                    if cur and cur[-1] in NO_LINE_END:
-                        carry = cur[-1]
-                        cur = cur[:-1]
-                        lines.append(cur)
-                        cur = carry + tk
-                        cur_w = self._token_width(cur, font, px)
-                        continue
-                    lines.append(cur)
-                    cur, cur_w = tk, w
+            lines.extend(self._wrap_para(_tokenize(para), font, px, max_px))
+        return lines
+
+    def _wrap_para(self, tokens, font, px, max_px):
+        """单段落的最优换行：cost = Σ(行尾空白)²，末行空白按 0.25 权重。"""
+        n = len(tokens)
+        if not n:
+            return []
+        widths = [self._token_width(tk, font, px) for tk in tokens]
+
+        # 允许在 i 前断行的条件：不是行首禁则字符，且 i-1 不是行尾禁则字符
+        def can_break(i):
+            if i <= 0 or i >= n:
+                return True
+            tk = tokens[i]
+            prev = tokens[i - 1]
+            if tk and tk[0] in NO_LINE_START:
+                return False
+            if prev and prev[-1] in NO_LINE_END:
+                return False
+            return True
+
+        INF = float("inf")
+        best = [INF] * (n + 1)
+        back = [0] * (n + 1)
+        best[0] = 0.0
+        for i in range(1, n + 1):
+            w = 0.0
+            for j in range(i - 1, -1, -1):
+                w += widths[j]
+                if w > max_px * 1.35:      # 再往前只会更宽，剪枝
+                    break
+                if not can_break(j):
+                    continue
+                if best[j] == INF:
+                    continue
+                slack = max_px - w
+                # 超宽行重罚（但允许标点悬挂造成的轻微超出）
+                if slack < 0:
+                    cost = (slack * 6.0) ** 2 + 1e6
                 else:
-                    cur += tk
-                    cur_w += w
-            if cur:
+                    weight = 0.25 if i == n else 1.0   # 末行不追求填满
+                    cost = weight * slack * slack
+                total = best[j] + cost
+                if total < best[i]:
+                    best[i] = total
+                    back[i] = j
+        if best[n] == INF:                 # 兜底：放不下就退回贪心
+            return self._wrap_greedy(tokens, font, px, max_px)
+        cuts, i = [], n
+        while i > 0:
+            cuts.append(i)
+            i = back[i]
+        cuts.append(0)
+        cuts.reverse()
+        return ["".join(tokens[cuts[k]:cuts[k + 1]]) for k in range(len(cuts) - 1)]
+
+    def _wrap_greedy(self, tokens, font, px, max_px):
+        lines, cur = [], ""
+        for tk in tokens:
+            if cur and self._token_width(cur + tk, font, px) > max_px:
                 lines.append(cur)
+                cur = tk
+            else:
+                cur += tk
+        if cur:
+            lines.append(cur)
         return lines
 
     # -------------------------------------------------------- 公式支持
@@ -201,13 +252,19 @@ class Hand:
         base_lh = DEFAULT_LINE_PT * SCALE
         font = _ttf(self.font_path, int(round(px)))
 
-        # 逐行按自身高度排布：纯文本行保持 20.2pt 行距，含分式/根号的行自动加高。
-        # 若改成「按最高行统一行距」，一条嵌套分式会把整段撑成双倍行距，反而更难看。
+        # 逐行按自身高度排布，但对「超出基准的部分」打折：分式/根号行确实需要更多
+        # 垂直空间，但完全按内容给（最高到基准的 1.7 倍）会让整段行距忽大忽小。
+        # 基线固定在行框的 0.78 处，超高的公式向上探入上一行的空白带——
+        # 真人写带分式的笔记正是这样，行距只是略松，不会出现大段空白。
         metrics = [self._line_box(line, font, px) for line in lines]
         heights, baselines = [], []
         for _w, asc, desc in metrics:
-            h_i = max(base_lh, asc + desc + 4)
-            b_i = int(max(h_i * 0.78, asc + 2))
+            need = asc + desc
+            h_i = base_lh + max(0.0, need - base_lh) * _LINE_HEIGHT_DAMP
+            h_i = max(base_lh, h_i)
+            # 基线取「行框 0.78」与「保证 descender 不越界」的较大值，
+            # 但上限不超过基准行的基线，避免把整段撑开。
+            b_i = int(min(max(h_i * 0.78, asc + 2), base_lh * 0.78 + 2))
             h_i = int(max(h_i, b_i + desc + 2))
             heights.append(h_i)
             baselines.append(b_i)
@@ -314,6 +371,40 @@ def _atoms(line):
         out.append(("c", line[i]))
         i += 1
     return out
+
+
+def _paragraphs(text):
+    """把文本切成段落：空行才是硬分段，单个换行按软换行处理（交给列宽决定断点）。
+
+    手写排版里「换行」应当由行宽决定；源文本里的单个 \\n 往往只是编辑器折行，
+    若当成硬换行会出现「一行只有两三个字」的短行，看起来很不自然。
+    """
+    out, buf = [], []
+    for raw in text.split("\n"):
+        if raw.strip():
+            buf.append(raw.strip())
+        else:
+            if buf:
+                out.append(_join_lines(buf))
+                buf = []
+            out.append("")
+    if buf:
+        out.append(_join_lines(buf))
+    return out
+
+
+def _join_lines(lines):
+    """软换行拼接：中文之间直接相连，拉丁词之间补一个空格。"""
+    s = lines[0]
+    for nxt in lines[1:]:
+        if not s or not nxt:
+            s += nxt
+            continue
+        if s[-1].isascii() and s[-1].isalnum() and nxt[0].isascii() and nxt[0].isalnum():
+            s += " " + nxt
+        else:
+            s += nxt
+    return s
 
 
 def _tokenize(s):

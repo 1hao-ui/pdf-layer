@@ -32,6 +32,10 @@ _engine = None
 _renderer = None
 _engine_key = None
 
+# 公式字号补偿系数：内核按 size_px 排出的主字符只有汉字的约 62% 高，
+# 乘 1.65 后与正文汉字齐平（实测 45px vs 45px @ 54px 字号）。
+MATH_SIZE_COMP = 1.65
+
 # 上游把希腊字母映射成形近汉字（如 \alpha -> 伪），因为它的默认字体没有希腊字形。
 # 我们的 *-merged.ttf 已经并入了真希腊字母，必须改回真字符，否则公式里会出现汉字。
 _GREEK = {
@@ -88,10 +92,14 @@ def _ensure_engine(font_path, size_px, ink, math_font_path=None):
             math_font_pt=size_px / 4.0,
             sdt_trajectory_enabled=False,     # 不依赖 SDT 轨迹包
             prefer_handright=False,           # 不依赖 handright
-            # 龙藏体笔画比正文马善政毛笔体细（实测平均 alpha 90–128 vs 130–150），
-            # 用字重倍率补到与正文一致，避免「公式看起来比正文淡」。
-            stroke_weight_base_scale=1.22,
+            # 字号补偿后公式字形变大，字重倍率回调到 1.15：
+            # 再低（0.95）虽然笔画更细，但边缘全靠抗锯齿，反而显得发虚。
+            stroke_weight_base_scale=1.15,
             ink_density_jitter=0.04,          # 墨浓淡抖动减半，减少逐字深浅差异
+            # 第二层的弹性形变/基线波会重采样整张蒙版：实测公式锐度只有汉字的 58%、
+            # 笔画还被插值撑粗 1.5 倍。手写感主要来自字形本身，这两项压到很小即可。
+            elastic_strength_ratio=0.0008,
+            baseline_wave_amplitude_ratio=0.004,
         )
         _engine = HandwritingEngine(cfg, reference_size_px=int(size_px),
                                     math_reference_size_px=int(size_px))
@@ -105,8 +113,11 @@ def _ensure_engine(font_path, size_px, ink, math_font_path=None):
 
 def _box(latex, size_px, font_path, ink, math_font_path=None):
     r = _ensure_engine(font_path, size_px, ink, math_font_path)
-    # max_width 给足：公式自身的换行交给 hwrender 的 wrap 处理
-    box = r.render_inline(latex, int(round(size_px)), 100000)
+    # 字号补偿：公式内核的度量体系与 PIL 字号不同，直接传 size_px 时公式主字符
+    # 只有汉字的 62% 高（实测 28px vs 45px），看起来「又小又糊又粗」。
+    # 1.65 倍后字高与汉字齐平（45px vs 45px）。
+    box = r.render_inline(latex, int(round(size_px * MATH_SIZE_COMP)),
+                          100000)
     # 公式墨色比正文淡（实测平均 alpha≈110 vs 汉字≈170），提亮到同一水平
     import handstroke
     boosted = handstroke._alpha_boost(box.image, handstroke.FORMULA_GAMMA)
