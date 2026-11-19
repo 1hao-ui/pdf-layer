@@ -64,22 +64,22 @@
     "pass1.ttf": {
       "size_scale": 1.1389,
       "dy": 0.0,
-      "dx": 2.5
+      "dx": 2.25
     },
     "pass2.ttf": {
       "size_scale": 1.2827,
       "dy": 0.0,
-      "dx": 2.75
+      "dx": 2.0
     },
     "pass3.ttf": {
       "size_scale": 1.3512,
       "dy": 0.0,
-      "dx": 3.0
+      "dx": 2.5
     },
     "pass4.ttf": {
       "size_scale": 1.2654,
       "dy": 0.0,
-      "dx": 3.0
+      "dx": 2.5
     }
   }
 }
