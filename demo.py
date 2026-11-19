@@ -40,7 +40,7 @@ def make_page():
 def main():
     doc = make_page()
     page = doc[0]
-    hand = H.Hand(FONT, size_pt=10.9, seed=20261118)
+    hand = H.Hand(FONT, size_pt=H.DEFAULT_SIZE_PT, seed=20261118)
     img, w, h = hand.render_block(TEXT, width_pt=404)
     img.save(os.path.join(OUT, "block_raw.png"))
 

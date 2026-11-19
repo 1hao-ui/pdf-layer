@@ -24,8 +24,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 FONT_DIR = os.path.join(HERE, "fonts")
 
 SCALE = 4                      # 1pt = 4px
-DEFAULT_SIZE_PT = 10.9
-DEFAULT_LINE_PT = 20.2
+# 手写字要比印刷正文大一号：真人很难把字写得跟印刷体一样小、一样匀。
+# 原 10.9pt 与印刷正文（10.5pt）几乎等高，看起来偏「小气」；11.8pt 约大 8%，
+# 观感上明显是手写尺寸，又不至于让行数暴涨（12.6pt 会让这段从 9 行变 11 行）。
+DEFAULT_SIZE_PT = 11.8
+DEFAULT_LINE_PT = 21.8         # 行距保持约 1.85 倍字号
 INK = (16, 16, 18)             # 墨色 RGB：黑笔（alpha 逐字抖动）
 PAGE_LEFT_PT = 64.0
 PAGE_RIGHT_PT = 468.0

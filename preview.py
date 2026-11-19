@@ -56,7 +56,7 @@ def main():
         y += 20
 
     # 手写层
-    hand = H.Hand(FONT, size_pt=10.9, seed=20261118)
+    hand = H.Hand(FONT, size_pt=H.DEFAULT_SIZE_PT, seed=20261118)
     img, w_pt, h_pt = hand.render_block(TEXT, width_pt=404)
     print("手写块: %.1f x %.1f pt | 顶部 y=226pt | 底部 %.1f pt (页底限 676pt)"
           % (w_pt, h_pt, 226 + h_pt))
