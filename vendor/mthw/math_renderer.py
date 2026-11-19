@@ -195,15 +195,15 @@ LIMIT_OPERATOR_SYMBOLS = INTEGRAL_SYMBOLS | {"∑", "∏"}
 # 本地改动：大运算符放大系数。
 # 新字库的 ∑ ∏ ∫ 归一化后只有 0.5em 字高（实测 ∑ 60px vs 字母 91px），
 # 大运算符反而比字母矮；这里按 display / inline 分别放大。
-BIGOP_SCALE_INLINE = 1.25
-BIGOP_SCALE_DISPLAY = 1.55
+BIGOP_SCALE_INLINE = 1.08
+BIGOP_SCALE_DISPLAY = 1.18
 
 # 本地开关：display 模式下是否把 ∑ 上下限堆叠起来。
 # 默认 False —— 手写习惯是把上下限写在侧边；置 True 则按印刷体堆叠。
 STACK_LIMITS_IN_DISPLAY = False
 
 # 大运算符「随内容变高」的参数
-BIGOP_STRETCH_MAX = 2.4      # 最多放大到原字号的 2.4 倍
+BIGOP_STRETCH_MAX = 1.6      # 最多放大到原字号的 2.4 倍
 BIGOP_STRETCH_SLACK = 1.06   # 略微超过内容高度，避免看起来比内容矮
 BIGOP_STRETCH_MIN = 1.0      # 至少保持原样（不缩小）
 LIMIT_OPERATOR_NAMES = {"lim", "max", "min", "sup", "inf"}
