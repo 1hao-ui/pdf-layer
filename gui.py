@@ -519,10 +519,12 @@ class App:
         left, right = sorted((a[0], b[0]))
         top, bottom = sorted((a[1], b[1]))
         # 夹到页面范围内（A4 = 595 x 842 pt），并留 8pt 边
-        left = max(8.0, min(595 - 8, left))
-        right = max(8.0, min(595 - 8, right))
-        top = max(8.0, min(842 - 8, top))
-        bottom = max(8.0, min(842 - 8, bottom))
+        # 右/下边界放到页面边缘（595/842），不再强制留 8pt。
+        # 之前夹到 587，用户拖到最右也只到 587，页面右边永远有一道白。
+        left = max(8.0, min(595.0, left))
+        right = max(left + 60.0, min(595.0, right))
+        top = max(8.0, min(842.0, top))
+        bottom = max(top + 40.0, min(842.0, bottom))
         if right - left < 60 or bottom - top < 40:      # 太小当作误触
             self.log("区域太小（宽 %.0f 高 %.0f），已忽略" % (right - left, bottom - top))
             return
