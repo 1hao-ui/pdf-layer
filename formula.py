@@ -36,6 +36,11 @@ _engine_key = None
 # 乘 1.65 后与正文汉字齐平（实测 45px vs 45px @ 54px 字号）。
 MATH_SIZE_COMP = 1.65
 
+# 是否把公式符号用 handstroke 二次笔迹化。
+# 符号来自手写字库时应为 False（保留原笔迹）；
+# 只有符号仍是印刷体字形时才需要 True。
+USE_STROKE_PATCH = False
+
 # 上游把希腊字母映射成形近汉字（如 \alpha -> 伪），因为它的默认字体没有希腊字形。
 # 我们的 *-merged.ttf 已经并入了真希腊字母，必须改回真字符，否则公式里会出现汉字。
 _GREEK = {
@@ -94,18 +99,28 @@ def _ensure_engine(font_path, size_px, ink, math_font_path=None):
             prefer_handright=False,           # 不依赖 handright
             # 字号补偿后公式字形变大，字重倍率回调到 1.15：
             # 再低（0.95）虽然笔画更细，但边缘全靠抗锯齿，反而显得发虚。
-            stroke_weight_base_scale=1.15,
-            ink_density_jitter=0.04,          # 墨浓淡抖动减半，减少逐字深浅差异
-            # 第二层的弹性形变/基线波会重采样整张蒙版：实测公式锐度只有汉字的 58%、
-            # 笔画还被插值撑粗 1.5 倍。手写感主要来自字形本身，这两项压到很小即可。
-            elastic_strength_ratio=0.0008,
-            baseline_wave_amplitude_ratio=0.004,
+            # 本地改动：直接用字体原字形，不做任何二次加工。
+            # 手写感已经由字库本身提供（ZTi-Sym 是真人笔迹），再叠加
+            # 形变/字重/墨色后处理只会把字形改糊——实测公式锐度只有汉字的 58%、
+            # 笔画被插值撑粗 1.5 倍。
+            second_layer_enabled=False,       # 关掉形变/字重/墨色后处理
+            stroke_weight_base_scale=1.0,     # 不再额外加粗
+            ink_density_jitter=0.0,           # 不做墨色抖动
+            dry_brush_probability=0.0,        # 不要飞白
+            elastic_strength_ratio=0.0,       # 不做弹性形变
+            baseline_wave_amplitude_ratio=0.0,# 不做基线起伏
+            stroke_weight_variation_sigma_ratio=0.0,
         )
         _engine = HandwritingEngine(cfg, reference_size_px=int(size_px),
                                     math_reference_size_px=int(size_px))
-        # 公式里的 Ω φ π ∑ √ 等符号同样来自印刷体字形，改成笔迹绘制
-        import handstroke
-        handstroke.inline_patch(_engine)
+        # 公式里的 Ω φ π ∑ √ 等符号：早先来自印刷体字形，所以用 handstroke
+        # 把轮廓骨架化成「笔道」。现在符号字库（ZTi-Sym）本身就是真人手写，
+        # 再骨架化会把原笔迹丢掉、换成程序描的粗糊线条——用户反馈
+        # 「∑ 用到的字体不对」就是这个原因。
+        # 所以默认不再二次笔迹化；需要旧行为时设 USE_STROKE_PATCH=True。
+        if USE_STROKE_PATCH:
+            import handstroke
+            handstroke.inline_patch(_engine)
         _renderer = mr.FormulaRenderer(_engine, seed="pdf-layer")
         _engine_key = key
         return _renderer
