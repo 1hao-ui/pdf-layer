@@ -197,6 +197,10 @@ LIMIT_OPERATOR_SYMBOLS = INTEGRAL_SYMBOLS | {"∑", "∏"}
 # 大运算符反而比字母矮；这里按 display / inline 分别放大。
 BIGOP_SCALE_INLINE = 1.25
 BIGOP_SCALE_DISPLAY = 1.55
+
+# 本地开关：display 模式下是否把 ∑ 上下限堆叠起来。
+# 默认 False —— 手写习惯是把上下限写在侧边；置 True 则按印刷体堆叠。
+STACK_LIMITS_IN_DISPLAY = False
 LIMIT_OPERATOR_NAMES = {"lim", "max", "min", "sup", "inf"}
 
 
@@ -1034,13 +1038,17 @@ class FormulaRenderer:
         return None, mode
 
     def _should_stack_limits(self, symbol: str, limit_mode: str | None, display_style: bool) -> bool:
+        # 本地改动：默认「侧挂」而不是堆叠。
+        # 真人手写 ∑ 的上下限通常写在右侧（上标/下标位置），很少把 n 和 i=1
+        # 上下摞起来——那样写起来慢、也容易写歪（用户反馈原话）。
+        # 需要堆叠时用 \limits 显式要求，例如 \sum\limits_{i=1}^{n}。
         if limit_mode == "limits":
             return True
         if limit_mode == "nolimits":
             return False
         if limit_mode == "displaylimits":
-            return display_style
-        return display_style and symbol not in INTEGRAL_SYMBOLS
+            return display_style and STACK_LIMITS_IN_DISPLAY
+        return display_style and STACK_LIMITS_IN_DISPLAY and symbol not in INTEGRAL_SYMBOLS
 
     def _operator_limits_box(self, node: ScriptNode, size_px: int, seed_extra: str) -> MathBox:
         # 本地改动：上下限字号 0.50 -> 0.62、间隙 0.025 -> 0.10。
