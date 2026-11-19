@@ -191,6 +191,12 @@ GRID_ENVIRONMENTS = {
 }
 INTEGRAL_SYMBOLS = {"∫", "∬", "∭", "∮"}
 LIMIT_OPERATOR_SYMBOLS = INTEGRAL_SYMBOLS | {"∑", "∏"}
+
+# 本地改动：大运算符放大系数。
+# 新字库的 ∑ ∏ ∫ 归一化后只有 0.5em 字高（实测 ∑ 60px vs 字母 91px），
+# 大运算符反而比字母矮；这里按 display / inline 分别放大。
+BIGOP_SCALE_INLINE = 1.25
+BIGOP_SCALE_DISPLAY = 1.55
 LIMIT_OPERATOR_NAMES = {"lim", "max", "min", "sup", "inf"}
 
 
@@ -733,6 +739,19 @@ class FormulaRenderer:
         )
 
     def _layout(self, node: MathNode, size_px: int, seed_extra: str, display_style: bool = False) -> MathBox:
+        # 大运算符单独放大：∑ ∏ ∫ 在字库里只有 0.5em 高，不放大就比字母还矮。
+        # 用 _bigop_done 标记防止递归放大（否则无限循环）。
+        if (isinstance(node, TextNode)
+                and getattr(node, "text", "") in LIMIT_OPERATOR_SYMBOLS
+                and not getattr(self, "_bigop_done", False)):
+            k = BIGOP_SCALE_DISPLAY if display_style else BIGOP_SCALE_INLINE
+            self._bigop_done = True
+            try:
+                box = self._layout(node, int(round(size_px * k)), seed_extra, display_style)
+            finally:
+                self._bigop_done = False
+            return box
+
         if isinstance(node, TextNode):
             return self._text_box(node.text, size_px, seed_extra)
         if isinstance(node, OperatorNameNode):
@@ -1024,28 +1043,41 @@ class FormulaRenderer:
         return display_style and symbol not in INTEGRAL_SYMBOLS
 
     def _operator_limits_box(self, node: ScriptNode, size_px: int, seed_extra: str) -> MathBox:
+        # 本地改动：上下限字号 0.50 -> 0.62、间隙 0.025 -> 0.10。
+        # 原参数下 i=1 几乎贴住 ∑ 底边、上下限也偏小，手写观感很差。
         base = self._layout(node.base, size_px, f"{seed_extra}:base")
-        script_size = max(9, round(size_px * 0.5))
+        script_size = max(10, round(size_px * 0.72))
         superscript = self._layout(node.superscript, script_size, f"{seed_extra}:sup") if node.superscript else None
         subscript = self._layout(node.subscript, script_size, f"{seed_extra}:sub") if node.subscript else None
-        gap = max(1, round(size_px * 0.025))
+        gap = max(2, round(size_px * 0.08))
         symbol, _ = self._operator_limit_mode(node.base)
         is_integral = symbol in INTEGRAL_SYMBOLS
         script_shift = round(size_px * 0.05) if is_integral else 0
-        width = max(
-            base.width,
-            (superscript.width + abs(script_shift)) if superscript else 0,
-            (subscript.width + abs(script_shift)) if subscript else 0,
-        )
+        # 本地改动：上下限按「运算符中心」对齐。
+        # 原实现用 max(各宽度) 作盒宽再各自居中，∑ 放大后 base.width 变大、
+        # 上下限却按旧宽度算，结果 n / i=1 明显偏右。
+        op_cx = base.width / 2.0
+        need_left = op_cx
+        need_right = op_cx
+        if superscript:
+            need_left = max(need_left, superscript.width / 2.0 - script_shift)
+            need_right = max(need_right, superscript.width / 2.0 + script_shift)
+        if subscript:
+            need_left = max(need_left, subscript.width / 2.0 + script_shift)
+            need_right = max(need_right, subscript.width / 2.0 - script_shift)
+        width = int(math.ceil(need_left + need_right))
+        op_x = int(round(need_left - op_cx))
         base_y = superscript.height + gap if superscript else 0
         sub_y = base_y + base.height + gap
         height = base_y + base.height + (gap + subscript.height if subscript else 0)
         image = Image.new("RGBA", (max(1, width), max(1, height)), (0, 0, 0, 0))
-        image.alpha_composite(base.image, ((width - base.width) // 2, base_y))
+        image.alpha_composite(base.image, (op_x, base_y))
         if superscript:
-            image.alpha_composite(superscript.image, ((width - superscript.width) // 2 + script_shift, 0))
+            sx = int(round(op_x + op_cx - superscript.width / 2.0 + script_shift))
+            image.alpha_composite(superscript.image, (sx, 0))
         if subscript:
-            image.alpha_composite(subscript.image, ((width - subscript.width) // 2 - script_shift, sub_y))
+            sx = int(round(op_x + op_cx - subscript.width / 2.0 - script_shift))
+            image.alpha_composite(subscript.image, (sx, sub_y))
         return MathBox(image, base_y + base.baseline)
 
     def _accent_box(self, node: AccentNode, size_px: int, seed_extra: str, display_style: bool = False) -> MathBox:

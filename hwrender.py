@@ -433,8 +433,10 @@ class Hand:
     def _token_width(self, tk, font, px):
         """一个 token 的排版宽度：普通文本按字宽累加，$...$ 交给公式层量。"""
         if _is_formula(tk):
-            return formula.measure(tk[1:-1], px, self.font_path, self.ink,
-                                   self.math_font_path)[0]
+            disp = _is_display_formula(tk)
+            body = tk[2:-2] if disp else tk[1:-1]
+            return formula.measure(body, px, self.font_path, self.ink,
+                                   self.math_font_path, display=disp)[0]
         return self._text_width(tk, px)
 
     # -------------------------------------------------------- 渲染一个块
@@ -443,9 +445,10 @@ class Hand:
         asc, desc = font.getmetrics()
         w = 0.0
         for kind, val in _atoms(line):
-            if kind == "f":
+            if kind in ("f", "d"):
                 fw, fa, fd = formula.measure(val, px, self.font_path, self.ink,
-                                             self.math_font_path)
+                                             self.math_font_path,
+                                             display=(kind == "d"))
                 w += fw
                 asc = max(asc, fa)
                 desc = max(desc, fd)
@@ -541,14 +544,15 @@ class Hand:
         n = max(1, len(atoms))
         right = -1e9
         for k, (kind, val) in enumerate(atoms):
-            if kind == "f":
+            if kind in ("f", "d"):
                 # 公式整体当一个原子：不可拆、不与前后字重叠
+                disp = (kind == "d")
                 fw, _fa, _fd = formula.measure(val, px, self.font_path, self.ink,
-                                               self.math_font_path)
+                                               self.math_font_path, display=disp)
                 if x < right:
                     x = right
                 formula.draw(img, val, x, baseline, px, self.font_path, self.ink,
-                             self.math_font_path)
+                             self.math_font_path, display=disp)
                 right = x + fw
                 x += fw
                 continue
@@ -610,8 +614,13 @@ class Hand:
 
 # ---------------------------------------------------------------- 工具函数
 def _is_formula(tk):
-    """$...$ 形式的 token 视为公式。"""
+    """$...$ 或 $$...$$ 形式的 token 视为公式。"""
     return len(tk) >= 3 and tk[0] == "$" and tk[-1] == "$"
+
+
+def _is_display_formula(tk):
+    """$$...$$ 视为 display 大型运算式。"""
+    return len(tk) >= 5 and tk.startswith("$$") and tk.endswith("$$")
 
 
 def _atoms(line):
@@ -632,6 +641,13 @@ def _atoms(line):
     while i < n:
         ch = line[i]
         if ch == "$":
+            # $$...$$ = display 大型运算式（上下限堆叠、分式放大）
+            if line.startswith("$$", i):
+                j = line.find("$$", i + 2)
+                if j > i:
+                    out.append(("d", line[i + 2:j]))
+                    i = j + 2
+                    continue
             j = line.find("$", i + 1)
             if j > i:
                 out.append(("f", line[i + 1:j]))
@@ -710,6 +726,15 @@ def _tokenize(s):
     while i < n:
         ch = s[i]
         if ch == "$":
+            if s.startswith("$$", i):
+                j = s.find("$$", i + 2)
+                if j > i:
+                    if buf:
+                        out.append(buf)
+                        buf = ""
+                    out.append(s[i:j + 2])   # 含两端 $$
+                    i = j + 2
+                    continue
             j = s.find("$", i + 1)
             if j > i:
                 if buf:
