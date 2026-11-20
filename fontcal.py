@@ -26,6 +26,8 @@ import os
 HERE = os.path.dirname(os.path.abspath(__file__))
 CAL_PATH = os.path.join(HERE, "fonts", "fontcal.json")
 GLYPH_CAL_PATH = os.path.join(HERE, "fonts", "fontcal_glyph.json")
+# 手写体生成器项目根（pdf-layer 上两级）：字体输出/ 下的新手写字库在这里。
+PROJECT_ROOT = os.path.normpath(os.path.join(HERE, "..", ".."))
 
 REF_PX = 54
 SAMPLE = "相电压功率流生电的"          # CJK 样本
@@ -47,7 +49,43 @@ DEFAULTS = {
     "size_scale": 1.0,      # 字号缩放（乘到渲染字号上）
     "dy": 0.0,              # 垂直位移（px，正=下移）
     "dx": 0.0,              # 水平位移（px）
+    "adv_scale": 1.0,       # 前进宽度缩放：只影响字距，不改字形大小
 }
+
+
+def cal_key(path):
+    """校准表的键：项目内的字体用「项目相对路径」，否则用 basename。
+
+    为什么不能一律用 basename：ZTi-Han 和 ZTi-Sym 都有 pass1.ttf / pass2.ttf，
+    同名但字高完全不同（640 vs 500 units），用 basename 会互相串校准值，
+    汉字会被按符号的倍率放大。
+    """
+    if not path:
+        return ""
+    p = os.path.normpath(os.path.abspath(path))
+    try:
+        rel = os.path.relpath(p, PROJECT_ROOT)
+        if not rel.startswith(".."):
+            return rel.replace(os.sep, "/")
+    except Exception:
+        pass
+    return os.path.basename(p)
+
+
+def _lookup_keys(path):
+    """查表时要依次尝试的键：仓库布局 fonts/… → 项目相对路径 → basename。"""
+    keys = []
+    p = os.path.normpath(os.path.abspath(path)).replace(os.sep, "/")
+    i = p.find("/fonts/")
+    if i >= 0:
+        keys.append(p[i + 1:])          # 仓库内克隆：fonts/ZTi-*/passN.ttf
+    k = cal_key(path)
+    if k:
+        keys.append(k)
+    b = os.path.basename(path)
+    if b and b not in keys:
+        keys.append(b)
+    return keys
 
 
 def _specs(fonts):
@@ -130,7 +168,7 @@ def calibrate(fonts, base_font, save=True, rounds=3):
     for path, sample, h_ratio in _specs(fonts):
         if not os.path.exists(path):
             continue
-        key = os.path.basename(path)
+        key = cal_key(path)
         target_h = base["height"] * h_ratio
         if os.path.abspath(path) == os.path.abspath(base_font):
             table[key] = dict(DEFAULTS)
@@ -265,10 +303,19 @@ def glyph_scale_at(path, ch, px, target_h):
 
 
 def params_for(path):
-    """取某套字体的校准参数（缺失则用默认值 = 不校准）。"""
+    """取某套字体的校准参数（缺失则用默认值 = 不校准）。
+
+    先按「项目相对路径」查（区分 ZTi-Han/pass2 与 ZTi-Sym/pass2），
+    查不到再按 basename 查（兼容旧表）。
+    """
     if not path:
         return dict(DEFAULTS)
-    got = load().get(os.path.basename(path))
+    tab = load()
+    got = None
+    for k in _lookup_keys(path):
+        if k in tab:
+            got = tab[k]
+            break
     if not got:
         return dict(DEFAULTS)
     p = dict(DEFAULTS)

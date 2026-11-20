@@ -28,3 +28,8 @@ feedback.md
 # 由 symbols.py 作为手写符号字库加载，必须入库（约 146 KB）
 !fonts/ZTi-Sym/
 !fonts/ZTi-Sym/**
+
+# 例外：fonts/ZTi-Han/ 是作者手写的「汉字字库」（500 字 × 2 套），
+# 由 symbols.py 作为手写汉字库加载，必须入库（约 670 KB）
+!fonts/ZTi-Han/
+!fonts/ZTi-Han/**

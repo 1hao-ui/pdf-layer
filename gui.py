@@ -41,7 +41,10 @@ FEEDBACK = os.path.join(HERE, "feedback.md")
 OUT_DIR = os.path.join(HERE, "out")
 
 # ---------------------------------------------------------------- 可选字体
+HAN_OWN = "__HAN_OWN__"      # 「我的手写体」别名：汉字 ZTi-Han + 符号 ZTi-Sym
+
 FONT_LABELS = [
+    ("★ 我的手写体（汉字+符号，全手写）", HAN_OWN),
     ("马善政楷书（毛笔，正文默认）", "MaShanZheng-Regular-merged.ttf"),
     ("龙藏体（硬笔，数字/拉丁默认）", "LongCang-Regular-merged.ttf"),
     ("志莽行书", "ZhiMangXing-Regular-merged.ttf"),
@@ -51,14 +54,34 @@ FONT_LABELS = [
 ]
 MATH_FONT_DEFAULT = "LongCang-Regular-merged.ttf"
 
+# 默认字体：自建手写汉字库存在就用「我的手写体」，否则退回马善政（保持旧行为）
+DEFAULT_FONT = HAN_OWN if symbols.han_available() else "MaShanZheng-Regular-merged.ttf"
+
+
+def _label_for(fn):
+    """字体文件名 -> 下拉框里的显示名。"""
+    for lab, f in FONT_LABELS:
+        if f == fn:
+            return lab
+    return FONT_LABELS[0][0]
+
+
+DEFAULT_FONT_LABEL = _label_for(DEFAULT_FONT)
+
+
+def _font_path(name):
+    """字体文件名 -> 路径；"__HAN_OWN__" 解析成 ZTi-Han 主字体。"""
+    if name == HAN_OWN:
+        p = symbols.han_main_font()
+        if p:
+            return p
+        name = "MaShanZheng-Regular-merged.ttf"     # 字库缺失时兜底，不崩
+    return os.path.join(HERE, "fonts", name)
+
 SAMPLE_TEXT = r"""4.3.5 解：图4.03中，三角形联结的$Z_b$与星形联结的$Z_a$并联接入线电压$380\,\mathrm{V}$的三相电源。
 星形部分：相电压$U_{\mathrm{相}}=\frac{380}{\sqrt{3}}\approx 220\,\mathrm{V}$，$|Z_a|=\sqrt{3^2+4^2}=5\,\Omega$，相电流$I=\frac{220}{5}=44\,\mathrm{A}$。
 有功$P_a=3\times 44^2\times 3\approx 17.4\,\mathrm{kW}$，无功$Q_a=3\times 44^2\times 4\approx 23.2\,\mathrm{kvar}$（感性）。
 总功率$P=\sum_{i=1}^{n}P_i\approx 52.1\,\mathrm{kW}$，$S=\sqrt{P^2+Q^2}\approx 52.2\,\mathrm{kVA}$，$\cos\varphi\approx 0.999$。"""
-
-
-def _font_path(name):
-    return os.path.join(HERE, "fonts", name)
 
 
 def _variant_fonts(main_name=None):
@@ -99,7 +122,7 @@ class App:
 
         # ---- 渲染参数（唯一真相源，控制台和控件都改它）----
         self.cfg = {
-            "font": FONT_LABELS[0][1],
+            "font": DEFAULT_FONT,
             "size": H.DEFAULT_SIZE_PT,
             "line": H.DEFAULT_LINE_PT,
             "jitter": 1.0,
@@ -119,6 +142,8 @@ class App:
 
         self._build_ui()
         self.log("控制台就绪。输入 help 查看命令；直接写文字会记入 feedback.md。")
+        if DEFAULT_FONT == HAN_OWN:
+            self.log("默认字体：★ 我的手写体（汉字 ZTi-Han 2 套 + 符号 ZTi-Sym 4 套，全手写）")
         self.root.after(200, self.render_async)
 
     # ------------------------------------------------------------ 界面
@@ -152,7 +177,7 @@ class App:
 
         row = 0
         ttk.Label(box, text="字体").grid(row=row, column=0, sticky="w", pady=2)
-        self.font_var = tk.StringVar(value=FONT_LABELS[0][0])
+        self.font_var = tk.StringVar(value=DEFAULT_FONT_LABEL)
         cb = ttk.Combobox(box, textvariable=self.font_var, width=26, state="readonly",
                           values=[l for l, _ in FONT_LABELS])
         cb.grid(row=row, column=1, sticky="ew", pady=2)
@@ -350,6 +375,10 @@ class App:
             if lab == label:
                 self.cfg["font"] = fn
                 break
+        # 「我的手写体」的符号一定来自 ZTi-Sym，勾选框自动视为开（同步显示出来）
+        if self.cfg["font"] == HAN_OWN and symbols.available() \
+                and not self.var_newsym.get():
+            self.var_newsym.set(True)
         if "ZTi/" in self.cfg["font"]:
             # 选自己的手写字库时默认开启同字多形（不想用可手动取消勾选）
             self.var_variants.set(True)
@@ -384,21 +413,44 @@ class App:
     # ------------------------------------------------------------ 渲染
     def render_async(self):
         self._pull_cfg()
-        threading.Thread(target=self._render_worker, daemon=True).start()
+        # 渲染在子线程里跑，而 tkinter 控件只能在主线程碰：
+        # 先把正文/勾选框/书写区域读成普通值，再交给子线程。
+        job = {
+            "text": self.text.get("1.0", "end").rstrip(),
+            "newsym": bool(self.var_newsym.get()),
+            "area": [float(v.get()) for v in self.var_area],
+        }
+        threading.Thread(target=self._render_worker, args=(job,), daemon=True).start()
 
-    def _render_worker(self):
+    def _render_worker(self, job=None):
         try:
-            text = self.text.get("1.0", "end").rstrip()
+            job = job or {}
+            text = job.get("text")
+            if text is None:                    # 兼容同步调用（测试脚本直接调）
+                text = self.text.get("1.0", "end").rstrip()
             if not text.strip():
-                self.log("正文为空，跳过渲染")
+                self.root.after(0, lambda: self.log("正文为空，跳过渲染"))
                 return
+            newsym = job.get("newsym")
+            if newsym is None:
+                newsym = bool(self.var_newsym.get())
             font_path = _font_path(self.cfg["font"])
             math_path = _font_path(MATH_FONT_DEFAULT)
+            use_han_own = (self.cfg["font"] == HAN_OWN and symbols.han_available())
             # ZTi 当主字体时，符号/缺字兜底也用硬笔的龙藏体，
             # 跟自己的硬笔手写风格一致（默认会挑到毛笔的马善政）。
             sym_path = (_font_path(MATH_FONT_DEFAULT)
                         if "ZTi/" in self.cfg["font"] else None)
-            if self.var_newsym.get() and symbols.available():
+            if use_han_own:
+                # ★ 我的手写体：汉字 ZTi-Han（pass2 主 / pass1 变体）+ 符号 ZTi-Sym
+                # 4 套加权；符号勾选框自动视为开（否则符号会退回旧路径）。
+                hand = symbols.make_han_hand(
+                    size_pt=float(self.cfg["size"]),
+                    ink=tuple(self.cfg["ink"]),
+                    jitter=float(self.cfg["jitter"]),
+                    seed=int(self.cfg["seed"]),
+                )
+            elif newsym and symbols.available():
                 # 汉字走中文字体，数字/拉丁/希腊/符号走 ZTi-Sym 4 套加权
                 hand = symbols.make_hand(
                     font_path,
@@ -420,13 +472,20 @@ class App:
                                    if self.cfg["variants"] else None),
                 )
             # 书写区域决定正文宽度（在预览上拖框划定，或用四个数值手填）
-            area = [float(v.get()) for v in self.var_area]
+            area = job.get("area")
+            if area is None:
+                area = [float(v.get()) for v in self.var_area]
             left, top, right, bottom = area[0], area[1], area[2], area[3]
             width_pt = max(60.0, right - left)
             # 行距用参数传进去（不再改模块常量，避免多线程互相影响）
             img, w_pt, h_pt = hand.render_block(
                 text, width_pt=width_pt, line_pt=float(self.cfg["line"]))
             note = getattr(hand, "style_note", "") or ""
+            if use_han_own:
+                # 汉字覆盖/缺字回退提示（缺的字会回退到老 ZTi/马善政，不是空白）
+                cov = symbols.han_coverage_summary(text)
+                if cov:
+                    note = (note + "｜" + cov) if note else cov
             self.last_image = img
             self.last_size = (w_pt, h_pt)
             self.root.after(0, lambda: self._on_rendered(img, w_pt, h_pt, note))
@@ -675,6 +734,8 @@ class App:
             self.log("命令：size=  line=  jitter=  seed=  width=  ink=r,g,b  font=名字\n"
                      "      variants=on|off  page=on|off\n"
                      "      render | save png | save pdf | reset | clear\n"
+                     "      字体可选：我的手写体(★ 汉字 ZTi-Han + 符号 ZTi-Sym 全手写)/\n"
+                     "                马善政/龙藏/志莽/刘建毛草（也可用 font=文件名）\n"
                      "其他文字会追加到 feedback.md")
             return True
         if low == "render":
