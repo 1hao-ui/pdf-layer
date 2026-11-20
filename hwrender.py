@@ -28,6 +28,12 @@ SCALE = 4                      # 1pt = 4px
 # 手写字要比印刷正文大一号：真人很难把字写得跟印刷体一样小、一样匀。
 # 13.5pt 偏大（整段占页太多、符号也跟着变大），12.4pt 是「明显大于印刷体」又不夸张的值。
 DEFAULT_SIZE_PT = 12.4
+
+# 数字/拉丁/希腊字形（来自 ZTi-Sym 手写符号库）比汉字笔画略粗：
+# 实测同字号下笔宽 4.5px vs 汉字 4.0px（4x 画布），整段看起来「数字发黑」。
+# 渲染时对这类字形把 alpha 收边 SYMBOL_THIN px（4x 像素；0 = 关闭）。
+# 只影响非汉字（数字/拉丁/希腊），汉字、标点、公式层不动。
+SYMBOL_THIN = 1.0
 DEFAULT_LINE_PT = 23.0         # 行距保持约 1.85 倍字号
 INK = (16, 16, 18)             # 墨色 RGB：黑笔（alpha 逐字抖动）
 PAGE_LEFT_PT = 64.0
@@ -107,6 +113,28 @@ _SYM_CP = set(ord(c) for c in "Ωφω√≈∠²³·×−°θΔΣπ±≤≥≠�
 _CJK_REF_SAMPLE = "相电压功率流生电的"     # 366 字表内的常用字，用于量主字体汉字高度
 
 
+def _is_plain_symbol(ch):
+    """是否为「数字/拉丁/希腊」字形（这些来自 ZTi-Sym，笔画偏粗，需要收边）。"""
+    return (ch.isascii() and ch.isalnum()) or ("\u0370" <= ch <= "\u03ff")
+
+
+def _thin_alpha_tile(img, amount):
+    """把 RGBA 贴图的 alpha 柔和收边（与公式层同一套口径）。
+
+    amount 为 alpha 阈值（0=关闭，140=默认）：压掉 alpha 低值端再拉伸，
+    笔画视觉上细一点且边缘平滑；颜色不动，只用于数字/拉丁/希腊字形。
+    """
+    if amount <= 0:
+        return img
+    import numpy as np
+    a = np.asarray(img.getchannel("A")).astype(np.float32)
+    t = float(min(240, max(1, int(140 * float(amount)))))
+    a = np.clip((a - t) * 255.0 / (255.0 - t), 0, 255)
+    out = img.copy()
+    out.putalpha(Image.fromarray(a.astype(np.uint8), "L"))
+    return out
+
+
 def _is_cjk(ch):
     """是否表意汉字（只认基本区：回退链/校准都只针对这些字）。"""
     cp = ord(ch)
@@ -162,7 +190,8 @@ class Hand:
     def __init__(self, font_path, size_pt=DEFAULT_SIZE_PT, ink=INK,
                  jitter=1.0, seed=20261118, math_font_path=None,
                  variant_fonts=None, symbol_font_path=None,
-                 han_fallback_fonts=None, punct_ref_font=None):
+                 han_fallback_fonts=None, punct_ref_font=None,
+                 symbol_thin=SYMBOL_THIN):
         self.font_path = font_path
         self.size_pt = size_pt
         self.ink = ink
@@ -192,6 +221,8 @@ class Hand:
                                if punct_ref_font and os.path.exists(punct_ref_font)
                                else None)
         self.symbol_font_path = symbol_font_path or self._pick_symbol_font(font_path)
+        # 数字/拉丁/希腊收边量（4x 像素）；0 = 原始粗细
+        self.symbol_thin = float(symbol_thin or 0.0)
         self._variants_active = True  # 风格一致性护栏，见 _check_style_consistency
 
     def _with_fallback(self, ch, path):
@@ -434,6 +465,9 @@ class Hand:
         d.text((pad - l, pad - t), ch, font=f, fill=p["rgb"] + (p["alpha"],))
         if abs(p["rot"]) > 0.05:
             img = img.rotate(p["rot"], resample=Image.BICUBIC, expand=True)
+        # 数字/拉丁/希腊：ZTi-Sym 的笔画比汉字略粗，这里收掉一点边
+        if self.symbol_thin > 0 and _is_plain_symbol(ch):
+            img = _thin_alpha_tile(img, self.symbol_thin)
         # 字形在「主字体 advance」内居中，避免字距忽紧忽松
         if cal["size_scale"] != 1.0:
             base_adv = _ttf(self.font_path, int(round(px))).getlength(ch)

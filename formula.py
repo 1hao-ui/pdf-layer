@@ -22,6 +22,8 @@ import sys
 import threading
 from functools import lru_cache
 
+from PIL import Image
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 _VENDOR = os.path.join(HERE, "vendor")
 if _VENDOR not in sys.path:
@@ -35,6 +37,15 @@ _engine_key = None
 # 公式字号补偿系数：内核按 size_px 排出的主字符只有汉字的约 62% 高，
 # 乘 1.65 后与正文汉字齐平（实测 45px vs 45px @ 54px 字号）。
 MATH_SIZE_COMP = 1.65
+
+# 公式层字形调细：数字/拉丁/希腊与分式横线都走公式层，ZTi-Sym 的笔画比汉字略粗，
+# 整段里数字显得发黑。这里把位图 alpha 的低值端压掉（柔和收边，不产生锯齿），
+# 让数字/字母笔画与汉字接近。数值是 alpha 阈值：0 = 关闭，140 = 默认（比原件细一点）。
+# 可用环境变量 FORMULA_THIN_LEVEL 覆盖。
+try:
+    FORMULA_THIN_LEVEL = int(float(os.environ.get("FORMULA_THIN_LEVEL", "140")))
+except Exception:
+    FORMULA_THIN_LEVEL = 140
 
 # 是否把公式符号用 handstroke 二次笔迹化。
 # 符号来自手写字库时应为 False（保留原笔迹）；
@@ -126,74 +137,39 @@ def _ensure_engine(font_path, size_px, ink, math_font_path=None):
         return _renderer
 
 
-def _formula_scale(font_path, size_px, math_font_path):
-    """算公式引擎该用多大字号，才能让公式里的字和正文一样高。
 
-    早先用固定倍数 MATH_SIZE_COMP=1.65，那是为马善政（毛笔体字形偏小）设的。
-    换成手写符号字库后字高本来就接近汉字，再乘 1.65 就明显偏大——
-    实测公式里 380 高 59px、纯文本 380 高 43px（+37%）。
+def _thin_formula_image(img, level):
+    """柔和对公式位图做「调细」：压掉 alpha 低值端并重新拉伸。
 
-    这里改成实测反推：量「主字体在当前字号下某个汉字的墨迹高」，
-    再量「公式引擎在参考字号下同类字符的墨迹高」，两者比值就是需要的倍数。
+    level 为 alpha 阈值（0–254）：越大越细。只改 alpha，不改颜色，
+    因此不会破坏细笔画，也不会产生腐蚀那种锯齿边。
     """
-    try:
-        import fontcal
-        from PIL import ImageFont
-        # 目标高度：主字体该字号下「国」的墨迹高 × 0.86（数字/符号略小于汉字）
-        tgt = fontcal.ink_height_at(font_path, "国", max(4, int(round(size_px))))
-        if not tgt:
-            return MATH_SIZE_COMP
-        # 公式引擎在参考字号下渲染「0」，量出实际墨迹高
-        probe_px = max(8, int(round(size_px)))
-        f = ImageFont.truetype(math_font_path or font_path, probe_px)
-        bb = f.getbbox("0")
-        if not bb:
-            return MATH_SIZE_COMP
-        got = bb[3] - bb[1]
-        if got <= 0:
-            return MATH_SIZE_COMP
-        # 需要的倍数（乘 1.0 是因为引擎内部按 size_px 直接用）
-        k = (tgt * 0.95) / got
-        return max(0.8, min(2.2, k))
-    except Exception:
-        return MATH_SIZE_COMP
+    if img is None or img.mode != "RGBA" or level <= 0:
+        return img
+    import numpy as np
+    a = np.asarray(img.getchannel("A")).astype(np.float32)
+    t = float(min(240, max(1, int(level))))
+    a = np.clip((a - t) * 255.0 / (255.0 - t), 0, 255)
+    out = img.copy()
+    out.putalpha(Image.fromarray(a.astype(np.uint8), "L"))
+    return out
 
 
 def _box(latex, size_px, font_path, ink, math_font_path=None, display=False):
+    """渲染公式：统一固定字号，不做逐公式的高度闭环。
+
+    为什么不做闭环：闭环按「墨迹高 vs 目标高」迭代求缩放，但结果依赖
+    缓存状态（lru_cache 命中时直接返回旧盒、未命中时重算），
+    同一个公式因此会在两个尺寸之间跳变（实测 ∑ 在 76px / 42px 间跳）。
+    公式字号统一，才是可预期的行为。
+    """
     r = _ensure_engine(font_path, size_px, ink, math_font_path)
-    k = _formula_scale(font_path, size_px, math_font_path)
-    box = _render_at(r, latex, size_px, k, display)
-    # 闭环：公式里可能混着上下标/分式/大运算符，单靠一次反推不够准。
-    # 量「纯数字类公式」的墨迹高与正文对齐，差 8% 以上就调倍数重排。
-    try:
-        import fontcal
-        tgt = fontcal.ink_height_at(font_path, "国", max(4, int(round(size_px))))
-        if tgt:
-            want = tgt * 0.95
-            # 含汉字的公式不做闭环：汉字在公式引擎里按字体度量渲染，
-            # 高度本来就不同，硬拉会把它放大到 1.8 倍（实测）。
-            skip_loop = any("\u4e00" <= c <= "\u9fff" for c in latex)
-            for _ in range(0 if skip_loop else 2):
-                bb = box.image.getbbox()
-                if not bb:
-                    break
-                got = bb[3] - bb[1]
-                # 只对「矮公式」做闭环：含分式/根号的本来就该更高
-                if got <= 0 or got > want * 1.6:
-                    break
-                ratio = want / got
-                if abs(ratio - 1.0) <= 0.08:
-                    break
-                k = max(0.8, min(2.2, k * ratio))
-                box = _render_at(r, latex, size_px, k, display)
-    except Exception:
-        pass
-    # 公式墨色比正文淡，提亮到同一水平
-    import handstroke
-    boosted = handstroke._alpha_boost(box.image, handstroke.FORMULA_GAMMA)
-    if boosted is not box.image:
-        from mthw.math_renderer import MathBox
-        box = MathBox(boosted, box.baseline)
+    box = _render_at(r, latex, size_px, MATH_SIZE_COMP, display)
+    if FORMULA_THIN_LEVEL > 0:
+        try:
+            box.image = _thin_formula_image(box.image, FORMULA_THIN_LEVEL)
+        except Exception:
+            pass
     return box
 
 
