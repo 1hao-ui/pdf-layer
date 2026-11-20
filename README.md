@@ -120,7 +120,11 @@ hand = H.Hand(scan[0], variant_fonts=scan[1:])
 
 ### 可视化控制台（GUI）
 
-`python gui.py` 打开控制台（需 tkinter）。**想整篇用自己的笔迹**：字体下拉框选
+**Windows 上直接双击 `run_gui.bat` 即可打开**（启动器会自动挑带 tkinter 的
+Python；WorkBuddy 沙箱自带的 Python 没有 tkinter，直接双击 `gui.py` 会闪退）。
+其他平台或命令行里用 `python gui.py`。
+
+**想整篇用自己的笔迹**：字体下拉框选
 「ZTi 我的手写·字嗨 4 套」或「ZTi 我的手写·真迹扫描 4 套」，即以 Z体 作主字体、
 同组另外 3 套自动进入同字多形轮换（复选框已自动勾上，可手动关）。Z体 未覆盖的
 字会自动回退到全字表字体，不会出豆腐块；风格护栏的结论显示在预览区上方状态栏
