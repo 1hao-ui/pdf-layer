@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import sys
 import traceback
 
@@ -139,6 +140,64 @@ def _cmd_run(args):
     return _do_answer(args.source, spec, args.answers, out_pdf, out_png)
 
 
+def _cmd_solve(args):
+    """自动做题：划题 → 调模型（llm_client）作答 → 手写作答 PDF。"""
+    import tempfile
+
+    import ai_prompt
+    import llm_client
+
+    source = os.path.abspath(os.path.expanduser(os.path.expandvars(args.source)))
+    if not os.path.exists(source):
+        print("找不到作业页：%s" % source)
+        return 2
+    spec = worksheet.analyze(source, page=args.page, dpi=args.dpi,
+                             numbers=args.numbers)
+    total = sum(len(pg["questions"]) for pg in spec["pages"])
+    _print_spec(spec, show_text=False)
+    if total == 0:
+        print("\n[失败] 没有识别到题目", file=sys.stderr)
+        return 1
+    if args.layout_out:
+        print("\nlayout 已保存: %s" % worksheet.save_spec(spec, args.layout_out))
+
+    prompt = ai_prompt.worksheet_prompt(spec)
+    if not llm_client.available():
+        print("\n没有配置答题模型：设置 HANDWRITE_LLM_API_KEY（可选 "
+              "HANDWRITE_LLM_BASE_URL / HANDWRITE_LLM_MODEL）后重试；")
+        print("也可以把下面提示词交给外部 AI 作答，再 做题.py answer --answers：")
+        print(prompt[:1200])
+        return 2
+    print("\n调模型作答中…（%s）" % llm_client.public_config()["model"])
+    try:
+        got = llm_client.solve_worksheet(spec, prompt, vision=args.vision)
+    except llm_client.LlmError as e:
+        print("模型调用失败：%s" % e)
+        if getattr(e, "hint", None):
+            print("提示：%s" % e.hint)
+        return 3
+    meta = got.get("meta") or {}
+    print("模型返回 %d 题答案（%s ms，%s）"
+          % (len(got["answers"]), meta.get("elapsed_ms"), meta.get("model")))
+
+    fd, tmp = tempfile.mkstemp(prefix="_ai_answers_", suffix=".json")
+    os.close(fd)
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(got["answers"], f, ensure_ascii=False, indent=2)
+        out_pdf = args.out or _default_out(source, "_AI作答.pdf")
+        code = _do_answer(source, spec, tmp, out_pdf, args.png)
+        if args.answers_out:
+            shutil.copyfile(tmp, args.answers_out)
+            print("答案 JSON: %s" % args.answers_out)
+        return code
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
 def build_parser():
     p = argparse.ArgumentParser(
         prog="做题.py",
@@ -155,7 +214,8 @@ def build_parser():
 答案文件：{"1": "解：…", "2": "解：…"} 或 [{"id": "Q1", "text": "解：…"}]
 文档：docs/做题接口.md
 """)
-    sub = p.add_subparsers(dest="cmd", metavar="{analyze,answer,run}")
+    sub = p.add_subparsers(dest="cmd",
+                           metavar="{analyze,answer,run,solve}")
 
     def add_common(sp, with_page=True):
         sp.add_argument("source", help="作业页路径（PDF 或图片：PNG/JPG/WEBP/BMP/TIFF）")
@@ -206,6 +266,23 @@ def build_parser():
                       help="顺便把 analyze 的 layout 存到该路径")
     sp_c.add_argument("--json", action="store_true", help="stdout 打印完整 spec JSON")
     sp_c.set_defaults(func=_cmd_run)
+
+    sp_d = sub.add_parser("solve", help="自动做题：划题 → 调模型作答 → 手写作答 PDF",
+                          description="需要先配置 HANDWRITE_LLM_API_KEY（OpenAI "
+                                      "兼容端点，默认 DeepSeek）")
+    sp_d.add_argument("source", help="作业页 PDF/图片（扫描件用 --numbers）")
+    sp_d.add_argument("--page", type=int, default=None, help="只看第几页（0 起）")
+    sp_d.add_argument("--numbers", default=None,
+                      help="扫描件题号列表，逗号分隔，如 4.2.1,4.2.2")
+    sp_d.add_argument("--dpi", type=int, default=None, help="扫描件渲染 DPI（默认自动）")
+    sp_d.add_argument("--layout-out", default=None, help="把划题结果另存 layout JSON")
+    sp_d.add_argument("--out", default=None, help="输出 PDF 路径")
+    sp_d.add_argument("--png", default=None, help="同时输出第一页 PNG")
+    sp_d.add_argument("--vision", type=int, default=None,
+                      help="1/0：扫描件题干截图是否发给模型")
+    sp_d.add_argument("--answers-out", default=None,
+                      help="把模型给出的答案另存为 JSON（可手改后 answer）")
+    sp_d.set_defaults(func=_cmd_solve)
     return p
 
 

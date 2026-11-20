@@ -612,3 +612,77 @@ py -3 ..\..\_work\test_worksheet.py
 
 它同时回归验证 `py -3 ai_api.py --self-test` 仍为 **28/28**。
 
+
+
+---
+
+## 八、自动做题（接模型，一站式）
+
+前面几节的做题是「三段式」：`/worksheet/analyze` 划题 → `/worksheet/prompt` 拿提示词 →
+外部 AI 作答 → `/worksheet/answer` 渲染。如果你的机器上能直接访问模型，也可以让本工具
+**自己调模型**，一步出带手写答案的 PDF。
+
+### 8.1 配置（二选一）
+
+```powershell
+# 方式一：环境变量（推荐 DeepSeek，OpenAI 兼容）
+$env:HANDWRITE_LLM_API_KEY = "sk-..."
+$env:HANDWRITE_LLM_BASE_URL = "https://api.deepseek.com/v1"   # 可省，默认就是它
+$env:HANDWRITE_LLM_MODEL    = "deepseek-chat"                 # 可省
+```
+
+```json
+// 方式二：pdf-layer/llm.json（已 gitignore，不会进公开仓库）
+{"base_url": "https://api.deepseek.com/v1",
+ "api_key": "sk-...", "model": "deepseek-chat"}
+```
+
+其他 OpenAI 兼容服务/本地模型同理：`base_url` 指向 `.../v1` 即可；
+本地 Ollama 填 `http://127.0.0.1:11434/v1`，**不需要 api_key**。
+扫描件题干截图默认会发给模型（`HANDWRITE_LLM_VISION=1`），纯文本模型可设为 `0`。
+
+### 8.2 端点
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| `GET` | `/llm/status` | 模型配置（脱敏）：是否已配置、模型名、端点 |
+| `POST` | `/worksheet/solve` | 自动做题：划题 → 模型作答 → 手写作答 PDF |
+
+`POST /worksheet/solve` 请求（和 `/worksheet/answer` 一样支持 `page/numbers/spec`）：
+
+```json
+{"source": "作业.pdf"}
+```
+
+返回（配置了模型时）：
+
+```json
+{"ok": true, "auto_answered": true,
+ "pdf_base64": "JVBERi0...", "pages": 2, "bytes": 143129,
+ "questions": [{"id": "Q1", "number": "1", "text": "..."}],
+ "coverage": {"coverage": 1.0, "answered": 4},
+ "answers_meta": {"model": "deepseek-chat", "elapsed_ms": 8120, "vision": true}}
+```
+
+没配模型时**不报错**，返回可继续的中间结果：
+
+```json
+{"ok": true, "needs_answers": true,
+ "questions": [...], "prompt": "（完整做题提示词）",
+ "llm": {"configured": false, "env": [...]},
+ "hint": "把题目交给外部 AI，按 prompt 生成 {\"answers\": {...}} 后带 answers 再调本端点"}
+```
+
+带 `answers` 再调就跳过模型直接渲染（等价 `/worksheet/answer`），适合「AI 答完你手改一遍再写」。
+
+### 8.3 命令行
+
+```powershell
+py -3 做题.py solve 作业.pdf --out 手写作答.pdf
+py -3 做题.py solve 扫描作业.pdf --numbers "4.2.1,4.2.2" --answers-out answers.json
+```
+
+`--answers-out` 会把模型答案存成 JSON，你改完可以 `做题.py answer` 再渲染。
+
+> 说明：模型是否真的可用取决于你的 Key/网络；本工具只做「把它接进来」的管道，
+> 渲染、字库约束、手写排版都在本地完成，答案里超出字库的字会按原规则回退/提示。

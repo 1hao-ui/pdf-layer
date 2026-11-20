@@ -25,6 +25,9 @@
     POST /worksheet/analyze  {source, page?} → 作业页自动划题 spec + 精简题目 + crops
     POST /worksheet/answer   {source, spec?/layout?, answers} → 手写作答 PDF（base64）
     POST /worksheet/prompt   {source?/spec?} → 做题提示词（逐题作答、只输出 JSON）
+POST /worksheet/solve    {source, answers?} → 自动做题：有答案直接渲染；
+                         没答案时配置了模型就调模型作答再渲染，否则返回题目+提示词
+GET  /llm/status         → 自动做题模型配置（脱敏）：是否已配置/模型名/端点
 
 安全边界
 --------
@@ -66,6 +69,7 @@ import hwrender as H                  # noqa: E402
 import page_model as pm               # noqa: E402
 import symbols                        # noqa: E402
 import worksheet as ws                # noqa: E402  「做题」链路：划题/排版/导出
+import llm_client                     # noqa: E402  自动做题的模型接入
 
 VERSION = "1.0.0"
 TOOL_NAME = "handwrite-render"
@@ -719,6 +723,7 @@ def _health_payload(host, port):
         "charset": {"hanzi_count": len(han), "symbol_count": len(sym)},
         "host": host, "port": int(port),
         "out_dir": OUT_DIR,
+        "llm": llm_client.public_config(),
         "server_time": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
 
@@ -742,6 +747,10 @@ def _endpoints():
          "description": "作业页 + 答案 → 手写作答 PDF（叠加原页，保留原内容）"},
         {"method": "POST", "path": "/worksheet/prompt",
          "description": "做题提示词：逐题作答、只输出 JSON、字库/字数约束"},
+        {"method": "POST", "path": "/worksheet/solve",
+         "description": "自动做题一站式：划题 → 模型作答 → 手写写回 PDF（也可只传 answers 跳过模型）"},
+        {"method": "GET", "path": "/llm/status",
+         "description": "自动做题模型配置（脱敏）：是否已配置、模型名、端点"},
     ]
 
 
@@ -754,6 +763,8 @@ def _worksheet_endpoints():
          "description": "按 spec/layout + 答案渲染手写作答 PDF（原 PDF 内容保留）"},
         {"method": "POST", "path": "/worksheet/prompt",
          "description": "生成做题提示词（逐题作答、只输出 JSON、字库内字符）"},
+        {"method": "POST", "path": "/worksheet/solve",
+         "description": "自动做题一站式：analyze → 内置提示词 → 调模型作答 → 手写作答 PDF"},
     ]
 
 
@@ -819,6 +830,7 @@ def _capabilities_payload():
         # 不影响原有键。
         "worksheet": {
             "spec_version": ws.SPEC_VERSION,
+            "llm": llm_client.public_config(),
             "endpoints": _worksheet_endpoints(),
             "cli": "做题.py",
             "modes": ["pdf", "image"],
@@ -1247,6 +1259,113 @@ def _do_worksheet_prompt(body):
             "elapsed_ms": int(round((time.perf_counter() - t0) * 1000))}
 
 
+def _do_worksheet_solve(body):
+    """自动做题一站式：划题 → 内置提示词 → 模型作答 → 手写作答 PDF。
+
+    请求体
+    ------
+    source       作业页路径（PDF/图片），必填
+    page/numbers 同 /worksheet/analyze（扫描件题号）
+    answers      可选：{题号: 文本}；传了就跳过模型直接渲染
+    spec         可选：复用已 analyze 的 spec（此时不再重新划题）
+    write/filename/return_base64  同 /worksheet/answer
+    include_prompt  true 时把提示词也返回（默认 False，响应更小）
+
+    返回
+    ----
+    有答案可渲染 → {"ok":true, "pdf_base64":..., "coverage":..., "answers_meta":...}
+    没答案但配置了模型 → 自动调模型作答后同上（"auto_answered":true）
+    没答案也没模型 → {"ok":true, "needs_answers":true, "questions":[...],
+                       "prompt":..., "hint":...}（外部 AI 补 answers 后再调）
+    """
+    t0 = time.perf_counter()
+    source = _worksheet_source(body)
+    page = _worksheet_page(body)
+    numbers = _worksheet_numbers(body)
+
+    spec = body.get("spec")
+    if spec is not None:
+        if not isinstance(spec, dict):
+            raise ApiError(400, "spec 必须是 JSON 对象")
+        spec = copy.deepcopy(spec)
+        spec["source"] = source
+    else:
+        try:
+            spec = ws.analyze(source, page=page, numbers=numbers)
+        except FileNotFoundError as e:
+            raise ApiError(404, str(e))
+        except ValueError as e:
+            raise ApiError(400, str(e))
+    if not isinstance(spec.get("pages"), list) or not ws.questions_brief(spec):
+        raise ApiError(400, "没有识别到题目：请检查 page/numbers 或改传 spec")
+
+    prompt = ai_prompt.worksheet_prompt(spec)
+    questions = ws.questions_brief(spec)
+
+    answers = body.get("answers")
+    answers_meta = None
+    auto_answered = False
+    if answers is None:
+        if not llm_client.available():
+            resp = {"ok": True, "needs_answers": True,
+                    "source": source,
+                    "spec_version": spec.get("version") or ws.SPEC_VERSION,
+                    "questions": questions,
+                    "character_set": {
+                        "hanzi_count": len(ai_prompt.allowed_charset()[0]),
+                        "symbol_count": len(ai_prompt.allowed_charset()[1])},
+                    "prompt": prompt,
+                    "prompt_length": len(prompt),
+                    "llm": llm_client.public_config(),
+                    "hint": ("这台机器还没有配置答题模型：设置 HANDWRITE_LLM_API_KEY"
+                             "（可选 HANDWRITE_LLM_BASE_URL/HANDWRITE_LLM_MODEL）后"
+                             "再调本端点即可全自动；或者把题目交给外部 AI，按 prompt 生成 "
+                             '{"answers": {...}} 后带 answers 再调本端点。'),
+                    "elapsed_ms": int(round((time.perf_counter() - t0) * 1000))}
+            if body.get("include_prompt", True) is False:
+                resp.pop("prompt", None)
+            return resp
+        try:
+            got = llm_client.solve_worksheet(spec, prompt)
+        except llm_client.LlmError as e:
+            raise ApiError(e.code, str(e), hint=e.hint)
+        answers = got["answers"]
+        answers_meta = got.get("meta")
+        auto_answered = True
+    elif not isinstance(answers, (dict, list)):
+        raise ApiError(400, "answers 必须是 JSON 对象或数组")
+
+    body2 = dict(body)
+    body2["spec"] = spec
+    body2["answers"] = answers
+    res = _do_worksheet_answer(body2)
+    res["auto_answered"] = auto_answered
+    if answers_meta:
+        res["answers_meta"] = answers_meta
+    if body.get("include_answers"):
+        res["answers"] = answers
+    if body.get("include_prompt"):
+        res["prompt"] = prompt
+    res["questions"] = questions
+    res["elapsed_ms"] = int(round((time.perf_counter() - t0) * 1000))
+    return res
+
+
+def _llm_status_payload():
+    cfg = llm_client.public_config()
+    return {"ok": True, "configured": cfg["configured"], "llm": cfg,
+            "endpoints": {
+                "auto_solve": "POST /worksheet/solve {source}",
+                "manual": "POST /worksheet/analyze → /worksheet/prompt → "
+                          "/worksheet/answer",
+            },
+            "env": {"HANDWRITE_LLM_API_KEY": "必填（或 OPENAI_API_KEY / "
+                                             "DEEPSEEK_API_KEY）",
+                    "HANDWRITE_LLM_BASE_URL": "OpenAI 兼容端点，默认 DeepSeek",
+                    "HANDWRITE_LLM_MODEL": "模型名，默认 deepseek-chat",
+                    "HANDWRITE_LLM_VISION": "1/0：扫描件截图是否发给模型"}}
+
+
 # ======================================================================
 # HTTP 服务
 # ======================================================================
@@ -1257,8 +1376,8 @@ class AiHandler(BaseHTTPRequestHandler):
     # ---------------------------------------------------------- 路由
     POST_ROUTES = ("/render", "/render_pdf", "/prompt", "/answer",
                    "/worksheet/analyze", "/worksheet/answer",
-                   "/worksheet/prompt")
-    GET_ROUTES = ("/", "/help", "/health", "/capabilities")
+                   "/worksheet/prompt", "/worksheet/solve")
+    GET_ROUTES = ("/", "/help", "/health", "/capabilities", "/llm/status")
 
     def _method_not_allowed(self, allow):
         self._send_json(405, {"ok": False, "code": 405,
@@ -1287,6 +1406,8 @@ class AiHandler(BaseHTTPRequestHandler):
                 self._send_json(200, _health_payload(host, port))
             elif route == "/capabilities":
                 self._send_json(200, _capabilities_payload())
+            elif route == "/llm/status":
+                self._send_json(200, _llm_status_payload())
             else:
                 raise ApiError(404, "未知端点：GET %s" % route,
                                hint="可用端点见 GET /capabilities")
@@ -1317,6 +1438,8 @@ class AiHandler(BaseHTTPRequestHandler):
                 self._send_json(200, _do_worksheet_answer(self._read_json()))
             elif route == "/worksheet/prompt":
                 self._send_json(200, _do_worksheet_prompt(self._read_json()))
+            elif route == "/worksheet/solve":
+                self._send_json(200, _do_worksheet_solve(self._read_json()))
             else:
                 raise ApiError(404, "未知端点：POST %s" % route,
                                hint="可用端点见 GET /capabilities")

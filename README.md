@@ -244,6 +244,8 @@ py -3 ai_api.py --self-test     # 28 项自测
 |---|---|
 | `GET /health` | 存活探测 |
 | `GET /capabilities` | 字体/字表（500 汉字 + 204 符号）/字号范围/段落 schema |
+| `GET /llm/status` | 自动做题模型配置（脱敏）：是否已配置/模型名/端点 |
+| `POST /worksheet/solve` | 自动做题：划题 → 模型作答 → 手写写回 PDF（也可只传 answers） |
 | `POST /render` | 多段文本 → 手写 PNG/PDF（可带背景、返回 base64） |
 | `POST /render_pdf` | 手写层叠加到指定 PDF 页，保留原文 |
 | `POST /prompt` | 内置答题提示词（注入真实字表）+ tool schema |
@@ -264,6 +266,11 @@ cd _refs\pdf-layer
 py -3 做题.py analyze 作业.pdf [--numbers "4.2.1,4.2.2,..."] --out layout.json
 py -3 做题.py answer 作业.pdf --layout layout.json --answers answers.json --out 手写作答.pdf
 py -3 做题.py run 作业.pdf --answers answers.json --out 手写作答.pdf
+
+# 自动做题（需要模型）：划题 → AI 作答 → 手写作答 PDF，一步完成
+$env:HANDWRITE_LLM_API_KEY = "sk-..."          # DeepSeek/OpenAI 兼容 Key
+py -3 做题.py solve 作业.pdf --out 手写作答.pdf
+# 扫描件：--numbers "4.2.1,4.2.2,..."；把模型答案另存手改：--answers-out answers.json
 ```
 
 - **自动划区**：数字版 PDF 读文字层按题号（`1.` / `（1）` / `4.2.1` 多级）识别题块并提取文字；
@@ -272,6 +279,11 @@ py -3 做题.py run 作业.pdf --answers answers.json --out 手写作答.pdf
   叠加回原作业 PDF，原内容逐页保留。
 - **答案像人写作业**：提示词要求「解：」开头、先依据再公式代入再结果、「答：」收尾；
   渲染前把 `220/10` 这类斜杠自动转成**分数式**（分子/分母上下叠），乘法 ×、开方 √。
+- **自动做题（接模型）**：`llm_client.py` 接 OpenAI 兼容接口（默认 DeepSeek）
+  `POST /worksheet/solve` 一步完成「划题 → 模型作答 → 手写写回 PDF」；
+  `GET /llm/status` 看模型配置；没配模型时返回题目+提示词（`needs_answers`），
+  外部 AI 补 `answers` 后再调即可。配置：环境变量 `HANDWRITE_LLM_API_KEY`
+  （可选 `HANDWRITE_LLM_BASE_URL` / `_MODEL` / `_VISION`）或 `llm.json`。
 - **AI 接口**：`POST /worksheet/analyze`、`/worksheet/prompt`（做题提示词：只用字库内
   500 汉字+204 符号、考试精炼、只输出 `{"answers":{...}}`、每题可写字数约束）、
   `/worksheet/answer`。详见 `docs/做题接口.md`。
@@ -319,10 +331,11 @@ scanfont.py        手写稿扫描造字：模板 / 切分 / 生成 TTF / 自测
 pack_ziti.py       把私人笔迹原件打包成公开发布的「Z体」字库
 page_model.py      页面/段落模型 + 背景（图片/PDF）+ 拼合导出（GUI/AI 共用）
 theme.py           界面主题（ttk 样式/色板/字号/深浅色）
-ai_api.py          AI 接口（本地 HTTP：/render、/render_pdf、/prompt、/answer）
+ai_api.py          AI 接口（本地 HTTP：/render、/render_pdf、/prompt、/answer、做题/自动做题）
+llm_client.py      自动做题的模型接入（OpenAI 兼容：DeepSeek/OpenAI/本地 Ollama）
 ai_prompt.py       内置答题提示词 + 工具 schema（字库内字符约束/考试精炼风格）
 worksheet.py       做题：作业页自动划题目区/答题区 + 答案手写渲染（spec v1.1）
-做题.py            做题命令行（analyze / answer / run，headless）
+做题.py            做题命令行（analyze / answer / run / solve，headless）
 docs/做题接口.md    做题 CLI/HTTP 接口文档
 ai_client_example.py  AI 接口调用示例
 assets/            界面效果图（mockup）
