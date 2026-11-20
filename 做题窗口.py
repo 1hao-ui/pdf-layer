@@ -418,7 +418,7 @@ class WorksheetWindow:
         self._log_open = False
         self._busy = False
 
-        root.title("做题窗口 · 手写作答（只手动生成，不会启动生成器）")
+        root.title("ZTi 智能做题助手 · AI 作答 + 手写写回")
         self._setup_window_geometry()
         self._build_ui()
         self._apply_widget_colors()
@@ -590,13 +590,20 @@ class WorksheetWindow:
         btn(row2, "打开答案JSON", self._dlg_open_answers)
         btn(row2, "保存答案JSON", self._dlg_save_answers)
         sep(row2)
+        self.btn_ai = ttk.Button(
+            row2, text="AI 自动作答", command=self.ai_solve,
+            style=self._style("accent_button", "Accent.TButton"),
+            padding=(14, 6))
+        self.btn_ai.pack(side="left", padx=1)
+        btn(row2, "AI 设置", self._dlg_ai_settings)
+        sep(row2)
         self.btn_generate = ttk.Button(
             row2, text="生成手写作答", command=self._dlg_generate,
             style=self._style("accent_button", "Accent.TButton"),
             padding=(14, 6), width=0)
         self.btn_generate.pack(side="left", padx=1)
         btn(row2, "预览当前页", self.preview_current_page)
-        ttk.Label(row2, text="改完答案后手动点「生成手写作答」才会写 PDF",
+        ttk.Label(row2, text="点「AI 自动作答」自动出答案；改完再点「生成手写作答」",
                   style=self._style("toolbar_muted", "Toolbar.Muted.TLabel")
                   ).pack(side="right", padx=6)
 
@@ -865,11 +872,12 @@ class WorksheetWindow:
 
     def _set_busy(self, busy, text=""):
         self._busy = bool(busy)
-        try:
-            self.btn_generate.configure(
-                state=("disabled" if busy else "normal"))
-        except Exception:
-            pass
+        for attr in ("btn_generate", "btn_ai"):
+            try:
+                getattr(self, attr).configure(
+                    state=("disabled" if busy else "normal"))
+            except Exception:
+                pass
         if text:
             try:
                 self.status_label.configure(text=text)
@@ -1484,6 +1492,176 @@ class WorksheetWindow:
             self.save_answers(path)
 
     # ------------------------------------------------------------ 生成（手动）
+    # ------------------------------------------------------------ AI 自动作答
+    def _llm_modules(self):
+        import ai_prompt
+        import llm_client
+        return llm_client, ai_prompt
+
+    def _dlg_ai_settings(self):
+        """AI 模型设置：base_url / 模型名 / API Key（存 llm.json）。"""
+        try:
+            llm_client, _ai_prompt = self._llm_modules()
+        except Exception as e:
+            self._warn("AI 模块不可用：%s" % e)
+            return
+        cfg = llm_client.config()
+        top = tk.Toplevel(self.root)
+        top.title("AI 模型设置")
+        top.transient(self.root)
+        top.resizable(False, False)
+        try:
+            top.attributes("-topmost", True)
+        except Exception:
+            pass
+        frm = ttk.Frame(top, padding=14)
+        frm.pack(fill="both", expand=True)
+        ttk.Label(frm, text="接口地址（OpenAI 兼容，DeepSeek 默认）").grid(
+            row=0, column=0, sticky="w", pady=(0, 2))
+        var_base = tk.StringVar(value=cfg.get("base_url") or "")
+        ttk.Entry(frm, textvariable=var_base, width=52).grid(
+            row=1, column=0, sticky="we", pady=(0, 8))
+        ttk.Label(frm, text="模型名").grid(row=2, column=0, sticky="w",
+                                          pady=(0, 2))
+        var_model = tk.StringVar(value=cfg.get("model") or "")
+        ttk.Entry(frm, textvariable=var_model, width=52).grid(
+            row=3, column=0, sticky="we", pady=(0, 8))
+        ttk.Label(frm, text="API Key（保存到程序目录 llm.json，不要外传）").grid(
+            row=4, column=0, sticky="w", pady=(0, 2))
+        var_key = tk.StringVar(value=cfg.get("api_key") or "")
+        ttk.Entry(frm, textvariable=var_key, width=52, show="*").grid(
+            row=5, column=0, sticky="we", pady=(0, 10))
+        ttk.Label(frm, text="本地 Ollama 可免 Key：http://127.0.0.1:11434/v1",
+                  style="Muted.TLabel").grid(row=6, column=0, sticky="w")
+        btns = ttk.Frame(frm)
+        btns.grid(row=7, column=0, sticky="e", pady=(10, 0))
+
+        def save():
+            try:
+                path = llm_client.save_config(var_base.get(), var_key.get(),
+                                              var_model.get())
+            except Exception as e:
+                messagebox.showerror("保存失败", str(e), parent=top)
+                return
+            self.log("AI 配置已保存：%s" % path)
+            messagebox.showinfo("已保存", "AI 配置已保存到：\n%s" % path,
+                                parent=top)
+            top.destroy()
+
+        ttk.Button(btns, text="保存", command=save, style="Accent.TButton").pack(
+            side="left", padx=4)
+        ttk.Button(btns, text="取消", command=top.destroy).pack(side="left")
+        top.grab_set()
+        try:
+            top.focus_force()
+        except Exception:
+            pass
+
+    def ai_solve(self):
+        """一键 AI 作答：划好题后自动调模型，把答案填进每题编辑框（不写文件）。"""
+        if self._busy:
+            self.log("正在忙，稍后再点。")
+            return
+        if not self.spec or not self.questions:
+            self._warn("先打开作业页并自动划题，再点 AI 自动作答。")
+            return
+        try:
+            llm_client, ai_prompt = self._llm_modules()
+        except Exception as e:
+            self._warn("AI 模块不可用：%s" % e)
+            return
+        if not llm_client.available():
+            if messagebox.askyesno(
+                    "还没有配置 AI 模型",
+                    "没有检测到答题模型（API Key）。\n\n"
+                    "现在去配置吗？\n（DeepSeek/OpenAI 兼容接口；本地 Ollama 可免 Key）",
+                    parent=self.root):
+                self._dlg_ai_settings()
+            return
+        cfg = llm_client.public_config()
+        self._set_busy(True, "AI 正在作答…（%s）" % cfg.get("model"))
+        self.log("AI 作答中：%s @ %s" % (cfg.get("model"), cfg.get("base_url")))
+
+        import queue
+        import threading
+
+        self._ai_queue = queue.Queue()
+
+        def worker():
+            try:
+                got = llm_client.solve_worksheet(
+                    self.spec, ai_prompt.worksheet_prompt(self.spec))
+                self._ai_queue.put((got, None))
+            except Exception as e:                       # noqa: BLE001
+                self._ai_queue.put((None, e))
+
+        threading.Thread(target=worker, daemon=True, name="ai-solve").start()
+        self.root.after(80, self._ai_poll)
+
+    def _ai_poll(self):
+        """主线程轮询 AI 结果：跨线程只传 queue，避免 tkinter 线程安全问题。"""
+        q = getattr(self, "_ai_queue", None)
+        if q is None:
+            return
+        try:
+            got, err = q.get_nowait()
+        except Exception:
+            self.root.after(80, self._ai_poll)
+            return
+        self._ai_queue = None
+        self._ai_done(got, err)
+
+    def _ai_done(self, got, err):
+        self._set_busy(False)
+        if err is not None:
+            hint = getattr(err, "hint", None)
+            msg = str(err) + (("\n\n建议：" + hint) if hint else "")
+            self.log("AI 作答失败：" + str(err))
+            self._warn("AI 作答失败：\n" + msg)
+            self._update_status()
+            return
+        answers = (got or {}).get("answers") or {}
+        qs = [{"id": q.get("id"), "number": q.get("number")}
+              for q in self.questions]
+        try:
+            matches, _w, _u, _m = worksheet.normalize_answers(answers, qs)
+        except Exception:
+            matches = {str(k): v for k, v in answers.items()}
+        if not matches:
+            self._warn("AI 返回的答案没有匹配到题目，请检查题号。")
+            self._update_status()
+            return
+        filled = 0
+        for qid, text in matches.items():
+            if isinstance(text, str) and text.strip():
+                self.answers[str(qid)] = text
+                filled += 1
+        self._rebuild_question_views()
+        # 注意：不能走 select_question()——它会 _commit_editor()，
+        # 把 AI 刚写入的当前题答案又用（旧的）空编辑器内容覆盖掉。
+        try:
+            idx = self.current if self.current is not None else 0
+            if 0 <= idx < len(self.questions):
+                self.current = int(idx)
+                q = self.questions[self.current]
+                self.page = int(q.get("page") or 0)
+                self.generated_mode = False
+                self._generated_img = None
+                self.qlist.select(self.current)
+                self._sync_editor_from_current()
+                self._redraw_canvas()
+        except Exception:
+            pass
+        self._update_status()
+        meta = (got or {}).get("meta") or {}
+        self.log("AI 作答完成：%d 题（%s ms，模型 %s）"
+                 % (filled, meta.get("elapsed_ms"), meta.get("model")))
+        try:
+            self.status_label.configure(
+                text="AI 已答 %d 题 · 可手动修改后点「生成手写作答」" % filled)
+        except Exception:
+            pass
+
     def _dlg_generate(self):
         if not self.spec or not self.questions:
             self._warn("先打开作业页并自动划题。")
@@ -1629,7 +1807,34 @@ def main(argv=None):
                         help="分析页：all（默认）或页号（从 0 开始）")
     parser.add_argument("--smoke", action="store_true",
                         help="打包自检：无窗口构建一次后退出（打包测试用）")
+    parser.add_argument("--ai-smoke", default=None, metavar="PDF",
+                        help="打包自检：打开作业→AI 自动作答→写结果文件后退出")
     args = parser.parse_args(argv if argv is not None else None)
+    if args.ai_smoke:
+        root = tk.Tk()
+        root.withdraw()
+        app = WorksheetWindow(root)
+        app.load_source(args.ai_smoke, numbers=args.numbers)
+        app.ai_solve()
+        import time as _time
+        t0 = _time.time()
+        while app._busy and _time.time() - t0 < 180:
+            root.update()
+            _time.sleep(0.05)
+        for _ in range(40):
+            root.update()
+            _time.sleep(0.02)
+        filled = sum(1 for v in app.answers.values() if (v or "").strip())
+        base = (os.path.dirname(sys.executable)
+                if getattr(sys, "frozen", False) else HERE)
+        with open(os.path.join(base, "smoke_ai.txt"), "w",
+                  encoding="utf-8") as f:
+            f.write("AI_FILLED=%d\\nTOTAL=%d" % (filled, len(app.questions)))
+        try:
+            root.destroy()
+        except Exception:
+            pass
+        return 0 if filled else 1
     root = tk.Tk()
     if args.smoke:
         root.withdraw()

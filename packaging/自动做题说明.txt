@@ -1,32 +1,35 @@
-AI 自动答题（可选功能）配置说明
+AI 自动做题 配置说明
 ================================================
 
-"自动做题"需要一个大模型来答题。本软件支持任何 OpenAI 兼容接口
-（DeepSeek、OpenAI、通义/Kimi/GLM 的兼容接口、本地 Ollama 都行），
-默认用 DeepSeek。
+"AI 自动作答"需要一个答题模型。支持任何 OpenAI 兼容接口
+（DeepSeek、OpenAI、通义/Kimi/GLM 兼容接口、本地 Ollama 都行），默认 DeepSeek。
 
-【配置方法：二选一】
+【最简单的配置方式：软件里点】
+  打开 ZTi智能做题助手.exe → 点工具栏"AI 设置"
+  → 填 接口地址 / 模型名 / API Key → 保存。
+  配置会存到程序目录的 llm.json（下次自动读取）。
 
-方法一：在 发布\ZTi手写体生成器\ 目录下新建 llm.json，内容：
-{
-  "base_url": "https://api.deepseek.com/v1",
-  "api_key": "sk-你的Key",
-  "model": "deepseek-chat"
-}
+【也可以手动写 llm.json（放在 exe 同目录）】
+  {
+    "base_url": "https://api.deepseek.com/v1",
+    "api_key": "sk-你的Key",
+    "model": "deepseek-chat"
+  }
 
-方法二：设置系统环境变量（一次性）：
-  按 Win+R → 输入 cmd → 回车，粘贴下面两行（换成你的 Key）：
-    setx HANDWRITE_LLM_API_KEY "sk-你的Key"
-    setx HANDWRITE_LLM_BASE_URL "https://api.deepseek.com/v1"
-  重新打开软件生效。
+【常见服务】
+  DeepSeek：base_url = https://api.deepseek.com/v1   model = deepseek-chat
+  OpenAI  ：base_url = https://api.openai.com/v1      model = gpt-4o-mini
+  Ollama  ：base_url = http://127.0.0.1:11434/v1     model = qwen2.5:7b（不需要 Key）
 
-【使用】
-  · 做题窗口里点"AI 自动作答"按钮，等几秒会自动出答案；
-  · 或者启动 ZTiAI接口.exe，POST /worksheet/solve 一步完成；
-  · 没有配置 Key 也不会报错：会提示你把题目交给外部 AI 作答。
+【怎么用】
+  1. 打开作业页 → 自动划区；
+  2. 点"AI 自动作答"，等几秒，答案会填进每道题；
+  3. 你可以逐题检查/修改；
+  4. 确认后点"生成手写作答"，导出带手写答案的 PDF。
 
-【其他服务示例】
-  OpenAI:  base_url = https://api.openai.com/v1   model = gpt-4o-mini
-  Ollama:  base_url = http://127.0.0.1:11434/v1  model = qwen2.5:7b（不需要 Key）
+【没有 Key 时】
+  不会报错崩溃：会提示你去"AI 设置"配置；
+  也可以把题目交给外部 AI（按 /worksheet/prompt 的提示词作答），
+  把答案存成 JSON，用"打开答案JSON"导入。
 
 注意：Key 是私密的，不要把 llm.json 发给别人或传到网上。

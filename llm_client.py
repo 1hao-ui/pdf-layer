@@ -31,6 +31,7 @@ import json
 import os
 import re
 import socket
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -41,9 +42,12 @@ DEFAULT_MODEL = "deepseek-chat"
 DEFAULT_TIMEOUT = 120.0
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CONFIG_FILES = (
-    os.path.join(HERE, "llm.json"),                 # 推荐：pdf-layer/llm.json
-    os.path.expanduser("~/.handwrite_llm.json"),    # 或用户目录
+# 打包版优先读 exe 同目录的 llm.json（用户看得见、可改）；源码版读 pdf-layer/llm.json
+CONFIG_FILES = tuple(
+    ([os.path.join(os.path.dirname(sys.executable), "llm.json")]
+     if getattr(sys, "frozen", False) else [])
+    + [os.path.join(HERE, "llm.json"),
+       os.path.expanduser("~/.handwrite_llm.json")]
 )
 
 
@@ -72,6 +76,23 @@ def _file_cfg():
 
 def _env(name, default=""):
     return (os.environ.get(name) or default).strip()
+
+
+def save_config(base_url, api_key, model, path=None):
+    """把 AI 配置写到 llm.json（打包版写在 exe 同目录），返回路径。"""
+    data = {"base_url": (base_url or "").strip(),
+            "api_key": (api_key or "").strip(),
+            "model": (model or "").strip()}
+    if path is None:
+        for cand in CONFIG_FILES:
+            d = os.path.dirname(cand)
+            if d and os.path.isdir(d) and os.access(d, os.W_OK):
+                path = cand
+                break
+        path = path or CONFIG_FILES[0]
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    return path
 
 
 def _is_local(base_url):

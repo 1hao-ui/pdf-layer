@@ -1,5 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""ZTi 手写体生成器打包 spec：三个 exe 共享一份运行时（_internal）。"""
+"""ZTi 智能做题助手打包 spec：
+
+主程序 = 做题窗口（做题软件）；手写体生成器作为附带的「手写工具」；
+三个 exe 共享一份运行时（_internal）。
+"""
 import os
 
 ROOT = r"C:\Users\a\Desktop\手写体生成器"
@@ -23,20 +27,23 @@ HIDDEN = [
     "mthw.latex_parser",
 ]
 
+# 主程序：做题窗口（做题软件）
+a_main = Analysis([os.path.join(APP, "做题窗口.py")], pathex=[APP],
+                  datas=DATAS, hiddenimports=HIDDEN, noarchive=False)
+pyz_main = PYZ(a_main.pure)
+exe_main = EXE(pyz_main, a_main.scripts, [],
+               exclude_binaries=True, name="ZTi智能做题助手",
+               debug=False, strip=False, upx=False, console=False)
+
+# 附带工具：手写体生成器（GUI）
 a_gui = Analysis([os.path.join(APP, "gui.py")], pathex=[APP],
-                 datas=DATAS, hiddenimports=HIDDEN, noarchive=False)
+                 datas=[], hiddenimports=HIDDEN, noarchive=False)
 pyz_gui = PYZ(a_gui.pure)
 exe_gui = EXE(pyz_gui, a_gui.scripts, [],
-              exclude_binaries=True, name="ZTi手写体生成器",
+              exclude_binaries=True, name="ZTi手写工具",
               debug=False, strip=False, upx=False, console=False)
 
-a_ws = Analysis([os.path.join(APP, "做题窗口.py")], pathex=[APP],
-                datas=[], hiddenimports=HIDDEN, noarchive=False)
-pyz_ws = PYZ(a_ws.pure)
-exe_ws = EXE(pyz_ws, a_ws.scripts, [],
-             exclude_binaries=True, name="ZTi做题窗口",
-             debug=False, strip=False, upx=False, console=False)
-
+# AI 接口（给 AI/自动化调用，可不开）
 a_api = Analysis([os.path.join(APP, "ai_api.py")], pathex=[APP],
                  datas=[], hiddenimports=HIDDEN, noarchive=False)
 pyz_api = PYZ(a_api.pure)
@@ -44,7 +51,7 @@ exe_api = EXE(pyz_api, a_api.scripts, [],
               exclude_binaries=True, name="ZTiAI接口",
               debug=False, strip=False, upx=False, console=True)
 
-coll = COLLECT(exe_gui, a_gui.binaries, a_gui.datas,
-               exe_ws, a_ws.binaries,
+coll = COLLECT(exe_main, a_main.binaries, a_main.datas,
+               exe_gui, a_gui.binaries,
                exe_api, a_api.binaries,
-               strip=False, upx=False, name="ZTi手写体生成器")
+               strip=False, upx=False, name="ZTi智能做题助手")
