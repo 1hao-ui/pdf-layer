@@ -1342,6 +1342,49 @@ def _charset_warnings(matches):
 # ======================================================================
 # render_answers
 # ======================================================================
+
+# ---------------------------------------------------------------- 答案人性化
+# 人手写作业里除以很少写斜杠：要么写分数（分子/分母上下叠），要么写 ÷。
+# AI 常输出 "220/10"，直接按普通字符写出来就是斜杠，很“机器”。
+# 这里在渲染前把 ASCII 斜杠换成 LaTeX 分数式（走公式层，渲染成横线上下结构）。
+_FRAC_TOKEN = r"(?:-?\d+(?:\.\d+)?|[A-Za-z])"
+_FRAC_RE = re.compile(r"(?<![\\\w$.])(" + _FRAC_TOKEN
+                      + r")\s*/\s*(" + _FRAC_TOKEN + r")(?![\\\w$.])")
+
+
+def _frac_repl(inside_math):
+    def repl(m):
+        a, b = m.group(1), m.group(2)
+        if inside_math:
+            return r"\frac{%s}{%s}" % (a, b)
+        return r"$\frac{%s}{%s}$" % (a, b)
+    return repl
+
+
+def humanize_answer(text):
+    """把答案里的 ASCII 除号斜杠改成手写习惯：a/b → 分数式（上下结构）。
+
+    已包在 $...$ 里的片段直接换成 \\frac{}{}；普通文字里换成 $\frac{}{}$。
+    只处理「数字/单个字母」之间的斜杠，避免误伤 kW/h 这类单位写法。
+    """
+    text = text or ""
+    out, i = [], 0
+    while i < len(text):
+        j = text.find("$", i)
+        if j < 0:
+            out.append(_FRAC_RE.sub(_frac_repl(False), text[i:]))
+            break
+        out.append(_FRAC_RE.sub(_frac_repl(False), text[i:j]))
+        k = text.find("$", j + 1)
+        if k < 0:                       # 不配对的 $ 原样保留
+            out.append(text[j:])
+            break
+        seg = text[j + 1:k]
+        out.append("$" + _FRAC_RE.sub(_frac_repl(True), seg) + "$")
+        i = k + 1
+    return "".join(out)
+
+
 def render_answers(spec, answers, out_pdf=None, out_png=None, page_model=None,
                    seed=20261118, jitter=1.0):
     """把答案手写排进 spec 的答题区并导出 PDF / PNG。
@@ -1412,7 +1455,7 @@ def render_answers(spec, answers, out_pdf=None, out_png=None, page_model=None,
             page.bg_page = 0
         for i, q in enumerate(page_questions):
             qid = str(q.get("id"))
-            text = matches[qid]
+            text = humanize_answer(matches[qid])
             rect = _rect_key(q.get("answer_rect") or [56, 120, 539, 300])
             size, line_pt, lines, need, fits = fit_answer_size(text, rect)
             if not fits:
