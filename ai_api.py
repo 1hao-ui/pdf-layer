@@ -22,6 +22,9 @@
     POST /render_pdf      segments/spec + 源 PDF → 叠加到指定页，保留原内容
     POST /prompt          {question} → 内置系统提示词（含动态字表）
     POST /answer          {question, answer_text} → 自动切段 + 可直接 render 的 spec
+    POST /worksheet/analyze  {source, page?} → 作业页自动划题 spec + 精简题目 + crops
+    POST /worksheet/answer   {source, spec?/layout?, answers} → 手写作答 PDF（base64）
+    POST /worksheet/prompt   {source?/spec?} → 做题提示词（逐题作答、只输出 JSON）
 
 安全边界
 --------
@@ -62,6 +65,7 @@ import ai_prompt                      # noqa: E402
 import hwrender as H                  # noqa: E402
 import page_model as pm               # noqa: E402
 import symbols                        # noqa: E402
+import worksheet as ws                # noqa: E402  「做题」链路：划题/排版/导出
 
 VERSION = "1.0.0"
 TOOL_NAME = "handwrite-render"
@@ -732,6 +736,24 @@ def _endpoints():
          "description": "内置系统提示词（含动态字表）"},
         {"method": "POST", "path": "/answer",
          "description": "答案文本自动切段并生成可直接 render 的 spec"},
+        {"method": "POST", "path": "/worksheet/analyze",
+         "description": "作业页自动划题：题目/答题区/横线/置信度 + 扫描件 crops"},
+        {"method": "POST", "path": "/worksheet/answer",
+         "description": "作业页 + 答案 → 手写作答 PDF（叠加原页，保留原内容）"},
+        {"method": "POST", "path": "/worksheet/prompt",
+         "description": "做题提示词：逐题作答、只输出 JSON、字库/字数约束"},
+    ]
+
+
+def _worksheet_endpoints():
+    """做题接口的端点表（/capabilities.worksheet.endpoints 与文档共用）。"""
+    return [
+        {"method": "POST", "path": "/worksheet/analyze",
+         "description": "导入 PDF/图片，自动划定题目与答题区域（返回 spec + 精简题目 + crops）"},
+        {"method": "POST", "path": "/worksheet/answer",
+         "description": "按 spec/layout + 答案渲染手写作答 PDF（原 PDF 内容保留）"},
+        {"method": "POST", "path": "/worksheet/prompt",
+         "description": "生成做题提示词（逐题作答、只输出 JSON、字库内字符）"},
     ]
 
 
@@ -793,6 +815,34 @@ def _capabilities_payload():
         "prompt": {"system_prompt_template": ai_prompt.SYSTEM_PROMPT,
                    "system_prompt_length": len(ai_prompt.SYSTEM_PROMPT),
                    "tool_schema": ai_prompt.tool_schema()},
+        # 「做题」接口（做作业页：自动划题 → AI 答案 → 手写写回）。追加字段，
+        # 不影响原有键。
+        "worksheet": {
+            "spec_version": ws.SPEC_VERSION,
+            "endpoints": _worksheet_endpoints(),
+            "cli": "做题.py",
+            "modes": ["pdf", "image"],
+            "spec_fields": {
+                "source": "作业页路径（PDF/图片）",
+                "kind": "pdf | image",
+                "pages[]": "page/width_pt/height_pt/questions[]/warnings[]",
+                "questions[].id": "Q1 / Q4.2.1（唯一，重复题号会带页后缀）",
+                "questions[].number": "题号；扫描件为顺序号或 --numbers 指定",
+                "questions[].text": "题目文字；扫描件为 null（用 crops 读图）",
+                "questions[].rect": "题目区域 [l,t,r,b] pt",
+                "questions[].answer_rect": "答题区域 [l,t,r,b] pt",
+                "questions[].answer_lines": "横线条数（PDF）或按空白估算的可写行数（扫描件）",
+                "questions[].confidence": "0–1 识别置信度",
+                "questions[].crop_png_base64": "仅扫描页：题目区域裁剪 PNG（base64）",
+            },
+            "answers_format": ['{"1": "解：…", "4.2.1": "解：…"}',
+                               '[{"id": "Q1", "text": "解：…"}]'],
+            "render": {"default_size_pt": ws.SIZE_DEFAULT_PT,
+                       "min_size_pt": ws.SIZE_MIN_PT,
+                       "line_ratio": ws.LINE_RATIO,
+                       "note": "答案从 answer_rect 顶部按 rect 宽书写；超出高度才缩字号并给 warning"},
+            "scanned_pdf": "PDF 页无文字层时自动按扫描件（像素投影）分析并返回 crops",
+        },
     }
 
 
@@ -1018,6 +1068,186 @@ def _do_answer(body):
 
 
 # ======================================================================
+# 做题接口（worksheet）：analyze / answer / prompt
+# ======================================================================
+def _worksheet_source(body):
+    """取并校验作业页路径（PDF 或图片，沿用读文件白名单）。"""
+    raw = body.get("source") or body.get("pdf") or body.get("path")
+    if not raw:
+        raise ApiError(400, "缺少 source（作业页路径）",
+                       hint='例如 {"source":"_work/worksheet_samples/作业A.pdf"}')
+    return _resolve_read_file(raw, PDF_EXTS | IMAGE_EXTS, "作业页")
+
+
+def _worksheet_page(body):
+    raw = body.get("page")
+    if raw is None:
+        return None
+    if isinstance(raw, str) and raw.strip().lower() in ("", "all", "*"):
+        return None
+    return _as_int(raw, 0, "page", 0, 10 ** 6)
+
+
+def _worksheet_numbers(body):
+    raw = body.get("numbers")
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        return raw
+    if isinstance(raw, (list, tuple)):
+        return [str(x) for x in raw]
+    raise ApiError(400, "numbers 必须是字符串（逗号分隔）或数组")
+
+
+def _do_worksheet_analyze(body):
+    t0 = time.perf_counter()
+    source = _worksheet_source(body)
+    page = _worksheet_page(body)
+    numbers = _worksheet_numbers(body)
+    dpi = None
+    if body.get("dpi") is not None:
+        dpi = _as_float(body.get("dpi"), 200, "dpi", 50, 600)
+    try:
+        spec = ws.analyze(source, page=page, dpi=dpi, numbers=numbers)
+    except FileNotFoundError as e:
+        raise ApiError(404, str(e))
+    except ValueError as e:
+        raise ApiError(400, str(e))
+    questions = ws.questions_brief(spec)
+    resp = {"ok": True, "source": source, "kind": spec.get("kind"),
+            "spec_version": spec.get("version") or ws.SPEC_VERSION,
+            "spec": spec, "questions": questions, "count": len(questions),
+            "warnings": spec.get("warnings") or []}
+    crops = ws.collect_crops(spec)
+    if crops:
+        resp["crops"] = crops
+    resp["elapsed_ms"] = int(round((time.perf_counter() - t0) * 1000))
+    return resp
+
+
+def _do_worksheet_answer(body):
+    t0 = time.perf_counter()
+    source = _worksheet_source(body)
+    answers = body.get("answers")
+    if answers is None:
+        raise ApiError(400, "缺少 answers（对象 {题号: 文本} 或 "
+                            '[{"id":"Q1","text":"..."}] 数组）')
+    if not isinstance(answers, (dict, list)):
+        raise ApiError(400, "answers 必须是 JSON 对象或数组")
+    page = _worksheet_page(body)
+    numbers = _worksheet_numbers(body)
+
+    spec = body.get("spec")
+    layout_raw = body.get("layout") or body.get("layout_path")
+    if spec is not None:
+        if not isinstance(spec, dict):
+            raise ApiError(400, "spec 必须是 JSON 对象")
+        spec = copy.deepcopy(spec)
+        spec["source"] = source
+    elif layout_raw:
+        lp = _resolve_read_file(layout_raw, {".json"}, "layout 文件")
+        try:
+            spec = copy.deepcopy(ws.load_spec(lp))
+        except (ValueError, FileNotFoundError) as e:
+            raise ApiError(400, "layout 读取失败：%s" % e)
+        spec["source"] = source
+    else:
+        try:
+            spec = ws.analyze(source, page=page, numbers=numbers)
+        except FileNotFoundError as e:
+            raise ApiError(404, str(e))
+        except ValueError as e:
+            raise ApiError(400, str(e))
+    if not isinstance(spec.get("pages"), list):
+        raise ApiError(400, "spec 结构不合法：需要含 pages 数组的作业页 spec")
+
+    # 先做一次答案匹配检查：匹配不到时给 400，而不是进渲染线程后变 500
+    questions = [{"id": q.get("id"), "number": q.get("number")}
+                 for _pg, q in ws._iter_questions(spec)]
+    if not questions:
+        raise ApiError(400, "spec 里没有题目，请先 analyze 或检查 page 参数")
+    try:
+        matches, _w, _un, _miss = ws.normalize_answers(answers, questions)
+    except ValueError as e:
+        raise ApiError(400, str(e))
+    if not matches:
+        raise ApiError(400, "answers 没有匹配到任何题目（可用题号 1/2… "
+                            '或 id Q1；扫描件可用 numbers 指定真实题号）')
+
+    write = bool(body.get("write", False))
+    rb = body.get("return_base64", True)
+    filename = body.get("filename")
+    _ensure_out_dir()
+    fd, tmp = tempfile.mkstemp(prefix=TMP_PREFIX, suffix=".pdf", dir=OUT_DIR)
+    os.close(fd)
+
+    def job():
+        pdf, warns, cov = ws.render_answers(spec, answers, out_pdf=tmp)
+        with open(tmp, "rb") as f:
+            data = f.read()
+        return data, warns, cov
+
+    try:
+        try:
+            data, warnings, coverage = _run_serialized(job, RENDER_TIMEOUT_S)
+        except ApiError:
+            raise
+        except ValueError as e:
+            raise ApiError(400, str(e))
+    finally:
+        _remove_quiet(tmp)
+
+    pages = 0
+    try:
+        import pymupdf as fitz
+        doc = fitz.open(stream=data, filetype="pdf")
+        pages = doc.page_count
+        doc.close()
+    except Exception:
+        pass
+    resp = {"ok": True, "format": "pdf", "pages": pages, "source": source,
+            "spec_version": spec.get("version") or ws.SPEC_VERSION,
+            "warnings": warnings, "coverage": coverage, "bytes": len(data)}
+    if rb is None or bool(rb):
+        resp["pdf_base64"] = base64.b64encode(data).decode("ascii")
+    else:
+        resp["base64_omitted"] = True
+    if write:
+        resp["path"] = _write_bytes(data, filename, ".pdf")
+    resp["elapsed_ms"] = int(round((time.perf_counter() - t0) * 1000))
+    return resp
+
+
+def _do_worksheet_prompt(body):
+    t0 = time.perf_counter()
+    spec = body.get("spec")
+    if spec is not None and not isinstance(spec, dict):
+        raise ApiError(400, "spec 必须是 JSON 对象")
+    if spec is None:
+        raw_source = (body.get("source") or body.get("pdf")
+                      or body.get("path"))
+        if not raw_source:
+            raise ApiError(400, "需要 source（作业页路径）或 spec",
+                           hint='例如 {"source":"_work/worksheet_samples/作业A.pdf"}')
+        source = _resolve_read_file(raw_source, PDF_EXTS | IMAGE_EXTS, "作业页")
+        try:
+            spec = ws.analyze(source, page=_worksheet_page(body),
+                              numbers=_worksheet_numbers(body))
+        except FileNotFoundError as e:
+            raise ApiError(404, str(e))
+        except ValueError as e:
+            raise ApiError(400, str(e))
+    prompt = ai_prompt.worksheet_prompt(spec)
+    han, sym = ai_prompt.allowed_charset()
+    return {"ok": True, "prompt": prompt, "prompt_length": len(prompt),
+            "questions": len(ws.questions_brief(spec or {})),
+            "spec_version": (spec or {}).get("version") or ws.SPEC_VERSION,
+            "character_set": {"hanzi_count": len(han),
+                              "symbol_count": len(sym)},
+            "elapsed_ms": int(round((time.perf_counter() - t0) * 1000))}
+
+
+# ======================================================================
 # HTTP 服务
 # ======================================================================
 class AiHandler(BaseHTTPRequestHandler):
@@ -1025,7 +1255,9 @@ class AiHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     # ---------------------------------------------------------- 路由
-    POST_ROUTES = ("/render", "/render_pdf", "/prompt", "/answer")
+    POST_ROUTES = ("/render", "/render_pdf", "/prompt", "/answer",
+                   "/worksheet/analyze", "/worksheet/answer",
+                   "/worksheet/prompt")
     GET_ROUTES = ("/", "/help", "/health", "/capabilities")
 
     def _method_not_allowed(self, allow):
@@ -1079,6 +1311,12 @@ class AiHandler(BaseHTTPRequestHandler):
                 self._send_json(200, _do_prompt(self._read_json()))
             elif route == "/answer":
                 self._send_json(200, _do_answer(self._read_json()))
+            elif route == "/worksheet/analyze":
+                self._send_json(200, _do_worksheet_analyze(self._read_json()))
+            elif route == "/worksheet/answer":
+                self._send_json(200, _do_worksheet_answer(self._read_json()))
+            elif route == "/worksheet/prompt":
+                self._send_json(200, _do_worksheet_prompt(self._read_json()))
             else:
                 raise ApiError(404, "未知端点：POST %s" % route,
                                hint="可用端点见 GET /capabilities")
@@ -1241,7 +1479,8 @@ def _serve(host, port):
     print("[ai_api] 手写体 AI 接口 v%s（%s）" % (VERSION, TOOL_NAME))
     print("[ai_api] 服务已启动: http://%s:%d" % (display_host, port))
     print("[ai_api] 端点: GET /health  GET /capabilities  "
-          "POST /render  /render_pdf  /prompt  /answer")
+          "POST /render  /render_pdf  /prompt  /answer  "
+          "/worksheet/analyze  /worksheet/answer  /worksheet/prompt")
     print("[ai_api] 文档: %s" % os.path.join(HERE, "docs", "AI接口说明.md"))
     print("[ai_api] 按 Ctrl+C 停止")
     sys.stdout.flush()
@@ -1616,6 +1855,22 @@ EXAMPLE_TEXT = """\
 
 【Python 客户端】直接运行：py -3 ai_client_example.py
 完整文档：docs/AI接口说明.md
+
+【做题：作业页自动划题（PDF 或扫描图片）】
+  curl -X POST http://127.0.0.1:8321/worksheet/analyze ^
+    -H "Content-Type: application/json" ^
+    -d "{\\"source\\":\\"_work/worksheet_samples/作业A.pdf\\"}"
+
+【做题：答案写回手写作答 PDF（原内容保留）】
+  curl -X POST http://127.0.0.1:8321/worksheet/answer ^
+    -H "Content-Type: application/json" ^
+    -d "{\\"source\\":\\"_work/worksheet_samples/作业A.pdf\\",\\"answers\\":{\\"1\\":\\"解：线电压等于相电压\\"},\\"write\\":true,\\"filename\\":\\"worksheet_answered.pdf\\"}"
+
+【做题：生成逐题作答提示词】
+  curl -X POST http://127.0.0.1:8321/worksheet/prompt ^
+    -H "Content-Type: application/json" ^
+    -d "{\\"source\\":\\"_work/worksheet_samples/作业A.pdf\\"}"
+做题命令行：py -3 做题.py analyze/answer/run（见 docs/做题接口.md）
 """
 
 

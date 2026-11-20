@@ -542,3 +542,73 @@ A：要。字表在进程内缓存（`allowed_charset()`），重启 `ai_api.py`
 ## 11. 变更记录
 
 - **v1.0.0（2026-11-20）**：首版。`ai_api.py`（6 端点 + `--self-test` + `--example`）、`ai_prompt.py`（动态字表 / SYSTEM_PROMPT / tool_schema）、`ai_client_example.py`、本文档。自测 28/28 通过；PNG 2380×3368、PDF/叠加 PDF 合法，`/render_pdf` 保留源 PDF 文字。
+
+---
+
+## 七、做题接口
+
+> 本节是**增量扩展**：原有 6 个端点与 28 项自测保持不变。完整字段、请求/响应示例、
+> 扫描件处理细节见 [`docs/做题接口.md`](做题接口.md)。
+
+「做题」= 导入作业页（PDF 或扫描件）→ 自动划定每题题目区/答题区 → AI 逐题作答 →
+手写排进各题答题区并导出叠加原 PDF 的作答结果。全程无 GUI 窗口，由 CLI 或 HTTP 驱动。
+
+### 7.1 涉及文件
+
+| 文件 | 作用 |
+|---|---|
+| `worksheet.py` | 数据层：`analyze()` 划题、`render_answers()` 手写排版、`load_spec/save_spec` |
+| `做题.py` | headless CLI：`analyze` / `answer` / `run`（不 import tkinter） |
+| `ai_api.py` | 新增 3 个 POST 端点 + `/capabilities.worksheet`（不破坏原 28 项自测） |
+| `ai_prompt.py` | 新增 `worksheet_prompt(spec)`：逐题作答提示词 |
+| `docs/做题接口.md` | 做题接口完整文档 |
+
+### 7.2 三个新端点
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/worksheet/analyze` | `{source, page?, dpi?, numbers?}` → `{ok, spec, questions, crops?, warnings}` |
+| POST | `/worksheet/answer` | `{source, spec?/layout?, answers, write?, filename?}` → `{ok, pdf_base64, pages, warnings, coverage}` |
+| POST | `/worksheet/prompt` | `{source?/spec?}` → `{ok, prompt}`（逐题作答、只输出 `{"answers":{...}}`） |
+
+`answers` 支持 `{"1": "解：…", "4.2.1": "解：…"}` 与 `[{"id": "Q1", "text": "…"}]`；
+`analyze` 的 spec 可直接作为 `answer` 的 `spec` 入参复用。路径白名单、请求体 ≤ 8MB、
+错误格式、渲染串行/超时全部沿用原有实现。
+
+### 7.3 `/capabilities` 追加字段
+
+原有键不变，末尾新增：
+
+```json
+{"worksheet": {
+  "spec_version": "1.1",
+  "endpoints": [{"method": "POST", "path": "/worksheet/analyze"}, "..."],
+  "cli": "做题.py",
+  "modes": ["pdf", "image"],
+  "render": {"default_size_pt": 12.4, "min_size_pt": 8.0, "line_ratio": 1.85},
+  "scanned_pdf": "PDF 页无文字层时自动按扫描件分析并返回 crops"
+}}
+```
+
+### 7.4 CLI 快速开始
+
+```powershell
+cd _refs\pdf-layer
+py -3 做题.py analyze 作业.pdf --out out/作业_layout.json
+py -3 做题.py answer 作业.pdf --layout out/作业_layout.json ^
+    --answers answers.json --out out/手写作答.pdf --png out/预览.png
+py -3 做题.py run 作业.pdf --answers answers.json --out out/手写作答.pdf
+```
+
+扫描件没有文字层时题号用顺序号占位；要写真实题号（如 `4.2.1`）加
+`--numbers "4.2.1,4.2.2,4.2.4,..."`。答案渲染默认 12.4pt（超过答题区高度才缩到
+8pt，仍放不下给 warning 不截断），答案从答题区顶部、按答题区宽度书写。
+
+做题模块的自测独立于 `ai_api.py --self-test`：
+
+```powershell
+py -3 ..\..\_work\test_worksheet.py
+```
+
+它同时回归验证 `py -3 ai_api.py --self-test` 仍为 **28/28**。
+

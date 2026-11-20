@@ -319,6 +319,137 @@ def prompt_meta():
     }
 
 
+# ======================================================================
+# 做题（worksheet）提示词
+# ======================================================================
+WORKSHEET_CHARS_PER_LINE_REF = 13.3   # 12.4pt 手写汉字平均步进（pt/字）
+WORKSHEET_SIZE_PT = 12.4              # 做题默认字号，用于估算可写字数
+WORKSHEET_LINE_RATIO = 1.85           # 行距 = 字号 × 1.85
+
+
+def _worksheet_question_lines(spec):
+    """把 spec 的题目摊平成 [(题号, 文字, answer_lines, 每行字数, 总字数)]。"""
+    out = []
+    for pg in (spec or {}).get("pages") or []:
+        for q in pg.get("questions") or []:
+            rect = q.get("answer_rect") or [56.0, 120.0, 539.0, 300.0]
+            try:
+                width = max(1.0, float(rect[2]) - float(rect[0]))
+                height = max(1.0, float(rect[3]) - float(rect[1]))
+            except (TypeError, ValueError, IndexError):
+                width, height = 483.0, 180.0
+            lines = int(q.get("answer_lines") or 0)
+            if lines <= 0:
+                lines = max(1, int(height / (WORKSHEET_SIZE_PT *
+                                             WORKSHEET_LINE_RATIO)))
+            per_line = max(1, int(width / WORKSHEET_CHARS_PER_LINE_REF))
+            out.append({
+                "number": str(q.get("number") or q.get("id") or ""),
+                "id": str(q.get("id") or ""),
+                "text": q.get("text"),
+                "lines": lines,
+                "per_line": per_line,
+                "max_chars": lines * per_line,
+                "page": pg.get("page", 0),
+            })
+    return out
+
+
+def worksheet_prompt(spec=None, include_charset=True, max_questions=80):
+    """根据作业页 spec 生成「逐题作答」提示词（做题接口 /worksheet/prompt 用）。
+
+    与 builtin_prompt 的区别：这里一次给多道题，要求模型只输出
+    ``{"answers": {"题号": "答案文本"}}``，并把每题的「答题区可写行数 /
+    每行字数 / 可写字数上限」注入，避免答案写不下。
+
+    参数
+    ----
+    spec            : worksheet.analyze() 的返回值；None 时输出规则模板。
+    include_charset : 是否注入完整汉字/符号表（默认 True；表很长但约束最强）。
+    max_questions   : 最多注入多少题（防提示词过长），默认 80。
+    """
+    han, sym = allowed_charset()
+    han_str, sym_str = charset_strings()
+    items = _worksheet_question_lines(spec)[:max(1, int(max_questions))]
+    has_crop = any(bool(q.get("crop_png_base64"))
+                   for pg in (spec or {}).get("pages") or []
+                   for q in pg.get("questions") or [])
+    no_text = [it for it in items if not (it["text"] or "").strip()]
+
+    head = r"""你是「手写作业答题器」：下面是一份作业/试卷的版面分析结果，请**逐题作答**，
+只输出一个 JSON 对象，答案会被渲染成手写笔迹写进每题的答题区。
+
+【输出格式（唯一允许的输出）】
+{"answers": {"1": "第一题的答案", "2": "第二题的答案"}}
+- 键必须原样使用【题目清单】里给出的「题号」（例如 "1"、"2"、"4.2.1"）。
+- 值是一题的答案纯文本：不要换行符、不要代码块、不要 JSON 以外的任何文字。
+- 不要输出解释、客套话、Markdown（# * - > 表格 加粗）、emoji、图片链接。
+- 只作答【题目清单】里出现的题；不要编造题号，不要漏题。
+
+【第一优先级：只能使用字库内字符】
+1. 每个汉字都必须来自下面「汉字表」（共 {han_count} 个）；字表外的汉字一律禁止。
+2. 数字、字母、希腊字母、标点、运算符必须来自「符号表」（共 {sym_count} 个）；
+   emoji、特殊排版字符、生僻标点一律禁止。
+3. 遇到字库外的汉字要改写而不是硬写：换同义词；换一种说法拆成常用词；
+   用公式/符号/字母/数字表达；实在不行删掉修饰语，保留核心结论。
+4. 提交前逐字自检：只要一个汉字不在表内就改写那一句。
+
+【第二优先级：考试答题风格】
+- 先给结论，再写必要步骤；计算题给式子与结果，问答题给关键要点。
+- 精炼：不要复述题干，不要解释背景，不要「好的/以下是/希望有帮助」，不要总结性废话。
+- 每题答案控制在【题目清单】给出的「可写字数」以内；宁短勿长，写不下会被缩字号或溢出。
+- 公式只支持子集：$...$ 行内公式，可用 \frac{}{}、\sqrt{}、\sum、\prod、\int、
+  \times、\cdot、\pm、\approx、\le、\ge、\ne、\infty、\angle、\alpha~\omega、
+  \Delta、\Omega，以及上下标 ^ 和 _；不要 TikZ/\begin 环境/自定义宏/\text{中文}/$$...$$。
+
+【作答要求】
+- 答案从每题答题区顶部开始写、按答题区宽度自动换行，所以直接用自然段文字即可，
+  不要自己加换行、缩进或分栏。
+- 扫描件/图片页的题干可能是 null（无文字层）：这类题的题干以题目区域截图给出，
+  请按截图理解题意后作答，仍然只输出 JSON，不要描述图片。
+"""
+
+    if include_charset:
+        head += "\n【汉字表（{han_count} 个，由 allowed_charset() 从字体 cmap 动态注入）】\n"
+        head += (_wrap_chars(han_str, 40) if han_str
+                 else "（汉字库缺失：请确认 字体输出\\ZTi-Han 是否存在）")
+        head += "\n\n【符号表（{sym_count} 个，由 allowed_charset() 从字体 cmap 动态注入）】\n"
+        head += (_wrap_chars(sym_str, 60) if sym_str
+                 else "（符号库缺失：请确认 字体输出\\ZTi-Sym 是否存在）")
+        head += "\n"
+
+    if items:
+        lines = ["\n【题目清单（共 %d 题；按此顺序作答）】" % len(items)]
+        for i, it in enumerate(items, 1):
+            lines.append("第 %d 题  题号 %s" % (i, it["number"] or it["id"]))
+            text = (it["text"] or "").strip()
+            if text:
+                lines.append("  题干：%s" % text)
+            else:
+                lines.append("  题干：（无文字层，见题目区域截图 crop_png_base64）")
+            lines.append("  答题区：约 %d 行，每行约 %d 字，合计约 %d 字"
+                         % (it["lines"], it["per_line"], it["max_chars"]))
+        lines.append("")
+        lines.append("请直接输出 {\"answers\": {...}}，键用上面的题号。")
+        body = "\n".join(lines)
+    else:
+        body = ("\n【题目清单】\n（未提供题目：只输出空对象 {\"answers\": {}}，"
+                "不要编造题目。）\n")
+
+    out = head + body
+    mapping = {
+        "{han_count}": str(len(han)),
+        "{sym_count}": str(len(sym)),
+    }
+    for key, val in mapping.items():
+        out = out.replace(key, val)
+    if no_text and has_crop:
+        out += ("\n注：有 %d 题没有文字层，题干以题目区域截图（crop_png_base64）提供。"
+                % len(no_text))
+    return out
+
+
+
 if __name__ == "__main__":
     for stream in (sys.stdout, sys.stderr):
         try:

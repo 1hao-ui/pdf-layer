@@ -17,6 +17,7 @@
 | 背景导入 | 空白 A4 / 图片 / 已有 PDF 页，直接在上面写 | ✅ |
 | PDF 内书写 | 手写层叠加回原 PDF 页，保留原文字/图形/其它页 | ✅ |
 | **AI 接口** | 本地 HTTP API 供 AI 调用渲染（含内置答题提示词/工具 schema） | ✅ 见下文 |
+| **做题/自动答题** | 导入作业页自动划题目区/答题区，AI 答案手写写回原 PDF（无窗口，CLI/API 驱动） | ✅ 见下文 |
 | 版面分析 | 自动定位空白区、碰撞检测 | ❌ 未做，坐标目前手工给 |
 | 笔迹轨迹合成 | RNN/笔画中心线变宽描边 | ❌ 二期 |
 
@@ -254,6 +255,28 @@ py -3 ai_api.py --self-test     # 28 项自测
 可直接用于 function calling。示例见 `ai_client_example.py`，完整文档 `docs/AI接口说明.md`。
 默认只监听 `127.0.0.1`、只写 `out/`。
 
+## 做题（作业页自动判题区 + 自动答题）
+
+**独立模块，不弹窗口**：命令行或 AI 接口驱动。
+
+```powershell
+cd _refs\pdf-layer
+py -3 做题.py analyze 作业.pdf [--numbers "4.2.1,4.2.2,..."] --out layout.json
+py -3 做题.py answer 作业.pdf --layout layout.json --answers answers.json --out 手写作答.pdf
+py -3 做题.py run 作业.pdf --answers answers.json --out 手写作答.pdf
+```
+
+- **自动划区**：数字版 PDF 读文字层按题号（`1.` / `（1）` / `4.2.1` 多级）识别题块并提取文字；
+  扫描件按像素行投影分块、返回每题题干 crop（AI 读图），自动排除表头/页脚，答题区避开题干与插图。
+- **答案渲染**：按每题 answer_rect 自动排版手写答案（12.4pt，放不下自动缩到 8pt，不截断），
+  叠加回原作业 PDF，原内容逐页保留。
+- **AI 接口**：`POST /worksheet/analyze`、`/worksheet/prompt`（做题提示词：只用字库内
+  500 汉字+204 符号、考试精炼、只输出 `{"answers":{...}}`、每题可写字数约束）、
+  `/worksheet/answer`。详见 `docs/做题接口.md`。
+
+真实作业验收：`4第四章作业.pdf`（4 页扫描件、无文字层）每页 2/2/2/1 共 7 题零漏检零误检，
+7 题答案全部写入各自页面答题区，原扫描内容像素级保留。
+
 ## 实现要点
 
 - **坐标单位**：外部一律 pt，内部 `SCALE=4` 超采样（1pt=4px）。
@@ -292,6 +315,9 @@ page_model.py      页面/段落模型 + 背景（图片/PDF）+ 拼合导出（
 theme.py           界面主题（ttk 样式/色板/字号/深浅色）
 ai_api.py          AI 接口（本地 HTTP：/render、/render_pdf、/prompt、/answer）
 ai_prompt.py       内置答题提示词 + 工具 schema（字库内字符约束/考试精炼风格）
+worksheet.py       做题：作业页自动划题目区/答题区 + 答案手写渲染（spec v1.1）
+做题.py            做题命令行（analyze / answer / run，headless）
+docs/做题接口.md    做题 CLI/HTTP 接口文档
 ai_client_example.py  AI 接口调用示例
 assets/            界面效果图（mockup）
 docs/AI接口说明.md   AI 接口文档
@@ -315,3 +341,5 @@ STATUS.md          当前进度与已知阻塞
 - GUI 的文件选择/页码弹窗未做真人点击回归（底层导入函数已测）；PDF 背景每帧按
   200dpi 重解码（约 0.3–1.5s），大文本多段时可再优化缓存。
 - AI 接口默认只听 `127.0.0.1`、无鉴权、只写 `out/`；对外暴露需自行加鉴权/代理。
+- 做题模块的扫描件没有 OCR：题号需 `--numbers` 指定；题干文字为 null，AI 通过 crops 读图。
+  教材页题干集中在页顶时，答题区按整页空白从上到下按题分配（页内答案顺序仍是 1→2）。
