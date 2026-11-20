@@ -139,19 +139,42 @@ def _ensure_engine(font_path, size_px, ink, math_font_path=None):
 
 
 def _thin_formula_image(img, level):
-    """柔和对公式位图做「调细」：压掉 alpha 低值端并重新拉伸。
+    """按「笔画粗细自适应」调细公式位图。
 
-    level 为 alpha 阈值（0–254）：越大越细。只改 alpha，不改颜色，
-    因此不会破坏细笔画，也不会产生腐蚀那种锯齿边。
+    用户反馈：数字整体偏粗，但简单地把 alpha 整体压低后，分式的分子/分母
+    和上下角标（字号更小、笔画本来就细）会变得特别淡。
+    所以这里只对**粗笔画**（局部笔画半径 ≥ 阈值）的外沿收一点边：
+      · 基准字号的数字/字母（粗）→ 视觉上细一档；
+      · 分式上下、上下角标（细）→ 完全不碰，保持原墨色。
+    level: 0 = 关闭；140 = 默认（≈2 档）；越大收得越多。
     """
     if img is None or img.mode != "RGBA" or level <= 0:
         return img
-    import numpy as np
+    try:
+        import numpy as np
+        from scipy import ndimage
+        from PIL import ImageFilter
+    except Exception:
+        return img
+    strength = max(0.5, float(level) / 70.0)        # 140 -> 2.0
     a = np.asarray(img.getchannel("A")).astype(np.float32)
-    t = float(min(240, max(1, int(level))))
-    a = np.clip((a - t) * 255.0 / (255.0 - t), 0, 255)
+    mask = a > 30
+    if not mask.any():
+        return img
+    dist = ndimage.distance_transform_edt(mask)
+    rad = ndimage.maximum_filter(dist, size=9)      # 局部笔画半径（px）
+    thick = rad >= max(1.6, 2.4 - 0.4 * strength)   # 只挑粗笔画
+    edge = (dist <= 1.4) & thick                    # 粗笔画的外沿
+    factor = np.where(edge, max(0.35, 1.0 - 0.25 * strength), 1.0)
+    a2 = np.clip(a * factor, 0, 255)
+    blurred = np.asarray(Image.fromarray(a2.astype(np.uint8), "L")
+                         .filter(ImageFilter.GaussianBlur(0.5))).astype(np.float32)
+    a2 = np.minimum(a, blurred)          # 不扩散到原墨迹之外（避免字高变大）
+    # 小字号（分式上下、上下角标）在缩略/打印时会因抗锯齿显得发灰：
+    # 整体补一点墨色（只加不超 255），让细笔画与主体一样清楚。
+    a2 = np.clip(a2 * 1.25, 0, 255)
     out = img.copy()
-    out.putalpha(Image.fromarray(a.astype(np.uint8), "L"))
+    out.putalpha(Image.fromarray(a2.astype(np.uint8), "L"))
     return out
 
 
@@ -165,7 +188,7 @@ def _box(latex, size_px, font_path, ink, math_font_path=None, display=False):
     """
     r = _ensure_engine(font_path, size_px, ink, math_font_path)
     box = _render_at(r, latex, size_px, MATH_SIZE_COMP, display)
-    if FORMULA_THIN_LEVEL > 0:
+    if FORMULA_THIN_LEVEL > 0 and int(size_px) >= 44:
         try:
             box.image = _thin_formula_image(box.image, FORMULA_THIN_LEVEL)
         except Exception:

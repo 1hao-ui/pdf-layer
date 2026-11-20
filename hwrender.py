@@ -119,19 +119,35 @@ def _is_plain_symbol(ch):
 
 
 def _thin_alpha_tile(img, amount):
-    """把 RGBA 贴图的 alpha 柔和收边（与公式层同一套口径）。
+    """把 RGBA 贴图按「笔画粗细自适应」调细（与公式层同一套口径）。
 
-    amount 为 alpha 阈值（0=关闭，140=默认）：压掉 alpha 低值端再拉伸，
-    笔画视觉上细一点且边缘平滑；颜色不动，只用于数字/拉丁/希腊字形。
+    只收粗笔画外沿；细笔画保持原样。amount：0=关闭，1=默认，越大越细。
     """
     if amount <= 0:
         return img
-    import numpy as np
+    try:
+        import numpy as np
+        from scipy import ndimage
+        from PIL import ImageFilter
+    except Exception:
+        return img
+    strength = max(0.5, float(amount) * 2.0)
     a = np.asarray(img.getchannel("A")).astype(np.float32)
-    t = float(min(240, max(1, int(140 * float(amount)))))
-    a = np.clip((a - t) * 255.0 / (255.0 - t), 0, 255)
+    mask = a > 30
+    if not mask.any():
+        return img
+    dist = ndimage.distance_transform_edt(mask)
+    rad = ndimage.maximum_filter(dist, size=9)
+    thick = rad >= max(1.6, 2.4 - 0.4 * strength)
+    edge = (dist <= 1.4) & thick
+    factor = np.where(edge, max(0.35, 1.0 - 0.25 * strength), 1.0)
+    a2 = np.clip(a * factor, 0, 255)
+    blurred = np.asarray(Image.fromarray(a2.astype(np.uint8), "L")
+                         .filter(ImageFilter.GaussianBlur(0.5))).astype(np.float32)
+    a2 = np.minimum(a, blurred)
+    a2 = np.clip(a2 * 1.25, 0, 255)
     out = img.copy()
-    out.putalpha(Image.fromarray(a.astype(np.uint8), "L"))
+    out.putalpha(Image.fromarray(a2.astype(np.uint8), "L"))
     return out
 
 
