@@ -390,11 +390,14 @@ if __name__ == "__main__":
     if os.path.isdir(zti):
         fonts += [os.path.join(zti, n) for n in sorted(os.listdir(zti))
                   if n.endswith((".otf", ".ttf"))]
-    # 人手写符号字库（在项目外的「字体输出/ZTi-Sym」）
-    sym = os.path.normpath(os.path.join(repo, "..", "..", "字体输出", "ZTi-Sym"))
-    if os.path.isdir(sym):
-        fonts += [os.path.join(sym, n) for n in sorted(os.listdir(sym))
-                  if n.endswith((".otf", ".ttf")) and not n.startswith("ZTi-Sym-推荐")]
+    # 人手写符号字库：仓库内 fonts/ZTi-Sym/ 优先，其次项目外的「字体输出/ZTi-Sym」
+    for sym in (os.environ.get("ZTISYM_DIR", ""),
+                os.path.join(repo, "fonts", "ZTi-Sym"),
+                os.path.normpath(os.path.join(repo, "..", "..", "字体输出", "ZTi-Sym"))):
+        if sym and os.path.isdir(sym):
+            fonts += [os.path.join(sym, n) for n in sorted(os.listdir(sym))
+                      if n.endswith((".otf", ".ttf")) and not n.startswith("ZTi-Sym-推荐")]
+            break
     if os.path.exists(base):
         fonts = [base] + [p for p in fonts if os.path.abspath(p) != os.path.abspath(base)]
 

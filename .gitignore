@@ -23,3 +23,8 @@ feedback.md
 # 例外：fonts/ZTi/ 是公开发布的「Z体」字库，必须入库
 !fonts/ZTi/
 !fonts/ZTi/**
+
+# 例外：fonts/ZTi-Sym/ 是作者手写的「符号字库」（数字/拉丁/希腊/符号，204 字 × 4 套），
+# 由 symbols.py 作为手写符号字库加载，必须入库（约 146 KB）
+!fonts/ZTi-Sym/
+!fonts/ZTi-Sym/**
