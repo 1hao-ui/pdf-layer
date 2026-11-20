@@ -1,19 +1,11 @@
 @echo off
+rem 手写体生成器 · 图形界面启动器（在 _refs\pdf-layer 下双击本文件即可）
+chcp 65001 >nul
 cd /d "%~dp0"
-rem PDF-Layer GUI launcher. Double-click this file to open the console.
-rem A Python with tkinter is required. Prefer the system Python 3.13
-rem (the WorkBuddy sandbox Python has no tkinter), then fall back to PATH.
-set "PY="
-if exist "%LOCALAPPDATA%\Programs\Python\Python313\pythonw.exe" set "PY=%LOCALAPPDATA%\Programs\Python\Python313\pythonw.exe"
-if not defined PY (
-  where pythonw.exe >nul 2>&1 && set "PY=pythonw.exe"
+where py >nul 2>nul
+if %errorlevel%==0 (
+  py -3 gui.py
+) else (
+  python gui.py
 )
-if not defined PY (
-  where python.exe >nul 2>&1 && set "PY=python.exe"
-)
-if not defined PY (
-  echo [pdf-layer] Python 3 with tkinter not found. Please install Python 3 first.
-  pause
-  exit /b 1
-)
-start "" "%PY%" gui.py
+if errorlevel 1 pause
