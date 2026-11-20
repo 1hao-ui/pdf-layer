@@ -1627,8 +1627,29 @@ def main(argv=None):
                         help='扫描件题号，逗号分隔：--numbers "4.2.1,4.2.2"')
     parser.add_argument("--page", default="all",
                         help="分析页：all（默认）或页号（从 0 开始）")
+    parser.add_argument("--smoke", action="store_true",
+                        help="打包自检：无窗口构建一次后退出（打包测试用）")
     args = parser.parse_args(argv if argv is not None else None)
     root = tk.Tk()
+    if args.smoke:
+        root.withdraw()
+        app = WorksheetWindow(root)
+        root.update_idletasks()
+        root.update()
+        try:
+            root.destroy()
+        except Exception:
+            pass
+        base = (os.path.dirname(sys.executable)
+                if getattr(sys, "frozen", False) else HERE)
+        try:
+            with open(os.path.join(base, "smoke_ws.txt"), "w",
+                      encoding="utf-8") as f:
+                f.write("SMOKE OK")
+        except Exception:
+            pass
+        print("SMOKE OK")
+        return 0
     app = WorksheetWindow(root)
     if args.open:
         root.after(80, lambda: app.load_source(args.open,

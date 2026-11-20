@@ -1,0 +1,32 @@
+AI 自动答题（可选功能）配置说明
+================================================
+
+"自动做题"需要一个大模型来答题。本软件支持任何 OpenAI 兼容接口
+（DeepSeek、OpenAI、通义/Kimi/GLM 的兼容接口、本地 Ollama 都行），
+默认用 DeepSeek。
+
+【配置方法：二选一】
+
+方法一：在 发布\ZTi手写体生成器\ 目录下新建 llm.json，内容：
+{
+  "base_url": "https://api.deepseek.com/v1",
+  "api_key": "sk-你的Key",
+  "model": "deepseek-chat"
+}
+
+方法二：设置系统环境变量（一次性）：
+  按 Win+R → 输入 cmd → 回车，粘贴下面两行（换成你的 Key）：
+    setx HANDWRITE_LLM_API_KEY "sk-你的Key"
+    setx HANDWRITE_LLM_BASE_URL "https://api.deepseek.com/v1"
+  重新打开软件生效。
+
+【使用】
+  · 做题窗口里点"AI 自动作答"按钮，等几秒会自动出答案；
+  · 或者启动 ZTiAI接口.exe，POST /worksheet/solve 一步完成；
+  · 没有配置 Key 也不会报错：会提示你把题目交给外部 AI 作答。
+
+【其他服务示例】
+  OpenAI:  base_url = https://api.openai.com/v1   model = gpt-4o-mini
+  Ollama:  base_url = http://127.0.0.1:11434/v1  model = qwen2.5:7b（不需要 Key）
+
+注意：Key 是私密的，不要把 llm.json 发给别人或传到网上。

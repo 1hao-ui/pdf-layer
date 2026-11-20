@@ -22,12 +22,19 @@ ZTi-Sym 的符号实测只有汉字字高的 0.57–0.86 倍，不放大就会�
 """
 import json
 import os
+import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CAL_PATH = os.path.join(HERE, "fonts", "fontcal.json")
-GLYPH_CAL_PATH = os.path.join(HERE, "fonts", "fontcal_glyph.json")
+# 打包成 exe 后：数据在 sys._MEIPASS，fontcal.json 在 _MEIPASS/fonts，
+# 字库在 _MEIPASS/字体输出；此时 PROJECT_ROOT 取 _MEIPASS，
+# 这样 rel 键正好是「字体输出/ZTi-Han/pass1.ttf」，与校准表一致。
+_FROZEN = bool(getattr(sys, "frozen", False))
+_BASE = os.path.normpath(getattr(sys, "_MEIPASS", HERE)) if _FROZEN else HERE
+CAL_PATH = os.path.join(_BASE, "fonts", "fontcal.json")
+GLYPH_CAL_PATH = os.path.join(_BASE, "fonts", "fontcal_glyph.json")
 # 手写体生成器项目根（pdf-layer 上两级）：字体输出/ 下的新手写字库在这里。
-PROJECT_ROOT = os.path.normpath(os.path.join(HERE, "..", ".."))
+PROJECT_ROOT = _BASE if _FROZEN else os.path.normpath(
+    os.path.join(HERE, "..", ".."))
 
 REF_PX = 54
 SAMPLE = "相电压功率流生电的"          # CJK 样本

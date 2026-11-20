@@ -3305,6 +3305,8 @@ class App:
 
     def _detect_ai_port(self, script):
         default = AI_DEFAULT_PORT
+        if getattr(sys, "frozen", False):
+            return default
         try:
             with open(script, encoding="utf-8", errors="ignore") as fp:
                 src = fp.read()
@@ -3348,7 +3350,14 @@ class App:
                     pass
             self._ai_logf = open(log_path, "ab")
             flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
-            cmd = ["py", "-3", script]
+            if getattr(sys, "frozen", False):
+                # 打包版：同目录下单独的 AI 接口 exe
+                ai_exe = os.path.join(os.path.dirname(sys.executable),
+                                      "ZTiAI接口.exe")
+                cmd = [ai_exe] if os.path.exists(ai_exe) else [sys.executable,
+                                                               script]
+            else:
+                cmd = ["py", "-3", script]
             try:
                 self.ai_proc = subprocess.Popen(
                     cmd, cwd=HERE, stdout=self._ai_logf,
@@ -3672,7 +3681,48 @@ class App:
 
 
 # ================================================================ 入口
+def _smoke_report(ok, text=""):
+    """打包后没有控制台：把自检结果写到 exe 同目录的 smoke_result.txt。"""
+    try:
+        base = (os.path.dirname(sys.executable)
+                if getattr(sys, "frozen", False) else HERE)
+        with open(os.path.join(base, "smoke_result.txt"), "w",
+                  encoding="utf-8") as f:
+            f.write(("SMOKE OK\n" if ok else "SMOKE FAIL\n") + text)
+    except Exception:
+        pass
+    print(("SMOKE OK\n" if ok else "SMOKE FAIL\n") + text)
+
+
+def _smoke():
+    """无窗口自检：建 App、画一页测试文本、销毁。"""
+    if _tk is None:
+        _smoke_report(False, "没有 tkinter")
+        return 1
+    root = _tk.Tk()
+    root.withdraw()
+    try:
+        app = App(root)
+        root.update_idletasks()
+        root.update()
+    except Exception:
+        _smoke_report(False, traceback.format_exc())
+        root.destroy()
+        return 1
+    finally:
+        pass
+    try:
+        root.destroy()
+    except Exception:
+        pass
+    _smoke_report(True, "App 构建/刷新正常，字体=%s" % DEFAULT_FONT)
+    return 0
+
+
 def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if "--smoke" in argv:
+        return _smoke()
     enable_dpi_awareness()
     if _tk is None:
         print("没有 tkinter，无法启动图形界面。")

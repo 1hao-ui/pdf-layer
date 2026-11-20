@@ -29,14 +29,24 @@
 `make_han_hand` 都会自动退回普通 `hwrender.Hand`，不会崩。
 """
 import os
+import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+# 打包成 exe 后（PyInstaller），数据目录在 sys._MEIPASS；字库随包放在
+# _MEIPASS/字体输出 与 _MEIPASS/fonts 下，这里统一给出候选目录。
+_FROZEN = bool(getattr(sys, "frozen", False))
+_MEI = os.path.normpath(getattr(sys, "_MEIPASS", HERE)) if _FROZEN else None
 # 符号字库可能的位置（按优先级）
-SYM_DIR_CANDIDATES = (
+SYM_DIR_CANDIDATES = ((
+    os.environ.get("ZTISYM_DIR", ""),
+    os.path.normpath(os.path.join(_MEI, "字体输出", "ZTi-Sym")),
+    os.path.normpath(os.path.join(HERE, "fonts", "ZTi-Sym")),
+) if _FROZEN else (
     os.environ.get("ZTISYM_DIR", ""),
     os.path.normpath(os.path.join(HERE, "..", "..", "字体输出", "ZTi-Sym")),
     os.path.normpath(os.path.join(HERE, "fonts", "ZTi-Sym")),
-)
+))
 # 4 套权重（pass1 较潦草，降频；pass2 最清楚，主字体）
 WEIGHTS = {1: 1, 2: 3, 3: 2, 4: 2}
 
@@ -64,11 +74,15 @@ def _passes():
 
 # ---------------------------------------------------------------- 汉字字库
 # 自建汉字字库（ZTi-Han，366 个汉字 × 2 遍）可能的位置（按优先级）
-HAN_DIR_CANDIDATES = (
+HAN_DIR_CANDIDATES = ((
+    os.environ.get("ZTIHAN_DIR", ""),
+    os.path.normpath(os.path.join(_MEI, "字体输出", "ZTi-Han")),
+    os.path.normpath(os.path.join(HERE, "fonts", "ZTi-Han")),
+) if _FROZEN else (
     os.environ.get("ZTIHAN_DIR", ""),
     os.path.normpath(os.path.join(HERE, "..", "..", "字体输出", "ZTi-Han")),
     os.path.normpath(os.path.join(HERE, "fonts", "ZTi-Han")),
-)
+))
 # 汉字缺字回退：按「与 ZTi-Han 的书写风格接近程度」排序（style_fingerprint 实测
 # han 笔画宽 6.0 / 墨迹占比 0.108）：
 #   老 ZTi-Scan-01..04.ttf（0.83x / 0.71x，最像）→ 老 ZTi-01..04.otf
