@@ -46,6 +46,8 @@ FONT_LABELS = [
     ("龙藏体（硬笔，数字/拉丁默认）", "LongCang-Regular-merged.ttf"),
     ("志莽行书", "ZhiMangXing-Regular-merged.ttf"),
     ("刘建毛草", "LiuJianMaoCao-Regular-merged.ttf"),
+    ("ZTi 我的手写·字嗨 4 套", "ZTi/ZTi-01.otf"),
+    ("ZTi 我的手写·真迹扫描 4 套", "ZTi/ZTi-Scan-01.ttf"),
 ]
 MATH_FONT_DEFAULT = "LongCang-Regular-merged.ttf"
 
@@ -59,13 +61,25 @@ def _font_path(name):
     return os.path.join(HERE, "fonts", name)
 
 
-def _variant_fonts():
-    """ZTi 多套字库（注意：与毛笔体风格不符，护栏会自动退回单套）。"""
+def _variant_fonts(main_name=None):
+    """ZTi 多套字库。
+
+    · 主字体是普通字体：把 fonts/ZTi 下 8 套全给（毛笔/硬笔混排会被
+      风格护栏挡住并退回单套，保持原行为）。
+    · 主字体本身是 ZTi：只轮换**同组**另外 3 套——实测字嗨（ZTi-0N.otf）
+      与真迹扫描（ZTi-Scan-0N.ttf）墨迹占比差 1.4 倍，护栏会拒绝混编；
+      分成两组各转各的，同字多形才真正生效。
+    """
     d = os.path.join(HERE, "fonts", "ZTi")
     if not os.path.isdir(d):
         return []
-    return [os.path.join(d, n) for n in sorted(os.listdir(d))
-            if n.endswith((".otf", ".ttf"))]
+    files = [n for n in sorted(os.listdir(d)) if n.endswith((".otf", ".ttf"))]
+    if main_name and main_name.replace("\\", "/").startswith("ZTi/"):
+        own = os.path.basename(main_name.replace("\\", "/"))
+        want_scan = "Scan" in own
+        group = [n for n in files if ("Scan" in n) == want_scan]
+        return [os.path.join(d, n) for n in group if n != own]
+    return [os.path.join(d, n) for n in files]
 
 
 class App:
@@ -336,6 +350,9 @@ class App:
             if lab == label:
                 self.cfg["font"] = fn
                 break
+        if "ZTi/" in self.cfg["font"]:
+            # 选自己的手写字库时默认开启同字多形（不想用可手动取消勾选）
+            self.var_variants.set(True)
         self.render_async()
 
     def _pull_cfg(self):
@@ -377,6 +394,10 @@ class App:
                 return
             font_path = _font_path(self.cfg["font"])
             math_path = _font_path(MATH_FONT_DEFAULT)
+            # ZTi 当主字体时，符号/缺字兜底也用硬笔的龙藏体，
+            # 跟自己的硬笔手写风格一致（默认会挑到毛笔的马善政）。
+            sym_path = (_font_path(MATH_FONT_DEFAULT)
+                        if "ZTi/" in self.cfg["font"] else None)
             if self.var_newsym.get() and symbols.available():
                 # 汉字走中文字体，数字/拉丁/希腊/符号走 ZTi-Sym 4 套加权
                 hand = symbols.make_hand(
@@ -394,7 +415,9 @@ class App:
                     jitter=float(self.cfg["jitter"]),
                     seed=int(self.cfg["seed"]),
                     math_font_path=math_path,
-                    variant_fonts=_variant_fonts() if self.cfg["variants"] else None,
+                    symbol_font_path=sym_path,
+                    variant_fonts=(_variant_fonts(self.cfg["font"])
+                                   if self.cfg["variants"] else None),
                 )
             # 书写区域决定正文宽度（在预览上拖框划定，或用四个数值手填）
             area = [float(v.get()) for v in self.var_area]

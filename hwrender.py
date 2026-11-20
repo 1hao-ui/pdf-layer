@@ -154,6 +154,22 @@ class Hand:
         self.symbol_font_path = symbol_font_path or self._pick_symbol_font(font_path)
         self._variants_active = True  # 风格一致性护栏，见 _check_style_consistency
 
+    def _with_fallback(self, ch, path):
+        """主字体缺字时换全字表字体（自写字库如 ZTi 只覆盖部分汉字）。
+
+        自写字库通常只覆盖正文用到的几十上百个字；拿它当主字体时，
+        未覆盖的字若直接渲染会得到 .notdef 豆腐块。这里统一回退到
+        symbol_font_path（全字表 *-merged 字体）。variants 激活时
+        _variant_for 已有同类回退，这里补上单套模式与度量路径的缺口。
+        """
+        c0 = self._cmap(path)
+        if c0 is not None and ord(ch) not in c0:
+            fb = self.symbol_font_path
+            fc = self._cmap(fb)
+            if fc is None or ord(ch) in fc:
+                return fb
+        return path
+
     def _pick_symbol_font(self, font_path):
         """挑一份「肯定含数学符号」的字体，供缺字时兜底。
 
@@ -276,6 +292,7 @@ class Hand:
         这样只保留笔迹差异，大小严格统一。
         """
         base = font_path or self._font_for(ch)
+        base = self._with_fallback(ch, base)
         cal = dict(fontcal.params_for(base))
 
         # 目标高度：主字体在该字号下这个字的墨迹高 × 0.86
@@ -514,6 +531,9 @@ class Hand:
             except Exception:
                 pass
         path = self._font_for(ch)
+        # 缺字回退要与 _char_tile 一致：.notdef 只有 0.6em，按它量宽
+        # 会让含未覆盖字的行宽被低估，渲染后越出列宽。
+        path = self._with_fallback(ch, path)
         scale = fontcal.params_for(path).get("size_scale", 1.0)
         return _ttf(path, max(4, int(round(px * scale)))).getlength(ch)
 

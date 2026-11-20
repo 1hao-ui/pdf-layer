@@ -98,15 +98,7 @@ hand = H.Hand(fonts[0], variant_fonts=fonts[1:], seed=20261118)
 img, w_pt, h_pt = hand.render_block("三相电路中，电压等于电流乘以电阻。", width_pt=404)
 ```
 
-想把覆盖字数拉满，可以把 8 套一起挂上（`variant_fonts` 全部传入）。
-代价是两种来源笔迹风格不同，同段里可能看得出「换了一支笔」：
-
-```python
-fonts = sorted(glob.glob("fonts/ZTi/*.otf") + glob.glob("fonts/ZTi/*.ttf"))
-hand = H.Hand(fonts[0], variant_fonts=fonts[1:])
-```
-
-也可以直接用现成工具自检、出对照样张：
+也可用现成工具自检、出对照样张：
 
 ```powershell
 python multifont.py check  --fonts fonts/ZTi --expect 8
@@ -116,6 +108,24 @@ python multifont.py render --fonts fonts/ZTi
 `check` 必须带 `--expect 8`（默认按 4 套校验）。输出里会看到
 「set 5–8 vs set 1: 135 chars differ」，这是两套来源字表不同所致，属预期；
 末尾 `RESULT: PASS` 即表示 8 套都能被 Pillow 正常加载。
+
+想把覆盖字数拉满可以挂扩充库，但**不要两组混挂**：风格护栏会校验各套与主字体的
+书写工具指纹，真迹扫描库的墨迹占比比字嗨高约 1.4 倍，混挂会被整体退回单套
+（同字多形直接失效）。按来源分组、主字体与轮换套同组即可：
+
+```python
+scan = sorted(glob.glob("fonts/ZTi/ZTi-Scan-*.ttf"))   # 真迹扫描组
+hand = H.Hand(scan[0], variant_fonts=scan[1:])
+```
+
+### 可视化控制台（GUI）
+
+`python gui.py` 打开控制台（需 tkinter）。**想整篇用自己的笔迹**：字体下拉框选
+「ZTi 我的手写·字嗨 4 套」或「ZTi 我的手写·真迹扫描 4 套」，即以 Z体 作主字体、
+同组另外 3 套自动进入同字多形轮换（复选框已自动勾上，可手动关）。Z体 未覆盖的
+字会自动回退到全字表字体，不会出豆腐块；风格护栏的结论显示在预览区上方状态栏
+（如「多套循环（覆盖率 96%）」或「覆盖率仅 56%，已退回单套」——退回单套时
+仍是你的笔迹，只是同字不再变形）。
 
 ### 缺字与边界
 
