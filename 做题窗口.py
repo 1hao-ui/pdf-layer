@@ -7,18 +7,23 @@
     py -3 做题窗口.py --open "C:\\Users\\a\\Downloads\\4第四章作业.pdf" ^
         --numbers "4.2.1,4.2.2,4.2.4,4.3.1,4.3.3,4.3.5,4.3.6"
 
-只做四件事：
+做五件事：
     1. 打开作业页（PDF / 图片）；
     2. 自动划题：调用 worksheet.analyze()，只显示题目列表和答题区高亮，**不渲染、不写文件**；
     3. 手动查看/修改答案（编辑框实时进内存，切题不丢），可改字号/对齐/答题区 4 个 pt 数值；
-    4. 只有用户主动点「生成手写作答」才调用 worksheet.render_answers() 写 PDF，
-       默认另存 out/做题窗口_时间戳.pdf，并在窗口内显示生成预览。
+    4. **实时叠加预览**：AI 作答 / 编辑答案后自动把手写效果叠到作业页上（纯内存，
+       防抖 + 后台线程 + 按答案签名缓存），不导出 PDF 也能看到最终效果；预览支持
+       滚轮缩放、拖拽平移、适合窗口；
+    5. 只有用户主动点「生成手写作答」才调用 worksheet.render_answers() 写 PDF；
+       输出目录与文件名可在界面自定义，默认 out/做题窗口_时间戳.pdf，
+       也可点「另存为…」临时选位置。
 
 约束
 ----
 · 本模块 **不 import gui、不 subprocess、不唤起任何生成器窗口**；
-· 导入本模块、构造窗口、打开作业页都不会写任何输出文件（预览图只存在内存里）；
-· 生成渲染完全复用 worksheet.render_answers（本文件不重写排版/笔迹逻辑），
+· 导入本模块、构造窗口、打开作业页、实时预览都不会写任何输出文件
+  （预览位图只存在内存里，来自 worksheet.preview_pages + page_model.render_page）；
+· 实时预览与最终导出共用 worksheet 的排版内核（_compose_answer_pages），
   仅当用户改了某题字号/对齐时，通过一个 page_model 代理把该题的设置注入渲染器。
 """
 from __future__ import annotations
@@ -26,8 +31,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import re
 import sys
+import threading
 import traceback
 from datetime import datetime
 
@@ -56,10 +63,17 @@ except Exception:                          # pragma: no cover
     except Exception:
         _fitz = None
 
-OUT_DIR = os.path.join(HERE, "out")
+# 冻结版（exe）把默认输出目录放到 exe 同目录，避免写进 PyInstaller 临时解压目录
+APP_BASE = (os.path.dirname(os.path.abspath(sys.executable))
+            if getattr(sys, "frozen", False) else HERE)
+OUT_DIR = os.path.join(APP_BASE, "out")
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff", ".gif")
 DEFAULT_SIZE_PT = 12.4
 LINE_RATIO = 1.85
+
+ZOOM_MIN = 0.25
+ZOOM_MAX = 4.0
+LIVE_DEBOUNCE_MS = 450
 
 ALIGN_LABELS = {"左对齐": "left", "居中": "center", "右对齐": "right"}
 
@@ -418,6 +432,22 @@ class WorksheetWindow:
         self._log_open = False
         self._busy = False
 
+        # ---- 实时叠加预览（纯内存，不落盘）----
+        self.live_preview_on = True
+        self._live_cache = {}        # 页下标 -> PIL.Image（作业底图 + 手写作答）
+        self._live_sig = None        # 当前缓存对应的答案签名
+        self._live_busy = False
+        self._live_pending = False
+        self._live_after = None
+        self._live_queue = queue.Queue()
+        # ---- 预览缩放 / 平移 ----
+        self.zoom = 1.0              # 相对「适合窗口」的倍率
+        self.pan_x = 0.0
+        self.pan_y = 0.0
+        self._pan_last = None
+        # ---- 输出路径（会话内记忆；窗口启动不写任何配置文件）----
+        self._outname_custom = False
+
         root.title("ZTi 智能做题助手 · AI 作答 + 手写写回")
         self._setup_window_geometry()
         self._build_ui()
@@ -598,12 +628,13 @@ class WorksheetWindow:
         btn(row2, "AI 设置", self._dlg_ai_settings)
         sep(row2)
         self.btn_generate = ttk.Button(
-            row2, text="生成手写作答", command=self._dlg_generate,
+            row2, text="生成手写作答", command=self._generate_default,
             style=self._style("accent_button", "Accent.TButton"),
             padding=(14, 6), width=0)
         self.btn_generate.pack(side="left", padx=1)
+        btn(row2, "另存为…", self._dlg_generate)
         btn(row2, "预览当前页", self.preview_current_page)
-        ttk.Label(row2, text="点「AI 自动作答」自动出答案；改完再点「生成手写作答」",
+        ttk.Label(row2, text="AI 出答案 → 实时叠加预览 → 生成保存",
                   style=self._style("toolbar_muted", "Toolbar.Muted.TLabel")
                   ).pack(side="right", padx=6)
 
@@ -616,7 +647,7 @@ class WorksheetWindow:
             style=self._style("toolbar_muted", "Toolbar.Muted.TLabel"))
         self.status_label.pack(side="left", fill="x", expand=True)
         self.hint_label = ttk.Label(
-            bar, text="答题只改内存 · 生成才写文件",
+            bar, text="答题只改内存 · 实时预览不落盘 · 生成才写文件",
             style=self._style("toolbar_muted", "Toolbar.Muted.TLabel"))
         self.hint_label.pack(side="right")
 
@@ -691,12 +722,24 @@ class WorksheetWindow:
             padding=(8, 6))
         paned.add(preview_card, weight=3)
         self.preview_card = preview_card
+        self._build_preview_toolbar(preview_card)
         self.canvas = tk.Canvas(preview_card, height=240,
                                 bg=self.tk_tokens.get("canvas_bg")
                                 or self.pal.get("canvas", "#E9EBF2"),
                                 highlightthickness=0, bd=0)
         self.canvas.pack(fill="both", expand=True)
         self.canvas.bind("<Configure>", lambda e: self._redraw_canvas())
+        # 缩放 / 平移：滚轮以鼠标为锚点，按住左键拖拽，双击回到适合窗口
+        self.canvas.bind("<MouseWheel>", self._on_canvas_wheel)
+        self.canvas.bind("<Button-4>",
+                         lambda e: self._zoom_at(e.x, e.y, 1.15))
+        self.canvas.bind("<Button-5>",
+                         lambda e: self._zoom_at(e.x, e.y, 1.0 / 1.15))
+        self.canvas.bind("<ButtonPress-1>", self._on_pan_start)
+        self.canvas.bind("<B1-Motion>", self._on_pan_move)
+        self.canvas.bind("<ButtonRelease-1>",
+                         lambda e: setattr(self, "_pan_last", None))
+        self.canvas.bind("<Double-Button-1>", lambda e: self._zoom_fit())
 
         editor_card = ttk.Labelframe(
             paned, text="答案编辑",
@@ -705,6 +748,38 @@ class WorksheetWindow:
         paned.add(editor_card, weight=2)
         self.editor_card = editor_card
         self._build_editor(editor_card)
+
+    def _build_preview_toolbar(self, parent):
+        """预览卡片顶部：实时叠加开关 + 缩放控制。"""
+        bar = ttk.Frame(parent, style=self._style("card", "Card.TFrame"))
+        bar.pack(side="top", fill="x", pady=(0, 4))
+        self.var_live = tk.BooleanVar(value=True)
+        ttk.Checkbutton(bar, text="实时叠加答案", variable=self.var_live,
+                        command=self._on_live_toggle).pack(side="left")
+        ttk.Button(bar, text="刷新预览", command=self._refresh_live_preview,
+                   style=self._style("ghost_button", "Ghost.TButton"),
+                   padding=(8, 2)).pack(side="left", padx=(6, 10))
+        ttk.Separator(bar, orient="vertical").pack(side="left", fill="y",
+                                                    padx=4, pady=2)
+        ttk.Button(bar, text="－", width=3,
+                   command=lambda: self._zoom_step(1.0 / 1.25),
+                   style=self._style("ghost_button", "Ghost.TButton"),
+                   padding=(4, 2)).pack(side="left")
+        self.var_zoom = tk.StringVar(value="100%")
+        ttk.Label(bar, textvariable=self.var_zoom, width=7, anchor="center",
+                  foreground=self.pal.get("accent", "#4F6BED"),
+                  style=self._style("card_label", "Card.TLabel")).pack(side="left")
+        ttk.Button(bar, text="＋", width=3,
+                   command=lambda: self._zoom_step(1.25),
+                   style=self._style("ghost_button", "Ghost.TButton"),
+                   padding=(4, 2)).pack(side="left")
+        ttk.Button(bar, text="适合窗口", command=self._zoom_fit,
+                   style=self._style("ghost_button", "Ghost.TButton"),
+                   padding=(8, 2)).pack(side="left", padx=(4, 0))
+        ttk.Label(bar, text="滚轮缩放 · 拖拽平移 · 双击复位",
+                  style=self._style("card_muted", "Card.Muted.TLabel")
+                  ).pack(side="right", padx=4)
+        self._sync_zoom_label()
 
     def _build_editor(self, parent):
         self.cur_label = ttk.Label(
@@ -771,6 +846,35 @@ class WorksheetWindow:
             rect_row, text="只影响高亮与生成",
             style=self._style("card_muted", "Card.Muted.TLabel"))
         self.rect_hint.pack(side="left", padx=6)
+
+        # ---- 输出文件：目录 + 文件名（默认时间戳，均可自定义）----
+        out_row = ttk.Frame(parent, style=self._style("card", "Card.TFrame"))
+        out_row.pack(fill="x", pady=(6, 0))
+        ttk.Label(out_row, text="输出目录",
+                  style=self._style("card_muted", "Card.Muted.TLabel")
+                  ).pack(side="left")
+        self.var_outdir = tk.StringVar(value=OUT_DIR)
+        ttk.Entry(out_row, textvariable=self.var_outdir
+                  ).pack(side="left", fill="x", expand=True, padx=(3, 0))
+        ttk.Button(out_row, text="浏览…", command=self._dlg_choose_outdir,
+                   style=self._style("ghost_button", "Ghost.TButton"),
+                   padding=(8, 2)).pack(side="left", padx=(4, 10))
+        ttk.Label(out_row, text="文件名",
+                  style=self._style("card_muted", "Card.Muted.TLabel")
+                  ).pack(side="left")
+        self.var_outname = tk.StringVar(value=self._stamped_name())
+        name_entry = ttk.Entry(out_row, textvariable=self.var_outname, width=26)
+        name_entry.pack(side="left", padx=(3, 0))
+        name_entry.bind("<KeyRelease>",
+                        lambda e: setattr(self, "_outname_custom", True))
+        ttk.Button(out_row, text="用时间戳", command=self._reset_outname,
+                   style=self._style("ghost_button", "Ghost.TButton"),
+                   padding=(8, 2)).pack(side="left", padx=4)
+        self.out_hint = ttk.Label(
+            parent, text="默认按时间命名；点「生成手写作答」直接存到这里，"
+                         "或点「另存为…」临时换位置",
+            style=self._style("card_muted", "Card.Muted.TLabel"))
+        self.out_hint.pack(anchor="w", pady=(2, 0))
 
     def _apply_widget_colors(self):
         pal = self.pal
@@ -852,11 +956,15 @@ class WorksheetWindow:
             pass
         try:
             if self.spec:
-                title = ("生成预览 · 第 %d 页" % (self.page + 1)
-                         if self.generated_mode else
-                         "预览 · 第 %d/%d 页" % (
-                             self.page + 1,
-                             max(1, len(self.spec.get("pages") or []))))
+                total = max(1, len(self.spec.get("pages") or []))
+                if self.generated_mode:
+                    title = "生成预览 · 第 %d 页" % (self.page + 1)
+                elif (self.live_preview_on
+                      and self.page in self._live_cache):
+                    title = ("实时预览 · 第 %d/%d 页（答案已叠加，未保存）"
+                             % (self.page + 1, total))
+                else:
+                    title = "预览 · 第 %d/%d 页" % (self.page + 1, total)
                 self.preview_card.configure(text=title)
             else:
                 self.preview_card.configure(text="预览")
@@ -942,6 +1050,12 @@ class WorksheetWindow:
         self.generated_mode = False
         self._generated_img = None
         self._page_cache = {}
+        self._invalidate_live()
+        if not getattr(self, "_outname_custom", False):
+            try:
+                self.var_outname.set(self._stamped_name())
+            except Exception:
+                pass
         self.page = 0
         self.current = 0 if self.questions else None
         self._rebuild_question_views()
@@ -985,6 +1099,7 @@ class WorksheetWindow:
             self._sync_editor_from_current()
             self._rebuild_question_views()
             self._update_status()
+            self._schedule_live_preview(True, 80)
             self.log("重新划区完成，按题号保留 %d 条已填答案。" % restored)
         return True
 
@@ -1019,10 +1134,10 @@ class WorksheetWindow:
         idx = max(0, min(int(idx), len(pages) - 1))
         self.page = idx
         self.generated_mode = False
-        if self.generated_mode:
-            self._generated_img = None
+        self._generated_img = None
         self._redraw_canvas()
         self._update_status()
+        self._schedule_live_preview()
 
     # ------------------------------------------------------------ 题目列表 / 编辑
     def _rebuild_question_views(self):
@@ -1071,6 +1186,7 @@ class WorksheetWindow:
         self._sync_editor_from_current()
         self._redraw_canvas()
         self._update_status()
+        self._schedule_live_preview()
 
     def set_answer(self, text, commit=True):
         """程序化写入当前题答案（测试/外部调用）。"""
@@ -1091,6 +1207,7 @@ class WorksheetWindow:
             finally:
                 self._syncing_editor = False
         self._update_status()
+        self._schedule_live_preview(True, 60)
         return True
 
     def _sync_editor_from_current(self):
@@ -1140,6 +1257,7 @@ class WorksheetWindow:
             return
         self._commit_editor()
         self._update_status()
+        self._schedule_live_preview()
 
     def _commit_editor(self):
         q = self._selected_question()
@@ -1172,6 +1290,7 @@ class WorksheetWindow:
         self.log("已记下 %s 的生成设置：字号 %.1fpt · %s（生成时生效）"
                  % (q.get("number") or qid, self.sizes.get(qid, DEFAULT_SIZE_PT),
                     self.var_align.get()))
+        self._schedule_live_preview()
 
     def _apply_rect(self):
         q = self._selected_question()
@@ -1201,6 +1320,7 @@ class WorksheetWindow:
         if full is not None:
             full["answer_rect"] = list(rect)
         self.log("已更新 %s 答题区：%s" % (q.get("number") or qid, rect))
+        self._schedule_live_preview()
         self._redraw_canvas()
         self._update_status()
         return True
@@ -1264,6 +1384,267 @@ class WorksheetWindow:
         return (ox + (float(x_pt) / max(1e-6, pw)) * img.width * z,
                 oy + (float(y_pt) / max(1e-6, ph)) * img.height * z)
 
+    # -------------------------------------------- 实时叠加预览（纯内存，不落盘）
+    def _invalidate_live(self):
+        self._live_cache = {}
+        self._live_sig = None
+        self._live_pending = False
+        if self._live_after is not None:
+            try:
+                self.root.after_cancel(self._live_after)
+            except Exception:
+                pass
+            self._live_after = None
+
+    def _answer_signature(self, answers=None):
+        """答案 / 字号 / 对齐 / 答题区 的综合签名，用于缓存失效判断。"""
+        a = answers if answers is not None else {
+            k: v for k, v in self.answers.items() if (v or "").strip()}
+        rects = {str(q.get("id")): list(q.get("answer_rect") or [])
+                 for q in self.questions}
+        try:
+            return json.dumps(
+                [sorted((str(k), str(v)) for k, v in a.items()),
+                 sorted((str(k), float(v)) for k, v in self.sizes.items()),
+                 sorted((str(k), str(v)) for k, v in self.aligns.items()),
+                 sorted((k, v) for k, v in rects.items())],
+                ensure_ascii=False, sort_keys=True, default=str)
+        except Exception:
+            return repr(sorted(a.items()))
+
+    def _schedule_live_preview(self, force=False, delay=LIVE_DEBOUNCE_MS):
+        """答案变化后防抖触发一次内存渲染；签名未变且当前页已缓存则跳过。"""
+        if not self.live_preview_on or not self.spec:
+            return
+        try:
+            sig = self._answer_signature()
+            if sig != self._live_sig:
+                self._live_cache = {}
+                self._live_sig = sig
+            elif not force and self.page in self._live_cache:
+                return
+            if self._live_busy or self._busy:
+                self._live_pending = True
+                return
+            if self._live_after is not None:
+                try:
+                    self.root.after_cancel(self._live_after)
+                except Exception:
+                    pass
+            self._live_after = self.root.after(
+                int(delay), lambda: self._start_live_render())
+        except Exception:
+            pass
+
+    def _start_live_render(self):
+        self._live_after = None
+        if not self.live_preview_on or not self.spec:
+            return
+        if self._live_busy or self._busy:
+            self._live_pending = True
+            return
+        answers = {k: v for k, v in self.answers.items()
+                   if (v or "").strip()}
+        if not answers:
+            self._invalidate_live()
+            self._redraw_canvas()
+            self._update_status()
+            return
+        sig = self._answer_signature(answers)
+        page_idx = int(self.page)
+        spec = self.spec
+        try:
+            overrides = self._build_overrides(set(answers))
+            shim = (make_page_model_shim(overrides)
+                    if any(s is not None or a is not None
+                           for s, a in overrides) else None)
+        except Exception:
+            shim = None
+        self._live_busy = True
+        self._live_sig = sig
+
+        def worker():
+            try:
+                imgs, warns, cov = worksheet.preview_pages(
+                    spec, answers, page_model=shim, only_page=page_idx)
+                self._live_queue.put((sig, imgs, warns, cov, None))
+            except Exception as e:            # noqa: BLE001
+                self._live_queue.put((sig, {}, [], {}, e))
+
+        threading.Thread(target=worker, daemon=True,
+                         name="live-preview").start()
+        try:
+            self.root.after(60, self._live_poll)
+        except Exception:
+            pass
+
+    def _live_poll(self):
+        try:
+            item = self._live_queue.get_nowait()
+        except queue.Empty:
+            try:
+                self.root.after(60, self._live_poll)
+            except Exception:
+                pass
+            return
+        sig, imgs, warns, cov, err = item
+        self._live_busy = False
+        try:
+            if err is not None:
+                self.log("实时预览失败：%s" % err)
+            elif sig == self._live_sig:
+                self._live_cache.update(imgs)
+                for w in (warns or [])[:3]:
+                    self.log("[实时预览 warning] " + str(w))
+            self._redraw_canvas()
+            self._update_status()
+        except Exception:
+            pass
+        # 期间又改了答案 / 换了页：再补一次
+        try:
+            if self._live_pending or (
+                    self.live_preview_on and self.spec
+                    and self.page not in self._live_cache
+                    and self._answer_signature() == self._live_sig):
+                self._live_pending = False
+                self.root.after(
+                    80, lambda: self._schedule_live_preview(True, 60))
+        except Exception:
+            pass
+
+    def _refresh_live_preview(self):
+        if not self.live_preview_on:
+            try:
+                self.var_live.set(True)
+            except Exception:
+                pass
+            self._on_live_toggle()
+        self._invalidate_live()
+        self._schedule_live_preview(True, 0)
+
+    def _on_live_toggle(self):
+        self.live_preview_on = bool(self.var_live.get())
+        if self.live_preview_on:
+            self.generated_mode = False
+            self._generated_img = None
+            self._schedule_live_preview(True, 60)
+        else:
+            self._invalidate_live()
+        self._redraw_canvas()
+        self._update_status()
+
+    # ------------------------------------------------------ 预览缩放 / 平移
+    def _sync_zoom_label(self):
+        try:
+            self.var_zoom.set("%d%%" % round(self.zoom * 100))
+        except Exception:
+            pass
+
+    def _on_canvas_wheel(self, event):
+        delta = getattr(event, "delta", 0)
+        if not delta:
+            return
+        self._zoom_at(event.x, event.y,
+                      1.15 if delta > 0 else 1.0 / 1.15)
+
+    def _zoom_at(self, mx, my, factor):
+        old = self.zoom
+        new = max(ZOOM_MIN, min(ZOOM_MAX, old * factor))
+        if abs(new - old) < 1e-9:
+            return
+        img, _mode = self._display_image()
+        if img is not None:
+            cw, ch = self._canvas_size()
+            z0, ox0, oy0 = self._view_geom(img, cw, ch)
+            if z0 > 1e-6:
+                px = (mx - ox0) / z0
+                py = (my - oy0) / z0
+                z1 = z0 * (new / old)
+                self.pan_x = (mx - px * z1) - (cw - img.width * z1) / 2.0
+                self.pan_y = (my - py * z1) - (ch - img.height * z1) / 2.0
+        self.zoom = new
+        self._sync_zoom_label()
+        self._redraw_canvas()
+
+    def _zoom_step(self, factor):
+        cw, ch = self._canvas_size()
+        self._zoom_at(cw / 2.0, ch / 2.0, factor)
+
+    def _zoom_fit(self):
+        self.zoom = 1.0
+        self.pan_x = 0.0
+        self.pan_y = 0.0
+        self._sync_zoom_label()
+        self._redraw_canvas()
+
+    def _on_pan_start(self, event):
+        self._pan_last = (event.x, event.y)
+
+    def _on_pan_move(self, event):
+        if not self._pan_last:
+            return
+        dx = event.x - self._pan_last[0]
+        dy = event.y - self._pan_last[1]
+        self._pan_last = (event.x, event.y)
+        self.pan_x += dx
+        self.pan_y += dy
+        self._redraw_canvas()
+
+    def _view_geom(self, img, cw, ch, margin=24):
+        """按当前 zoom / pan 计算 (z, ox, oy)。"""
+        z_fit, _, _ = self._fit_image(img, cw, ch, margin)
+        z = z_fit * self.zoom
+        ox = (cw - img.width * z) / 2.0 + self.pan_x
+        oy = (ch - img.height * z) / 2.0 + self.pan_y
+        return z, ox, oy
+
+    def _display_image(self):
+        """返回 (img, mode)：mode ∈ generated / live / layout / none。"""
+        if self.generated_mode and self._generated_img is not None:
+            return self._generated_img, "generated"
+        if (self.live_preview_on and self.spec
+                and self.page in self._live_cache):
+            return self._live_cache[self.page], "live"
+        if not self.spec:
+            return None, "none"
+        pages = self.spec.get("pages") or []
+        page_idx = min(self.page, max(0, len(pages) - 1))
+        return self._load_page_image(page_idx), "layout"
+
+    # ------------------------------------------------------ 输出路径 / 文件名
+    def _stamped_name(self):
+        return "做题窗口_%s.pdf" % datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    def _compose_out_path(self):
+        folder = (self.var_outdir.get() or "").strip() or OUT_DIR
+        name = (self.var_outname.get() or "").strip() or self._stamped_name()
+        if not name.lower().endswith(".pdf"):
+            name += ".pdf"
+        folder = os.path.abspath(os.path.expanduser(os.path.expandvars(folder)))
+        return os.path.join(folder, os.path.basename(name))
+
+    def _reset_outname(self):
+        self.var_outname.set(self._stamped_name())
+        self._outname_custom = False
+        self.log("输出文件名已重置为当前时间戳：%s" % self.var_outname.get())
+
+    def _dlg_choose_outdir(self):
+        try:
+            path = filedialog.askdirectory(
+                parent=self.root, title="选择输出目录",
+                initialdir=(self.var_outdir.get() or OUT_DIR))
+        except Exception:
+            return
+        if path:
+            self.var_outdir.set(path)
+            self.log("输出目录：%s" % path)
+
+    def _generate_default(self):
+        if not self.spec or not self.questions:
+            self._warn("先打开作业页并自动划题。")
+            return
+        self.generate(out_pdf=self._compose_out_path())
+
     def _redraw_canvas(self):
         if not hasattr(self, "canvas"):
             return
@@ -1274,100 +1655,116 @@ class WorksheetWindow:
         pal = self.pal
         try:
             c.delete("all")
-            if self.generated_mode and self._generated_img is not None:
-                img = self._generated_img
-                z, ox, oy = self._fit_image(img, cw, ch)
-                self._preview_photo = ImageTk.PhotoImage(
-                    img.resize((max(1, int(img.width * z)),
-                                max(1, int(img.height * z))),
-                               getattr(Image, "Resampling", Image).LANCZOS))
-                c.create_image(ox, oy, anchor="nw", image=self._preview_photo)
-                c.create_rectangle(ox, oy, ox + img.width * z,
-                                   oy + img.height * z,
-                                   outline=pal.get("border", "#E6E8EF"))
-                c.create_text(10, 8, anchor="nw",
-                              text="生成预览 · %s（点「预览当前页」返回版面）"
-                              % os.path.basename(self.generated_path or ""),
-                              fill=pal.get("muted", "#6B7280"),
-                              font=(self.font_family, 9))
+            self._sync_zoom_label()
+            img, mode = self._display_image()
+            if img is None:
+                c.create_text(
+                    cw / 2.0, ch / 2.0,
+                    text=("当前页预览加载失败" if self.spec else
+                          "打开作业页（PDF / 图片）后自动划题\n"
+                          "不会自动生成、不会写文件"),
+                    fill=pal.get("danger" if self.spec else "muted",
+                                 "#6B7280"),
+                    font=(self.font_family, 11), justify="center")
                 return
-            if not self.spec:
-                c.create_text(cw / 2.0, ch / 2.0,
-                              text="打开作业页（PDF / 图片）后自动划题\n不会自动生成、不会写文件",
-                              fill=pal.get("muted", "#6B7280"),
-                              font=(self.font_family, 11), justify="center")
+            z, ox, oy = self._view_geom(img, cw, ch)
+            # 保护：缩放过大时不生成巨型位图
+            tw = max(1, min(8000, int(img.width * z)))
+            th = max(1, min(8000, int(img.height * z)))
+            shown = img.resize(
+                (tw, th), getattr(Image, "Resampling", Image).LANCZOS)
+            self._preview_photo = ImageTk.PhotoImage(shown)
+            c.create_image(ox, oy, anchor="nw", image=self._preview_photo)
+            c.create_rectangle(ox, oy, ox + tw, oy + th,
+                               outline=pal.get("border", "#E6E8EF"))
+            if mode == "generated":
+                c.create_text(
+                    10, 8, anchor="nw",
+                    text="生成预览 · %s（点「预览当前页」返回实时叠加）"
+                         % os.path.basename(self.generated_path or ""),
+                    fill=pal.get("muted", "#6B7280"),
+                    font=(self.font_family, 9))
                 return
+            if mode == "live":
+                c.create_text(
+                    10, 8, anchor="nw",
+                    text="实时叠加 · 已写入 %d 题答案（未保存，仅内存预览）"
+                         % self._filled_count(),
+                    fill=pal.get("accent", "#4F6BED"),
+                    font=(self.font_family, 9))
+                # 实时预览下只标当前题答题区（细虚线），不遮挡手写字迹
+                q = self._selected_question()
+                if q is not None and int(q.get("page") or 0) == self.page:
+                    rect = q.get("answer_rect") or []
+                    if len(rect) == 4:
+                        x0, y0 = self._page_to_screen(
+                            rect[0], rect[1], self.page, img, z, ox, oy)
+                        x1, y1 = self._page_to_screen(
+                            rect[2], rect[3], self.page, img, z, ox, oy)
+                        c.create_rectangle(
+                            x0, y0, x1, y1,
+                            outline=pal.get("accent", "#4F6BED"),
+                            dash=(3, 4), width=1)
+                return
+            # ---- 版面视图：原作业页 + 答题区高亮 ----
             pages = self.spec.get("pages") or []
             page_idx = min(self.page, max(0, len(pages) - 1))
-            img = self._load_page_image(page_idx)
-            if img is None:
-                c.create_text(cw / 2.0, ch / 2.0,
-                              text="当前页预览加载失败",
-                              fill=pal.get("danger", "#E5484D"),
-                              font=(self.font_family, 10))
-                return
-            z, ox, oy = self._fit_image(img, cw, ch)
-            self._preview_img = img
-            self._preview_photo = ImageTk.PhotoImage(
-                img.resize((max(1, int(img.width * z)),
-                            max(1, int(img.height * z))),
-                           getattr(Image, "Resampling", Image).LANCZOS))
-            c.create_image(ox, oy, anchor="nw", image=self._preview_photo)
             pw, ph = self._page_dims(page_idx)
-            c.create_rectangle(ox, oy, ox + img.width * z, oy + img.height * z,
-                               outline=pal.get("border", "#E6E8EF"))
-            # 本页所有题：答题区虚线
             for q in self.questions:
                 if int(q.get("page") or 0) != page_idx:
                     continue
                 rect = q.get("answer_rect") or []
                 if len(rect) != 4:
                     continue
-                x0, y0 = self._page_to_screen(rect[0], rect[1], page_idx, img,
-                                              z, ox, oy)
-                x1, y1 = self._page_to_screen(rect[2], rect[3], page_idx, img,
-                                              z, ox, oy)
+                x0, y0 = self._page_to_screen(
+                    rect[0], rect[1], page_idx, img, z, ox, oy)
+                x1, y1 = self._page_to_screen(
+                    rect[2], rect[3], page_idx, img, z, ox, oy)
                 cur = (self._selected_question() is not None
                        and self._selected_question().get("id") == q.get("id"))
                 if cur:
                     continue
-                c.create_rectangle(x0, y0, x1, y1,
-                                   outline=pal.get("border_strong",
-                                                   pal.get("border", "#D7DAE3")),
-                                   dash=(4, 3), width=1)
-            # 当前题：题目区 + 答题区高亮
+                c.create_rectangle(
+                    x0, y0, x1, y1,
+                    outline=pal.get("border_strong",
+                                    pal.get("border", "#D7DAE3")),
+                    dash=(4, 3), width=1)
             q = self._selected_question()
             if q is not None and int(q.get("page") or 0) == page_idx:
                 qrect = q.get("rect") or []
                 if len(qrect) == 4:
-                    x0, y0 = self._page_to_screen(qrect[0], qrect[1], page_idx,
-                                                  img, z, ox, oy)
-                    x1, y1 = self._page_to_screen(qrect[2], qrect[3], page_idx,
-                                                  img, z, ox, oy)
-                    c.create_rectangle(x0, y0, x1, y1,
-                                       outline=pal.get("muted", "#6B7280"),
-                                       dash=(2, 2), width=1)
-                rect = q.get("answer_rect") or []
-                if len(rect) == 4:
-                    x0, y0 = self._page_to_screen(rect[0], rect[1], page_idx,
-                                                  img, z, ox, oy)
-                    x1, y1 = self._page_to_screen(rect[2], rect[3], page_idx,
-                                                  img, z, ox, oy)
+                    x0, y0 = self._page_to_screen(
+                        qrect[0], qrect[1], page_idx, img, z, ox, oy)
+                    x1, y1 = self._page_to_screen(
+                        qrect[2], qrect[3], page_idx, img, z, ox, oy)
                     c.create_rectangle(
                         x0, y0, x1, y1,
-                        fill=pal.get("accent_soft", "#EEF1FE"), stipple="gray25",
+                        outline=pal.get("muted", "#6B7280"),
+                        dash=(2, 2), width=1)
+                rect = q.get("answer_rect") or []
+                if len(rect) == 4:
+                    x0, y0 = self._page_to_screen(
+                        rect[0], rect[1], page_idx, img, z, ox, oy)
+                    x1, y1 = self._page_to_screen(
+                        rect[2], rect[3], page_idx, img, z, ox, oy)
+                    c.create_rectangle(
+                        x0, y0, x1, y1,
+                        fill=pal.get("accent_soft", "#EEF1FE"),
+                        stipple="gray25",
                         outline=pal.get("accent", "#4F6BED"), width=2)
-                    c.create_text(x0 + 4, y0 + 2, anchor="nw",
-                                  text="答题区 · 约 %d 行"
-                                  % int(q.get("answer_lines") or 0),
-                                  fill=pal.get("accent", "#4F6BED"),
-                                  font=(self.font_family, 9))
-            c.create_text(10, 8, anchor="nw",
-                          text="第 %d/%d 页 · %.0f×%.0f pt · %s"
-                          % (page_idx + 1, max(1, len(pages)), pw, ph,
-                             os.path.basename(self.source)),
-                          fill=pal.get("muted", "#6B7280"),
-                          font=(self.font_family, 9))
+                    c.create_text(
+                        x0 + 4, y0 + 2, anchor="nw",
+                        text="答题区 · 约 %d 行"
+                             % int(q.get("answer_lines") or 0),
+                        fill=pal.get("accent", "#4F6BED"),
+                        font=(self.font_family, 9))
+            c.create_text(
+                10, 8, anchor="nw",
+                text="第 %d/%d 页 · %.0f×%.0f pt · %s"
+                     % (page_idx + 1, max(1, len(pages)), pw, ph,
+                        os.path.basename(self.source)),
+                fill=pal.get("muted", "#6B7280"),
+                font=(self.font_family, 9))
         except Exception:
             self.log("预览绘制失败：\n" + traceback.format_exc())
 
@@ -1376,6 +1773,7 @@ class WorksheetWindow:
         self._generated_img = None
         self._redraw_canvas()
         self._update_status()
+        self._schedule_live_preview(True, 60)
 
     # ------------------------------------------------------------ 答案 JSON
     def _questions_full(self):
@@ -1449,6 +1847,7 @@ class WorksheetWindow:
         self.answers = {str(qid): str(text) for qid, text in matches.items()}
         self._sync_editor_from_current()
         self._update_status()
+        self._schedule_live_preview(True, 80)
         self.log("已载入答案：%s（匹配 %d 题）"
                  % (os.path.basename(path), len(self.answers)))
         for w in warnings[:8]:
@@ -1653,6 +2052,7 @@ class WorksheetWindow:
         except Exception:
             pass
         self._update_status()
+        self._schedule_live_preview(True, 80)
         meta = (got or {}).get("meta") or {}
         self.log("AI 作答完成：%d 题（%s ms，模型 %s）"
                  % (filled, meta.get("elapsed_ms"), meta.get("model")))
@@ -1663,18 +2063,24 @@ class WorksheetWindow:
             pass
 
     def _dlg_generate(self):
+        """「另存为…」：临时选位置，并把选择回填到界面输出设置。"""
         if not self.spec or not self.questions:
             self._warn("先打开作业页并自动划题。")
             return
         try:
             path = filedialog.asksaveasfilename(
                 parent=self.root, title="生成手写作答（另存 PDF）",
-                defaultextension=".pdf", initialdir=OUT_DIR,
-                initialfile=os.path.basename(self._default_generate_path()),
+                defaultextension=".pdf",
+                initialdir=(self.var_outdir.get() or OUT_DIR),
+                initialfile=(self.var_outname.get() or self._stamped_name()),
                 filetypes=[("PDF", "*.pdf")])
         except Exception:
             return
         if path:
+            path = os.path.abspath(path)
+            self.var_outdir.set(os.path.dirname(path))
+            self.var_outname.set(os.path.basename(path))
+            self._outname_custom = True
             self.generate(out_pdf=path)
 
     def _build_overrides(self, matched_ids):
@@ -1809,11 +2215,39 @@ def main(argv=None):
                         help="打包自检：无窗口构建一次后退出（打包测试用）")
     parser.add_argument("--ai-smoke", default=None, metavar="PDF",
                         help="打包自检：打开作业→AI 自动作答→写结果文件后退出")
+    parser.add_argument("--selftest", default=None, metavar="PDF",
+                        help="打包自检：打开作业→填答案→生成手写作答→写结果后退出")
     args = parser.parse_args(argv if argv is not None else None)
+    if args.selftest:
+        root = tk.Tk()
+        root.withdraw()
+        app = WorksheetWindow(root)
+        app.live_preview_on = False
+        ok = app.load_source(args.selftest, numbers=args.numbers)
+        pdf = None
+        if ok:
+            for q in app.questions:
+                app.answers[str(q.get("id"))] = "自检答案 220/10 = 22"
+            pdf = app.generate(out_pdf=os.path.join(
+                APP_BASE, "selftest_手写作答.pdf"))
+        base = (os.path.dirname(sys.executable)
+                if getattr(sys, "frozen", False) else APP_BASE)
+        with open(os.path.join(base, "selftest_result.txt"), "w",
+                  encoding="utf-8") as f:
+            f.write("LOAD=%s\nQUESTIONS=%d\nPDF=%s\nPDF_OK=%s\n"
+                    % (bool(ok), len(app.questions), pdf or "",
+                       bool(pdf and os.path.exists(pdf)
+                            and os.path.getsize(pdf) > 1000)))
+        try:
+            root.destroy()
+        except Exception:
+            pass
+        return 0 if (ok and pdf and os.path.exists(pdf)) else 1
     if args.ai_smoke:
         root = tk.Tk()
         root.withdraw()
         app = WorksheetWindow(root)
+        app.live_preview_on = False
         app.load_source(args.ai_smoke, numbers=args.numbers)
         app.ai_solve()
         import time as _time
@@ -1839,6 +2273,7 @@ def main(argv=None):
     if args.smoke:
         root.withdraw()
         app = WorksheetWindow(root)
+        app.live_preview_on = False
         root.update_idletasks()
         root.update()
         try:

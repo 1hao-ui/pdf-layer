@@ -135,6 +135,11 @@ FIT_TOLERANCE_PT = 2.0            # 估算所需高度允许的误差（pt）
 LINE_EST_PT = SIZE_DEFAULT_PT * LINE_RATIO   # 估算 answer_lines 用的行高 ≈ 22.94pt
 DEFAULT_INK = (16, 16, 18)        # 墨色（与 hwrender.INK 一致）
 
+# 语义硬换行标记，必须与 hwrender.HARD_BREAK 一致。
+# 作用：告诉渲染器「这里写完一句/算完一步，必须另起一行」。不能直接用 '\n'，
+# 因为 hwrender._paragraphs() 把单个 '\n' 当编辑器软换行合并掉。
+HARD_BREAK = "\u2028"
+
 
 # ======================================================================
 # 小工具
@@ -1277,12 +1282,14 @@ def estimate_line_count(text, width_pt, size_pt):
 
     基准：12.4pt 时一行约能写 ``rect宽 / 13.3`` 个汉字（来自渲染器实测；
     13.3pt 是 12.4pt 手写汉字的平均步进）。字号变化按比例换算。
+    语义硬换行标记（HARD_BREAK）与 '\\n' 一样，都算一次强制分行。
     """
     if not text:
         return 0
     chars_per_line = max(1.0, width_pt / (13.3 * size_pt / 12.4))
     total = 0
-    for para in str(text).split("\n"):
+    segmented = str(text).replace(HARD_BREAK, "\n")
+    for para in segmented.split("\n"):
         para = para.strip()
         if not para:
             continue
@@ -1385,21 +1392,120 @@ def humanize_answer(text):
     return "".join(out)
 
 
-def render_answers(spec, answers, out_pdf=None, out_png=None, page_model=None,
-                   seed=20261118, jitter=1.0):
-    """把答案手写排进 spec 的答题区并导出 PDF / PNG。
+# ---------------------------------------------------------------- 语义断行
+# 真人写作业不会把好几句、好几步计算连成一行：写完一句（句号/问号/叹号/
+# 分号）或算完一步（"= 22A" 之后转回汉字叙述）就会另起一行。
+# 之前 render_answers 只按列宽做最优换行，于是出现了「一句接一句挤满一整行、
+# 句号后继续写下一句」的机器感排版（用户反馈原话）。
+_SENT_END = set("。！？；…!?;")                 # 句末标点：写完必换行
+_CJK_PUNCT = set("，、：》）」』”’《「『“‘—～·,:")  # 句内标点：不断行，免得行首挂个逗号
+_CALC_UNITS = set("+-×÷/.%^()|√∑Ω℃")        # 算式里允许出现的符号
 
-    参数
-    ----
-    spec       : analyze() 的返回值（或 load_spec 读到的 layout）
-    answers    : {题号 或 id: 文本} 或 [{id/number, text}]
-    out_pdf    : 输出 PDF 路径（None 则只排版不落盘）
-    out_png    : 输出 PNG 预览路径（多页时只出第一个有答案的页）
-    page_model : 可注入 page_model 模块（默认按同目录导入）
-    seed/jitter: 手写笔迹参数，传给 symbols.make_han_hand
 
-    返回 (pdf_path, warnings, coverage_summary)；答案一个都没匹配到题目时
-    抛 ValueError（CLI/API 转成明确错误）。
+def _is_han(ch):
+    return "\u4e00" <= ch <= "\u9fff"
+
+
+def semantic_breaks(text):
+    """把答案按「句子写完 / 算式算完」切成硬换行行（用 HARD_BREAK 连接）。
+
+    保守规则（宁可少断，也别把句子切碎）：
+      1. 句末标点（。！？；… 及半角 !?;）之后断行，连续句末标点一并收进本行；
+      2. 只有出现 ``=`` 才算进入「计算式」：结果片段里已有数字/字母，
+         且紧接着转回汉字叙述时，才在结果后断行。
+         于是 "已知 U=220V，求 I" 不会被逗号劈开、"，求 I" 也不会单独成行；
+         而 "I=U/|Z|=...=22A 故…" 会在 22A 后另起一行。
+      3. 原文里的 ``\\n`` 也算一次换行（AI 常按步骤分行输出）；
+      4. ``$...$`` 公式内部的标点/等号不参与判断，分式不会被从中间劈开；
+      5. 去掉空行与首尾空白，连续换行合并为一个。
+    """
+    if not text:
+        return ""
+    s = str(text).replace("\r\n", "\n").replace("\r", "\n")
+    out, cur = [], []
+    in_math = False
+    calc = False          # 正处于 "= ..." 的计算结果片段
+    calc_body = False     # 片段里已出现数字/字母（避免 "=" 后直接跟汉字就断）
+    i, n = 0, len(s)
+
+    def flush():
+        line = "".join(cur).strip()
+        if line:
+            out.append(line)
+        cur.clear()
+
+    while i < n:
+        ch = s[i]
+        if ch == "$":
+            # 公式本身就是算式的一部分，收尾时把它算作「已有结果」
+            if in_math and calc:
+                calc_body = True
+            in_math = not in_math
+            cur.append(ch)
+            i += 1
+            continue
+        if in_math:
+            cur.append(ch)
+            i += 1
+            continue
+        if ch in ("\n", HARD_BREAK):
+            flush()
+            calc = calc_body = False
+            i += 1
+            continue
+        if ch in _SENT_END:
+            cur.append(ch)
+            i += 1
+            while i < n and s[i] in _SENT_END:
+                cur.append(s[i])
+                i += 1
+            flush()
+            calc = calc_body = False
+            continue
+        if ch == "=":
+            calc, calc_body = True, False
+            cur.append(ch)
+            i += 1
+            continue
+        if calc:
+            if _is_han(ch):
+                if calc_body:
+                    # 算式算完，转回汉字叙述 → 另起一行
+                    flush()
+                    calc = calc_body = False
+                    cur.append(ch)
+                    i += 1
+                    continue
+                calc = False
+            elif ch in _CJK_PUNCT:
+                # 标点结束算式，但不在标点前断行（别排出以标点开头的行）
+                calc = False
+                cur.append(ch)
+                i += 1
+                continue
+            else:
+                if ch.isalnum() or ch in _CALC_UNITS:
+                    calc_body = True
+                cur.append(ch)
+                i += 1
+                continue
+        cur.append(ch)
+        i += 1
+    flush()
+    return HARD_BREAK.join(x for x in out if x.strip())
+
+
+def _compose_answer_pages(spec, answers, page_model=None,
+                          seed=20261118, jitter=1.0):
+    """把答案排进 spec 的答题区，只构造 Page 对象（不落盘、不渲染位图）。
+
+    这是 render_answers / preview_pages 共用的排版内核：GUI 的实时预览
+    与 CLI / HTTP API 的导出因此走完全相同的字号、人性化与笔迹逻辑。
+
+    返回 (pm, pages_out, page_indices, warnings, coverage)：
+      pages_out   与 page_indices 一一对应（page_indices 是 spec.pages 下标，
+                  即 GUI 的当前页号；Page.bg_page 仍存源 PDF 页号）；
+      warnings    未去重的原始告警，调用方负责 _dedupe。
     """
     if not isinstance(spec, dict) or not isinstance(spec.get("pages"), list):
         raise ValueError("spec 结构不合法：需要含 pages 数组的作业页 spec")
@@ -1424,6 +1530,7 @@ def render_answers(spec, answers, out_pdf=None, out_png=None, page_model=None,
     kind = spec.get("kind") or ("pdf" if source.lower().endswith(".pdf")
                                 else "image")
     pages_out = []
+    page_indices = []
     coverage = {
         "spec_version": spec.get("version") or SPEC_VERSION,
         "questions": len(questions),
@@ -1436,7 +1543,7 @@ def render_answers(spec, answers, out_pdf=None, out_png=None, page_model=None,
         "scaled_ids": [],
         "warnings": [],
     }
-    for pg in spec.get("pages") or []:
+    for pg_i, pg in enumerate(spec.get("pages") or []):
         page_questions = [q for q in (pg.get("questions") or [])
                           if str(q.get("id")) in matches]
         if not page_questions:
@@ -1455,7 +1562,9 @@ def render_answers(spec, answers, out_pdf=None, out_png=None, page_model=None,
             page.bg_page = 0
         for i, q in enumerate(page_questions):
             qid = str(q.get("id"))
-            text = humanize_answer(matches[qid])
+            # 先人性化（220/10 → 分式），再按「句末 / 算式算完」切硬换行，
+            # 让每句话、每步计算各占一行，而不是挤成一整行。
+            text = semantic_breaks(humanize_answer(matches[qid]))
             rect = _rect_key(q.get("answer_rect") or [56, 120, 539, 300])
             size, line_pt, lines, need, fits = fit_answer_size(text, rect)
             if not fits:
@@ -1480,9 +1589,31 @@ def render_answers(spec, answers, out_pdf=None, out_png=None, page_model=None,
                 "fits": bool(fits),
             }
         pages_out.append(page)
+        page_indices.append(int(pg_i))   # spec.pages 下标 = GUI 的 self.page
 
     if not pages_out:
         raise ValueError("答案没有匹配到任何页面")
+    return pm, pages_out, page_indices, warnings, coverage
+
+
+def render_answers(spec, answers, out_pdf=None, out_png=None, page_model=None,
+                   seed=20261118, jitter=1.0):
+    """把答案手写排进 spec 的答题区并导出 PDF / PNG。
+
+    参数
+    ----
+    spec       : analyze() 的返回值（或 load_spec 读到的 layout）
+    answers    : {题号 或 id: 文本} 或 [{id/number, text}]
+    out_pdf    : 输出 PDF 路径（None 则只排版不落盘）
+    out_png    : 输出 PNG 预览路径（多页时只出第一个有答案的页）
+    page_model : 可注入 page_model 模块（默认按同目录导入）
+    seed/jitter: 手写笔迹参数，传给 symbols.make_han_hand
+
+    返回 (pdf_path, warnings, coverage_summary)；答案一个都没匹配到题目时
+    抛 ValueError（CLI/API 转成明确错误）。
+    """
+    pm, pages_out, _page_indices, warnings, coverage = _compose_answer_pages(
+        spec, answers, page_model=page_model, seed=seed, jitter=jitter)
     pdf_path = None
     if out_pdf:
         out_dir = os.path.dirname(os.path.abspath(out_pdf))
@@ -1506,6 +1637,35 @@ def render_answers(spec, answers, out_pdf=None, out_png=None, page_model=None,
     warnings = _dedupe([w for w in warnings if w])
     coverage["warnings"] = warnings
     return pdf_path, warnings, coverage
+
+
+def preview_pages(spec, answers, page_model=None, only_page=None,
+                  seed=20261118, jitter=1.0):
+    """「实时预览」内核：把答案手写叠加到作业页背景，纯内存、不写任何文件。
+
+    与 render_answers 共用 _compose_answer_pages 排版，再对需要的页调用
+    page_model.render_page() 得到整页位图（原 PDF 页作底图 + 手写作答层），
+    因此界面上看到的效果与最终导出的 PDF 完全一致，但完全不落盘。
+
+    参数
+    ----
+    only_page : 只渲染这个页下标（None 表示渲染所有有答案的页）；
+                答案覆盖率等统计仍按全量计算。
+
+    返回 (images, warnings, coverage)，images 为 {页下标: PIL.Image(RGB)}。
+    """
+    pm, pages_out, page_indices, warnings, coverage = _compose_answer_pages(
+        spec, answers, page_model=page_model, seed=seed, jitter=jitter)
+    images = {}
+    for page_idx, page in zip(page_indices, pages_out):
+        if only_page is not None and int(page_idx) != int(only_page):
+            continue
+        _, img = pm.render_page(page)
+        warnings.extend(list(getattr(page, "_warn", [])))
+        images[int(page_idx)] = img.convert("RGB")
+    warnings = _dedupe([w for w in warnings if w])
+    coverage["warnings"] = warnings
+    return images, warnings, coverage
 
 
 # ======================================================================
@@ -1546,7 +1706,9 @@ def save_spec(spec, path):
 
 __all__ = [
     "SPEC_VERSION", "QUESTION_RE", "analyze", "render_answers",
+    "preview_pages", "_compose_answer_pages",
     "questions_brief", "collect_crops", "format_spec", "normalize_answers",
     "fit_answer_size", "estimate_line_count", "estimate_answer_lines",
+    "humanize_answer", "semantic_breaks", "HARD_BREAK",
     "parse_question_number", "load_spec", "save_spec", "guess_kind",
 ]

@@ -43,6 +43,11 @@ PAGE_BOTTOM_PT = 676.0         # 触发降字号重排的底限（页码在 ~690
 
 NO_LINE_START = "，。；、：？！）》」』”’%,.;:?!)]}"
 NO_LINE_END = "（《「『“‘([{"
+# 语义硬换行标记（U+2028）：worksheet 用它表达「一句话/一步算式写完，必须另起一行」。
+# 不能复用 '\n' —— _paragraphs() 把单个 '\n' 当作编辑器软换行合并掉（见下方注释），
+# 句号后就算插了 '\n' 也会被拼回同一行。这个字符只在作答排版链路里出现，
+# 手写生成器里用户自己拖框排的文本不受影响。
+HARD_BREAK = "\u2028"
 _TILE_PAD = 6                   # 单字贴图四周的透明内边距（px），排版时不能算进字距
 _JITTER_INFLATE = 0.02          # 逐字扰动（缩放/位移/防重叠右推）平均把行宽撑大的比例
 _LINE_HEIGHT_DAMP = 0.80        # 超高行（分式/根号）额外高度的打折系数：
@@ -561,6 +566,11 @@ class Hand:
         行尾留下大片空白，还容易挤出只有两三个字的孤行——看起来很不自然。
         这里改为最小化「每行右侧空白量的平方和」，行宽自然趋于均匀，
         同时保留中文行首/行尾禁则。
+
+        HARD_BREAK 例外：那是上游（worksheet）标好的「语义硬换行」——
+        写完一句话、算完一步式子就必须另起一行。这类断点不再参与列宽
+        优化，段与段之间也**不插空行**（空一行反而不像手写作业）。
+        一个硬断行段内部仍照常按列宽做最优换行，长句子照样能折行。
         """
         px = self.size_pt * SCALE
         font = _ttf(self.font_path, int(round(px)))
@@ -568,11 +578,15 @@ class Hand:
         # 否则渲染出来会越过列宽（旧版就是因此每行右侧被裁掉约三成）。
         max_px = width_pt * SCALE / (1.0 + _JITTER_INFLATE * self.jitter)
         lines = []
-        for para in _paragraphs(text):
-            if not para.strip():
-                lines.append("")
+        chunks = text.split(HARD_BREAK) if HARD_BREAK in text else (text,)
+        for chunk in chunks:
+            if not chunk.strip():
                 continue
-            lines.extend(self._wrap_para(_tokenize(para), font, px, max_px))
+            for para in _paragraphs(chunk):
+                if not para.strip():
+                    lines.append("")
+                    continue
+                lines.extend(self._wrap_para(_tokenize(para), font, px, max_px))
         return lines
 
     def _wrap_para(self, tokens, font, px, max_px):
@@ -773,7 +787,8 @@ class Hand:
             self.size_pt = size_pt
         width_pt = width_pt or (PAGE_RIGHT_PT - PAGE_LEFT_PT)
         # 风格一致性护栏：多套字库覆盖不到正文时关掉循环，避免毛笔/硬笔混排
-        self._check_style_consistency(text)
+        # （硬换行标记只是排版控制符，不参与覆盖率统计，否则会误判成缺字）
+        self._check_style_consistency(text.replace(HARD_BREAK, ""))
         lines = self.wrap(text, width_pt)
         px = self.size_pt * SCALE
         font = _ttf(self.font_path, int(round(px)))
