@@ -6,6 +6,7 @@
 """
 import os
 
+ICON_PATH = os.path.normpath(os.path.join(SPECPATH, "..", "assets", "icon", "app.ico"))
 ROOT = r"C:\Users\a\Desktop\手写体生成器"
 APP = os.path.join(ROOT, "_refs", "pdf-layer")
 FONTS = os.path.join(ROOT, "字体输出")
@@ -31,5 +32,5 @@ a = Analysis([os.path.join(APP, "做题窗口.py")], pathex=[APP],
              datas=DATAS, hiddenimports=HIDDEN, noarchive=False)
 pyz = PYZ(a.pure)
 exe = EXE(pyz, a.scripts, a.binaries, a.datas, [],
-          name="ZTi智能做题助手", debug=False, strip=False, upx=False,
+          name="ZTi智能做题助手", icon=ICON_PATH, debug=False, strip=False, upx=False,
           console=False, onefile=True)

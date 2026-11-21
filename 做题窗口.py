@@ -396,6 +396,41 @@ def make_page_model_shim(overrides):
 # ======================================================================
 # 主窗口
 # ======================================================================
+def _icon_dirs():
+    """图标可能的位置：打包解压目录 / 源码目录 / exe 目录。"""
+    bases = []
+    mei = getattr(sys, "_MEIPASS", None)
+    if mei:
+        bases.append(mei)
+    bases.append(HERE)
+    bases.append(APP_BASE)
+    return [os.path.join(b, "assets", "icon") for b in bases if b]
+
+
+def _set_window_icon(root):
+    """窗口/任务栏图标：优先 PNG（Tk 8.6），失败再试 .ico。"""
+    for d in _icon_dirs():
+        for name in ("app_icon_256.png", "app_icon_64.png"):
+            p = os.path.join(d, name)
+            if os.path.exists(p):
+                try:
+                    img = tk.PhotoImage(file=p)
+                    root.iconphoto(True, img)
+                    root._zhi_icon = img      # 防止被 GC
+                    return True
+                except Exception:
+                    pass
+    for d in _icon_dirs():
+        p = os.path.join(d, "app.ico")
+        if os.path.exists(p):
+            try:
+                root.iconbitmap(default=p)
+                return True
+            except Exception:
+                pass
+    return False
+
+
 class WorksheetWindow:
     """做题窗口（独立 Tk 窗口；绝不 import/subprocess 生成器窗口）。"""
 
@@ -449,6 +484,7 @@ class WorksheetWindow:
         self._outname_custom = False
 
         root.title("ZTi 智能做题助手 · AI 作答 + 手写写回")
+        _set_window_icon(root)
         self._setup_window_geometry()
         self._build_ui()
         self._apply_widget_colors()

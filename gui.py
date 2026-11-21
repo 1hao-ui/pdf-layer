@@ -3352,8 +3352,8 @@ class App:
             flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
             if getattr(sys, "frozen", False):
                 # 打包版：同目录下单独的 AI 接口 exe
-                ai_exe = os.path.join(os.path.dirname(sys.executable),
-                                      "ZTiAI接口.exe")
+                _base = os.path.dirname(sys.executable)
+                ai_exe = os.path.join(_base, "ZTiAI接口.exe")
                 cmd = [ai_exe] if os.path.exists(ai_exe) else [sys.executable,
                                                                script]
             else:
@@ -3681,6 +3681,25 @@ class App:
 
 
 # ================================================================ 入口
+def _set_window_icon_gui(root):
+    """手写工具窗口图标（工作室 Z-W 标）。"""
+    bases = [getattr(sys, "_MEIPASS", ""), HERE]
+    for b in bases:
+        if not b:
+            continue
+        for name in ("app_icon_256.png", "app_icon_64.png"):
+            p = os.path.join(b, "assets", "icon", name)
+            if os.path.exists(p):
+                try:
+                    img = _tk.PhotoImage(file=p)
+                    root.iconphoto(True, img)
+                    root._zhi_icon = img
+                    return True
+                except Exception:
+                    pass
+    return False
+
+
 def _smoke_report(ok, text=""):
     """打包后没有控制台：把自检结果写到 exe 同目录的 smoke_result.txt。"""
     try:
@@ -3728,6 +3747,7 @@ def main(argv=None):
         print("没有 tkinter，无法启动图形界面。")
         return 1
     root = _tk.Tk()
+    _set_window_icon_gui(root)
     try:
         App(root)
     except Exception:
