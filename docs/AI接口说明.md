@@ -607,7 +607,7 @@ py -3 做题.py run 作业.pdf --answers answers.json --out out/手写作答.pdf
 做题模块的自测独立于 `ai_api.py --self-test`：
 
 ```powershell
-py -3 ..\..\_work\test_worksheet.py
+py -3 ..\..\归档\脚本\_work\test_worksheet.py
 ```
 
 它同时回归验证 `py -3 ai_api.py --self-test` 仍为 **28/28**。
