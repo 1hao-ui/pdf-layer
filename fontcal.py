@@ -22,10 +22,19 @@ ZTi-Sym 的符号实测只有汉字字高的 0.57–0.86 倍，不放大就会�
 """
 import json
 import os
+import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CAL_PATH = os.path.join(HERE, "fonts", "fontcal.json")
-GLYPH_CAL_PATH = os.path.join(HERE, "fonts", "fontcal_glyph.json")
+# 打包成 exe 后：数据在 sys._MEIPASS，fontcal.json 在 _MEIPASS/fonts，
+# 字库在 _MEIPASS/字体输出；此时 PROJECT_ROOT 取 _MEIPASS，
+# 这样 rel 键正好是「字体输出/ZTi-Han/pass1.ttf」，与校准表一致。
+_FROZEN = bool(getattr(sys, "frozen", False))
+_BASE = os.path.normpath(getattr(sys, "_MEIPASS", HERE)) if _FROZEN else HERE
+CAL_PATH = os.path.join(_BASE, "fonts", "fontcal.json")
+GLYPH_CAL_PATH = os.path.join(_BASE, "fonts", "fontcal_glyph.json")
+# 手写体生成器项目根（pdf-layer 上两级）：字体输出/ 下的新手写字库在这里。
+PROJECT_ROOT = _BASE if _FROZEN else os.path.normpath(
+    os.path.join(HERE, "..", ".."))
 
 REF_PX = 54
 SAMPLE = "相电压功率流生电的"          # CJK 样本
@@ -47,7 +56,43 @@ DEFAULTS = {
     "size_scale": 1.0,      # 字号缩放（乘到渲染字号上）
     "dy": 0.0,              # 垂直位移（px，正=下移）
     "dx": 0.0,              # 水平位移（px）
+    "adv_scale": 1.0,       # 前进宽度缩放：只影响字距，不改字形大小
 }
+
+
+def cal_key(path):
+    """校准表的键：项目内的字体用「项目相对路径」，否则用 basename。
+
+    为什么不能一律用 basename：ZTi-Han 和 ZTi-Sym 都有 pass1.ttf / pass2.ttf，
+    同名但字高完全不同（640 vs 500 units），用 basename 会互相串校准值，
+    汉字会被按符号的倍率放大。
+    """
+    if not path:
+        return ""
+    p = os.path.normpath(os.path.abspath(path))
+    try:
+        rel = os.path.relpath(p, PROJECT_ROOT)
+        if not rel.startswith(".."):
+            return rel.replace(os.sep, "/")
+    except Exception:
+        pass
+    return os.path.basename(p)
+
+
+def _lookup_keys(path):
+    """查表时要依次尝试的键：仓库布局 fonts/… → 项目相对路径 → basename。"""
+    keys = []
+    p = os.path.normpath(os.path.abspath(path)).replace(os.sep, "/")
+    i = p.find("/fonts/")
+    if i >= 0:
+        keys.append(p[i + 1:])          # 仓库内克隆：fonts/ZTi-*/passN.ttf
+    k = cal_key(path)
+    if k:
+        keys.append(k)
+    b = os.path.basename(path)
+    if b and b not in keys:
+        keys.append(b)
+    return keys
 
 
 def _specs(fonts):
@@ -130,7 +175,7 @@ def calibrate(fonts, base_font, save=True, rounds=3):
     for path, sample, h_ratio in _specs(fonts):
         if not os.path.exists(path):
             continue
-        key = os.path.basename(path)
+        key = cal_key(path)
         target_h = base["height"] * h_ratio
         if os.path.abspath(path) == os.path.abspath(base_font):
             table[key] = dict(DEFAULTS)
@@ -265,10 +310,19 @@ def glyph_scale_at(path, ch, px, target_h):
 
 
 def params_for(path):
-    """取某套字体的校准参数（缺失则用默认值 = 不校准）。"""
+    """取某套字体的校准参数（缺失则用默认值 = 不校准）。
+
+    先按「项目相对路径」查（区分 ZTi-Han/pass2 与 ZTi-Sym/pass2），
+    查不到再按 basename 查（兼容旧表）。
+    """
     if not path:
         return dict(DEFAULTS)
-    got = load().get(os.path.basename(path))
+    tab = load()
+    got = None
+    for k in _lookup_keys(path):
+        if k in tab:
+            got = tab[k]
+            break
     if not got:
         return dict(DEFAULTS)
     p = dict(DEFAULTS)
@@ -390,11 +444,14 @@ if __name__ == "__main__":
     if os.path.isdir(zti):
         fonts += [os.path.join(zti, n) for n in sorted(os.listdir(zti))
                   if n.endswith((".otf", ".ttf"))]
-    # 人手写符号字库（在项目外的「字体输出/ZTi-Sym」）
-    sym = os.path.normpath(os.path.join(repo, "..", "..", "字体输出", "ZTi-Sym"))
-    if os.path.isdir(sym):
-        fonts += [os.path.join(sym, n) for n in sorted(os.listdir(sym))
-                  if n.endswith((".otf", ".ttf")) and not n.startswith("ZTi-Sym-推荐")]
+    # 人手写符号字库：仓库内 fonts/ZTi-Sym/ 优先，其次项目外的「字体输出/ZTi-Sym」
+    for sym in (os.environ.get("ZTISYM_DIR", ""),
+                os.path.join(repo, "fonts", "ZTi-Sym"),
+                os.path.normpath(os.path.join(repo, "..", "..", "字体输出", "ZTi-Sym"))):
+        if sym and os.path.isdir(sym):
+            fonts += [os.path.join(sym, n) for n in sorted(os.listdir(sym))
+                      if n.endswith((".otf", ".ttf")) and not n.startswith("ZTi-Sym-推荐")]
+            break
     if os.path.exists(base):
         fonts = [base] + [p for p in fonts if os.path.abspath(p) != os.path.abspath(base)]
 

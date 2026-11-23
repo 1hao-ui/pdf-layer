@@ -4,7 +4,7 @@
   "ascii_sample": "0123456789",
   "ascii_height_ratio": 0.86,
   "base": "MaShanZheng-Regular-merged.ttf",
-  "note": "只做字号对齐；墨色/粗细/清晰度不校准",
+  "note": "只做字号对齐；墨色/粗细/清晰度不校准。键为「项目相对路径」时优先按路径匹配（见 fontcal.cal_key）。ZTi-Han 的 size_scale 按 --target 口径（symbol=与数字同高 / old=对齐马善政）。",
   "fonts": {
     "MaShanZheng-Regular-merged.ttf": {
       "size_scale": 1.0,
@@ -80,6 +80,30 @@
       "size_scale": 1.2654,
       "dy": 0.0,
       "dx": 0.5
+    },
+    "字体输出/ZTi-Han/pass1.ttf": {
+      "size_scale": 1.4902,
+      "adv_scale": 0.7192,
+      "dy": 0.0,
+      "dx": 0.0
+    },
+    "字体输出/ZTi-Han/pass2.ttf": {
+      "size_scale": 1.4902,
+      "adv_scale": 0.7192,
+      "dy": 0.0,
+      "dx": 0.0
+    },
+    "fonts/ZTi-Han/pass1.ttf": {
+      "size_scale": 1.4902,
+      "adv_scale": 0.7192,
+      "dy": 0.0,
+      "dx": 0.0
+    },
+    "fonts/ZTi-Han/pass2.ttf": {
+      "size_scale": 1.4902,
+      "adv_scale": 0.7192,
+      "dy": 0.0,
+      "dx": 0.0
     }
   }
 }

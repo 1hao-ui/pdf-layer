@@ -28,6 +28,12 @@ SCALE = 4                      # 1pt = 4px
 # 手写字要比印刷正文大一号：真人很难把字写得跟印刷体一样小、一样匀。
 # 13.5pt 偏大（整段占页太多、符号也跟着变大），12.4pt 是「明显大于印刷体」又不夸张的值。
 DEFAULT_SIZE_PT = 12.4
+
+# 数字/拉丁/希腊字形（来自 ZTi-Sym 手写符号库）比汉字笔画略粗：
+# 实测同字号下笔宽 4.5px vs 汉字 4.0px（4x 画布），整段看起来「数字发黑」。
+# 渲染时对这类字形把 alpha 收边 SYMBOL_THIN px（4x 像素；0 = 关闭）。
+# 只影响非汉字（数字/拉丁/希腊），汉字、标点、公式层不动。
+SYMBOL_THIN = 1.0
 DEFAULT_LINE_PT = 23.0         # 行距保持约 1.85 倍字号
 INK = (16, 16, 18)             # 墨色 RGB：黑笔（alpha 逐字抖动）
 PAGE_LEFT_PT = 64.0
@@ -37,6 +43,11 @@ PAGE_BOTTOM_PT = 676.0         # 触发降字号重排的底限（页码在 ~690
 
 NO_LINE_START = "，。；、：？！）》」』”’%,.;:?!)]}"
 NO_LINE_END = "（《「『“‘([{"
+# 语义硬换行标记（U+2028）：worksheet 用它表达「一句话/一步算式写完，必须另起一行」。
+# 不能复用 '\n' —— _paragraphs() 把单个 '\n' 当作编辑器软换行合并掉（见下方注释），
+# 句号后就算插了 '\n' 也会被拼回同一行。这个字符只在作答排版链路里出现，
+# 手写生成器里用户自己拖框排的文本不受影响。
+HARD_BREAK = "\u2028"
 _TILE_PAD = 6                   # 单字贴图四周的透明内边距（px），排版时不能算进字距
 _JITTER_INFLATE = 0.02          # 逐字扰动（缩放/位移/防重叠右推）平均把行宽撑大的比例
 _LINE_HEIGHT_DAMP = 0.80        # 超高行（分式/根号）额外高度的打折系数：
@@ -58,7 +69,9 @@ _RAISE_EM = 0.38
 # 贴底标点：它们没有「字高」概念，只需坐在基线附近。
 # 不能参与逐字高度闭环——闭环会把它们放大，底边跟着上移，
 # 句号就会从底部浮到中间（用户反馈「句号没贴着底部」）。
-_BOTTOM_MARKS = "。，、．,.;:…·"
+# 全角中文标点（，。、；：？！…—～）也必须在这里：它们同样没有字高概念，
+# 若走「按回退字体同字高度缩放」会被老 ZTi 的小标点带偏（实测全角冒号缩到 9px）。
+_BOTTOM_MARKS = "。，、．,.;:…·；：？！—～－"
 
 # 纯文本里哪些字符改用公式渲染（与 $...$ 完全同源，保证粗细墨色一致）。
 # 汉字不走——公式引擎的汉字来自字体度量，和手写汉字库风格不搭。
@@ -99,6 +112,70 @@ _PHRASES = (
 )
 _SYM_CP = set(ord(c) for c in "Ωφω√≈∠²³·×−°θΔΣπ±≤≥≠∞→∘⌀")
 
+# ---- 汉字识别 / 基准字高 ----
+# 手写汉字字库（ZTi-Han 等）只覆盖有限字表，缺字时按 han_fallback_fonts 回退；
+# 回退字体与主字体的字高不同，需要一个「主字体汉字基准高」来对齐。
+_CJK_REF_SAMPLE = "相电压功率流生电的"     # 366 字表内的常用字，用于量主字体汉字高度
+
+
+def _is_plain_symbol(ch):
+    """是否为「数字/拉丁/希腊」字形（这些来自 ZTi-Sym，笔画偏粗，需要收边）。"""
+    return (ch.isascii() and ch.isalnum()) or ("\u0370" <= ch <= "\u03ff")
+
+
+def _thin_alpha_tile(img, amount):
+    """把 RGBA 贴图按「笔画粗细自适应」调细（与公式层同一套口径）。
+
+    只收粗笔画外沿；细笔画保持原样。amount：0=关闭，1=默认，越大越细。
+    """
+    if amount <= 0:
+        return img
+    try:
+        import numpy as np
+        from scipy import ndimage
+        from PIL import ImageFilter
+    except Exception:
+        return img
+    strength = max(0.5, float(amount) * 2.0)
+    a = np.asarray(img.getchannel("A")).astype(np.float32)
+    mask = a > 30
+    if not mask.any():
+        return img
+    dist = ndimage.distance_transform_edt(mask)
+    rad = ndimage.maximum_filter(dist, size=9)
+    thick = rad >= max(1.6, 2.4 - 0.4 * strength)
+    edge = (dist <= 1.4) & thick
+    factor = np.where(edge, max(0.35, 1.0 - 0.25 * strength), 1.0)
+    a2 = np.clip(a * factor, 0, 255)
+    blurred = np.asarray(Image.fromarray(a2.astype(np.uint8), "L")
+                         .filter(ImageFilter.GaussianBlur(0.5))).astype(np.float32)
+    a2 = np.minimum(a, blurred)
+    a2 = np.clip(a2 * 1.25, 0, 255)
+    out = img.copy()
+    out.putalpha(Image.fromarray(a2.astype(np.uint8), "L"))
+    return out
+
+
+def _is_cjk(ch):
+    """是否表意汉字（只认基本区：回退链/校准都只针对这些字）。"""
+    cp = ord(ch)
+    return 0x4E00 <= cp <= 0x9FFF or 0x3400 <= cp <= 0x4DBF
+
+
+def _is_cjk_punct(ch):
+    """全角中文标点/括号：本身占满字面或贴底，不能按「数字 0.86 倍」缩小。
+
+    这些字符在换用回退字体量高度时若乘 0.86，括号会缩成 36px（正常 44px）。
+    """
+    cp = ord(ch)
+    return (0x3000 <= cp <= 0x303F          # 、。〈〉《》「」【】〜
+            or 0xFF01 <= cp <= 0xFF20       # ！＂＃…＠（全角半区）
+            or 0xFF3B <= cp <= 0xFF40       # ［＼］＾＿｀
+            or 0xFF5B <= cp <= 0xFF65       # ｛｜｝～…
+            or 0x2018 <= cp <= 0x201F       # ‘’“”
+            or cp in (0x2013, 0x2014, 0x2026, 0x00B7))
+
+
 
 # ---------------------------------------------------------------- 字体管理
 _font_cache = {}
@@ -133,7 +210,9 @@ class Hand:
 
     def __init__(self, font_path, size_pt=DEFAULT_SIZE_PT, ink=INK,
                  jitter=1.0, seed=20261118, math_font_path=None,
-                 variant_fonts=None, symbol_font_path=None):
+                 variant_fonts=None, symbol_font_path=None,
+                 han_fallback_fonts=None, punct_ref_font=None,
+                 symbol_thin=SYMBOL_THIN):
         self.font_path = font_path
         self.size_pt = size_pt
         self.ink = ink
@@ -151,8 +230,37 @@ class Hand:
                 self.variant_fonts.append(p)
         self._char_seen = {}          # 字符 -> 已出现次数（决定下一次用哪套）
         self._cmap_cache = {}         # 字体路径 -> Unicode 覆盖集合
+        self._cjk_ref_cache = {}      # 字号 -> 主字体汉字基准墨迹高（px）
+        # 汉字缺字回退链：主字体（手写 366 字表）里没有的字，依次用这些字体补，
+        # 都补不到才回退到主字体（会渲染成空白/豆腐块，正常字表内的字不会走到这里）。
+        self.han_fallback_fonts = [p for p in (han_fallback_fonts or [])
+                                   if p and os.path.exists(p)]
+        # 中文标点/括号的大小参照字体（旧默认是马善政）。手写汉字库和符号库都
+        # 不含「同字不同套」的标点大小基准，括号若按回退字体量高度会缩水 20%；
+        # 传旧默认字体进来，标点大小就与接入前一致。
+        self.punct_ref_font = (punct_ref_font
+                               if punct_ref_font and os.path.exists(punct_ref_font)
+                               else None)
         self.symbol_font_path = symbol_font_path or self._pick_symbol_font(font_path)
+        # 数字/拉丁/希腊收边量（4x 像素）；0 = 原始粗细
+        self.symbol_thin = float(symbol_thin or 0.0)
         self._variants_active = True  # 风格一致性护栏，见 _check_style_consistency
+
+    def _with_fallback(self, ch, path):
+        """主字体缺字时换全字表字体（自写字库如 ZTi 只覆盖部分汉字）。
+
+        自写字库通常只覆盖正文用到的几十上百个字；拿它当主字体时，
+        未覆盖的字若直接渲染会得到 .notdef 豆腐块。这里统一回退到
+        symbol_font_path（全字表 *-merged 字体）。variants 激活时
+        _variant_for 已有同类回退，这里补上单套模式与度量路径的缺口。
+        """
+        c0 = self._cmap(path)
+        if c0 is not None and ord(ch) not in c0:
+            fb = self.symbol_font_path
+            fc = self._cmap(fb)
+            if fc is None or ord(ch) in fc:
+                return fb
+        return path
 
     def _pick_symbol_font(self, font_path):
         """挑一份「肯定含数学符号」的字体，供缺字时兜底。
@@ -276,35 +384,57 @@ class Hand:
         这样只保留笔迹差异，大小严格统一。
         """
         base = font_path or self._font_for(ch)
+        if _is_cjk(ch):                 # 只对汉字做缺字回退；标点/数字保持原路径
+            base = self._with_fallback(ch, base)
         cal = dict(fontcal.params_for(base))
+        is_cjk = _is_cjk(ch)
+        # 主字体自身可能有 size_scale（手写汉字库的字面只有 0.64 em，要放大到与
+        # 旧默认马善政体同样的观感大小）。量目标高度必须用「放大后」的字号，
+        # 否则闭环会把数字/符号的目标压小一圈。
+        main_scale = fontcal.params_for(self.font_path).get("size_scale", 1.0) or 1.0
+        # 两个参照字号，别混：
+        # · ref_cjk_px：主字体**实际渲染**的字号（汉字要和主字体自己的字高比）；
+        # · ref_px：旧默认（马善政，size_scale=1）的字号。数字/符号/标点的目标
+        #   高度一直是在这个字号下量的，换成新手写汉字后不能跟着放大 1.38 倍，
+        #   否则数字会比以前大一圈。
+        ref_cjk_px = max(4, int(round(px * main_scale)))
+        ref_px = max(4, int(round(px)))
 
-        # 目标高度：主字体在该字号下这个字的墨迹高 × 0.86
-        # （中文手写里数字/符号通常比汉字略小）
+        # 目标高度：基准字体在参照字号下这个字的墨迹高。
+        # 汉字 ×1.0；数字/符号 ×0.86（中文手写里数字通常比汉字略小）；标点 ×1.0。
         target_h = None
-        # 贴底标点不做高度闭环（闭环会把它放大并把底边抬离基线，
-        # 句号就会从底部浮到中间）。但仍按主字体的墨迹高度做一次
-        # 静态缩放，保证大小与主字体一致。
-        if base != self.font_path and ch not in _BOTTOM_MARKS:
+        ratio = (1.0 if (is_cjk or ch in _BOTTOM_MARKS or _is_cjk_punct(ch))
+                 else fontcal.ASCII_HEIGHT_RATIO)
+        # 贴底标点：不做高度闭环、也不改字号，直接用符号字库自己的校准字号。
+        # 闭环会把它放大并把底边抬离基线（句号会从底部浮到中间）；
+        # 按「回退字体里同一个标点」的高度去缩放又会被老 ZTi 的小标点带偏，
+        # 实测逗号会缩到 7px（正常 13–16px）。符号字库本来就是同一个人写的，
+        # 大小直接信它自己的 fontcal 即可。
+        if base != self.font_path and ch in _BOTTOM_MARKS:
+            pass
+        elif base != self.font_path:
             try:
-                # 目标 = 主字体在**当前渲染字号 px** 下这个字的墨迹高 × 0.86。
-                # 注意用 px 而不是 px*size_scale：主字体的 size_scale 恒为 1，
-                # 拿放大后的字号去量会把目标抬高，闭环就会收敛到偏大。
-                tgt = fontcal.ink_height_at(self.font_path, ch, max(4, int(round(px))))
+                if is_cjk:
+                    # 汉字：优先对齐主字体「同一个字」的高度；字表外的字主字体没有，
+                    # 就对齐主字体汉字中位高（回退字体只补字形，大小仍跟主字体一致）。
+                    tgt = fontcal.ink_height_at(self.font_path, ch, ref_cjk_px)
+                    if not tgt:
+                        tgt = self._cjk_ref_h(ref_cjk_px)
+                else:
+                    # 数字/符号：主字体（手写汉字库）通常不含这些字符，
+                    # 依次退到回退字体，在**旧默认字号**下量「同一个字」的高度作基准。
+                    # 中文标点/括号有专门的大小参照字体（旧默认字体）时优先用它，
+                    # 否则括号会比接入前小 20%（缩到 42px，正常 52px）。
+                    ref = (self.punct_ref_font if (_is_cjk_punct(ch)
+                                                   and self.punct_ref_font)
+                           else self._ref_font_for(ch))
+                    tgt = (fontcal.ink_height_at(ref, ch, ref_px)
+                           if ref is not None else None)
                 if tgt:
-                    target_h = tgt * 0.86
+                    target_h = tgt * ratio
                     cal["size_scale"] = cal["size_scale"] * fontcal.glyph_scale(base, ch)
             except Exception:
                 target_h = None
-        elif base != self.font_path and ch in _BOTTOM_MARKS:
-            # 贴底标点：只按墨迹高度做静态缩放，不闭环、不动位置
-            try:
-                ref_px = max(4, int(round(px)))
-                tgt = fontcal.ink_height_at(self.font_path, ch, ref_px)
-                cur = fontcal.ink_height_at(base, ch, ref_px)
-                if tgt and cur:
-                    cal["size_scale"] = cal["size_scale"] * (tgt / cur)
-            except Exception:
-                pass
 
         boost = 1.0
         tile = None
@@ -356,16 +486,25 @@ class Hand:
         d.text((pad - l, pad - t), ch, font=f, fill=p["rgb"] + (p["alpha"],))
         if abs(p["rot"]) > 0.05:
             img = img.rotate(p["rot"], resample=Image.BICUBIC, expand=True)
+        # 数字/拉丁/希腊：ZTi-Sym 的笔画比汉字略粗，这里收掉一点边
+        if self.symbol_thin > 0 and _is_plain_symbol(ch):
+            img = _thin_alpha_tile(img, self.symbol_thin)
         # 字形在「主字体 advance」内居中，避免字距忽紧忽松
         if cal["size_scale"] != 1.0:
             base_adv = _ttf(self.font_path, int(round(px))).getlength(ch)
             cur_adv = f.getlength(ch)
             if cur_adv > 0 and abs(cur_adv - base_adv) > 0.5:
                 l = l + (base_adv - cur_adv) / 2.0
-        # ox/oy 是「相对笔位」偏移，调用方用原始字号 ascent 去减；
-        # 上面 size 已乘过 size_scale，偏移要折回原始字号比例，否则字形整体下移。
-        sc = cal["size_scale"] if cal["size_scale"] > 0 else 1.0
-        return fontcal.finish_tile(img, (pad - l) / sc, (pad - t) / sc, cal)
+        # ox/oy 是「相对笔位」偏移，单位是**画布 px**：贴图是按渲染字号
+        # （可能乘过 size_scale）画出来的位图，贴回画布时是 1:1 像素，
+        # 不能再除以 size_scale（除过一次会让放大过的字库整体下沉：
+        # 实测汉字下沉 13px，行距被吃掉）。垂直方向按**基线对齐**：
+        # 主字体 ascent 与字形字体 ascent 的差要补回来，否则放大过的字库
+        # 因为 ascender 高于主字体而浮起来/沉下去。
+        asc_base = _ttf(self.font_path, max(4, int(round(px)))).getmetrics()[0]
+        asc_font = f.getmetrics()[0]
+        return fontcal.finish_tile(img, pad - l,
+                                   pad - t + (asc_font - asc_base), cal)
 
     def _font_for(self, ch):
         """拉丁字母/数字用「正常人笔写」的字体，汉字用毛笔手写体。
@@ -373,10 +512,51 @@ class Hand:
         马善政楷书的拉丁小写是连笔刷体（`a` 带大尾巴、`g` 是单层圈），
         正常人写不出来；龙藏体的拉丁是规整的硬笔写法，更像日常手写。
         所以正文里 ASCII 字母数字走 math_font_path，CJK 仍走 font_path。
+
+        汉字走手写字库时，字表外的字（入/总/部…）主字体没有，
+        按 han_fallback_fonts 依次回退，避免渲染成空白。
         """
         if ch.isascii() and ch.isalnum():
             return self.math_font_path
+        if _is_cjk(ch) and self.han_fallback_fonts:
+            ref = self._ref_font_for(ch)
+            if ref is not None:
+                return ref
         return self.font_path
+
+    def _ref_font_for(self, ch):
+        """量目标字高/取字形用的基准字体：主字体有这个字就用主字体，
+        没有就按回退链找到第一个有它的字体；全都没有返回 None。
+        """
+        c = self._cmap(self.font_path)
+        if c is None or ord(ch) in c:
+            return self.font_path
+        for fb in self.han_fallback_fonts:
+            fc = self._cmap(fb)
+            if fc is None or ord(ch) in fc:
+                return fb
+        return None
+
+    def _cjk_ref_h(self, px):
+        """主字体在给定字号下的汉字基准墨迹高（中位，px）。
+
+        用于缺字回退/变体字形对齐：手写汉字库不含拉丁/数字，
+        量不到「同一个字」的高度，就用主字体汉字的中位高当目标。
+        """
+        key = max(4, int(round(px)))
+        if key in self._cjk_ref_cache:
+            return self._cjk_ref_cache[key]
+        cm = self._cmap(self.font_path)
+        vals = []
+        for ch in _CJK_REF_SAMPLE:
+            if cm is not None and ord(ch) not in cm:
+                continue
+            h = fontcal.ink_height_at(self.font_path, ch, key)
+            if h:
+                vals.append(h)
+        val = sorted(vals)[len(vals) // 2] if vals else None
+        self._cjk_ref_cache[key] = val
+        return val
 
     # ------------------------------------------------------ 换行与标点悬挂
     def wrap(self, text, width_pt):
@@ -386,6 +566,11 @@ class Hand:
         行尾留下大片空白，还容易挤出只有两三个字的孤行——看起来很不自然。
         这里改为最小化「每行右侧空白量的平方和」，行宽自然趋于均匀，
         同时保留中文行首/行尾禁则。
+
+        HARD_BREAK 例外：那是上游（worksheet）标好的「语义硬换行」——
+        写完一句话、算完一步式子就必须另起一行。这类断点不再参与列宽
+        优化，段与段之间也**不插空行**（空一行反而不像手写作业）。
+        一个硬断行段内部仍照常按列宽做最优换行，长句子照样能折行。
         """
         px = self.size_pt * SCALE
         font = _ttf(self.font_path, int(round(px)))
@@ -393,11 +578,15 @@ class Hand:
         # 否则渲染出来会越过列宽（旧版就是因此每行右侧被裁掉约三成）。
         max_px = width_pt * SCALE / (1.0 + _JITTER_INFLATE * self.jitter)
         lines = []
-        for para in _paragraphs(text):
-            if not para.strip():
-                lines.append("")
+        chunks = text.split(HARD_BREAK) if HARD_BREAK in text else (text,)
+        for chunk in chunks:
+            if not chunk.strip():
                 continue
-            lines.extend(self._wrap_para(_tokenize(para), font, px, max_px))
+            for para in _paragraphs(chunk):
+                if not para.strip():
+                    lines.append("")
+                    continue
+                lines.extend(self._wrap_para(_tokenize(para), font, px, max_px))
         return lines
 
     def _wrap_para(self, tokens, font, px, max_px):
@@ -514,8 +703,16 @@ class Hand:
             except Exception:
                 pass
         path = self._font_for(ch)
-        scale = fontcal.params_for(path).get("size_scale", 1.0)
-        return _ttf(path, max(4, int(round(px * scale)))).getlength(ch)
+        # 缺字回退要与 _char_tile 一致：.notdef 只有 0.6em，按它量宽
+        # 会让含未覆盖字的行宽被低估，渲染后越出列宽。（只处理汉字，标点/数字保持原路径）
+        if _is_cjk(ch):
+            path = self._with_fallback(ch, path)
+        p = fontcal.params_for(path)
+        scale = p.get("size_scale", 1.0)
+        adv = _ttf(path, max(4, int(round(px * scale)))).getlength(ch)
+        # adv_scale 只收字距、不改字形：手写汉字库按整格等宽（advance=1000），
+        # 放大到马善政字高后字距会松得离谱，靠它把步进收回到正常字距。
+        return adv * p.get("adv_scale", 1.0)
 
     def _advance_formula(self, ch, px):
         """字符走公式渲染时的前进宽度。"""
@@ -534,10 +731,12 @@ class Hand:
         """
         if not font_path or os.path.abspath(font_path) == os.path.abspath(self.font_path):
             return self._advance(ch, px)
-        scale = fontcal.params_for(font_path).get("size_scale", 1.0)
+        p = fontcal.params_for(font_path)
+        scale = p.get("size_scale", 1.0)
         # 逐字校准可能再调一点，advance 要跟着
         scale *= fontcal.glyph_scale(font_path, ch)
-        return _ttf(font_path, max(4, int(round(px * scale)))).getlength(ch)
+        adv = _ttf(font_path, max(4, int(round(px * scale)))).getlength(ch)
+        return adv * p.get("adv_scale", 1.0)
 
     def _text_width(self, s, px):
         return sum(self._advance(ch, px) for ch in s)
@@ -588,7 +787,8 @@ class Hand:
             self.size_pt = size_pt
         width_pt = width_pt or (PAGE_RIGHT_PT - PAGE_LEFT_PT)
         # 风格一致性护栏：多套字库覆盖不到正文时关掉循环，避免毛笔/硬笔混排
-        self._check_style_consistency(text)
+        # （硬换行标记只是排版控制符，不参与覆盖率统计，否则会误判成缺字）
+        self._check_style_consistency(text.replace(HARD_BREAK, ""))
         lines = self.wrap(text, width_pt)
         px = self.size_pt * SCALE
         font = _ttf(self.font_path, int(round(px)))

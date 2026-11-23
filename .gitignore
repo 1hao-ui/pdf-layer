@@ -23,3 +23,9 @@ feedback.md
 # 例外：fonts/ZTi/ 是公开发布的「Z体」字库，必须入库
 !fonts/ZTi/
 !fonts/ZTi/**
+
+# auto-solve model key/config (local private, do not commit)
+llm.json
+
+# Single-file exe exceeds GitHub 100MB limit; publish as split 7z volumes
+发布/*.exe

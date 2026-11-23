@@ -22,6 +22,8 @@ import sys
 import threading
 from functools import lru_cache
 
+from PIL import Image
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 _VENDOR = os.path.join(HERE, "vendor")
 if _VENDOR not in sys.path:
@@ -35,6 +37,15 @@ _engine_key = None
 # 公式字号补偿系数：内核按 size_px 排出的主字符只有汉字的约 62% 高，
 # 乘 1.65 后与正文汉字齐平（实测 45px vs 45px @ 54px 字号）。
 MATH_SIZE_COMP = 1.65
+
+# 公式层字形调细：数字/拉丁/希腊与分式横线都走公式层，ZTi-Sym 的笔画比汉字略粗，
+# 整段里数字显得发黑。这里把位图 alpha 的低值端压掉（柔和收边，不产生锯齿），
+# 让数字/字母笔画与汉字接近。数值是 alpha 阈值：0 = 关闭，140 = 默认（比原件细一点）。
+# 可用环境变量 FORMULA_THIN_LEVEL 覆盖。
+try:
+    FORMULA_THIN_LEVEL = int(float(os.environ.get("FORMULA_THIN_LEVEL", "140")))
+except Exception:
+    FORMULA_THIN_LEVEL = 140
 
 # 是否把公式符号用 handstroke 二次笔迹化。
 # 符号来自手写字库时应为 False（保留原笔迹）；
@@ -127,6 +138,46 @@ def _ensure_engine(font_path, size_px, ink, math_font_path=None):
 
 
 
+def _thin_formula_image(img, level):
+    """按「笔画粗细自适应」调细公式位图。
+
+    用户反馈：数字整体偏粗，但简单地把 alpha 整体压低后，分式的分子/分母
+    和上下角标（字号更小、笔画本来就细）会变得特别淡。
+    所以这里只对**粗笔画**（局部笔画半径 ≥ 阈值）的外沿收一点边：
+      · 基准字号的数字/字母（粗）→ 视觉上细一档；
+      · 分式上下、上下角标（细）→ 完全不碰，保持原墨色。
+    level: 0 = 关闭；140 = 默认（≈2 档）；越大收得越多。
+    """
+    if img is None or img.mode != "RGBA" or level <= 0:
+        return img
+    try:
+        import numpy as np
+        from scipy import ndimage
+        from PIL import ImageFilter
+    except Exception:
+        return img
+    strength = max(0.5, float(level) / 70.0)        # 140 -> 2.0
+    a = np.asarray(img.getchannel("A")).astype(np.float32)
+    mask = a > 30
+    if not mask.any():
+        return img
+    dist = ndimage.distance_transform_edt(mask)
+    rad = ndimage.maximum_filter(dist, size=9)      # 局部笔画半径（px）
+    thick = rad >= max(1.6, 2.4 - 0.4 * strength)   # 只挑粗笔画
+    edge = (dist <= 1.4) & thick                    # 粗笔画的外沿
+    factor = np.where(edge, max(0.35, 1.0 - 0.25 * strength), 1.0)
+    a2 = np.clip(a * factor, 0, 255)
+    blurred = np.asarray(Image.fromarray(a2.astype(np.uint8), "L")
+                         .filter(ImageFilter.GaussianBlur(0.5))).astype(np.float32)
+    a2 = np.minimum(a, blurred)          # 不扩散到原墨迹之外（避免字高变大）
+    # 小字号（分式上下、上下角标）在缩略/打印时会因抗锯齿显得发灰：
+    # 整体补一点墨色（只加不超 255），让细笔画与主体一样清楚。
+    a2 = np.clip(a2 * 1.25, 0, 255)
+    out = img.copy()
+    out.putalpha(Image.fromarray(a2.astype(np.uint8), "L"))
+    return out
+
+
 def _box(latex, size_px, font_path, ink, math_font_path=None, display=False):
     """渲染公式：统一固定字号，不做逐公式的高度闭环。
 
@@ -137,6 +188,11 @@ def _box(latex, size_px, font_path, ink, math_font_path=None, display=False):
     """
     r = _ensure_engine(font_path, size_px, ink, math_font_path)
     box = _render_at(r, latex, size_px, MATH_SIZE_COMP, display)
+    if FORMULA_THIN_LEVEL > 0 and int(size_px) >= 44:
+        try:
+            box.image = _thin_formula_image(box.image, FORMULA_THIN_LEVEL)
+        except Exception:
+            pass
     return box
 
 

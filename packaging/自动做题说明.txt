@@ -1,0 +1,35 @@
+AI 自动做题 配置说明
+================================================
+
+"AI 自动作答"需要一个答题模型。支持任何 OpenAI 兼容接口
+（DeepSeek、OpenAI、通义/Kimi/GLM 兼容接口、本地 Ollama 都行），默认 DeepSeek。
+
+【最简单的配置方式：软件里点】
+  打开 ZTi智能做题助手.exe → 点工具栏"AI 设置"
+  → 填 接口地址 / 模型名 / API Key → 保存。
+  配置会存到程序目录的 llm.json（下次自动读取）。
+
+【也可以手动写 llm.json（放在 exe 同目录）】
+  {
+    "base_url": "https://api.deepseek.com/v1",
+    "api_key": "sk-你的Key",
+    "model": "deepseek-chat"
+  }
+
+【常见服务】
+  DeepSeek：base_url = https://api.deepseek.com/v1   model = deepseek-chat
+  OpenAI  ：base_url = https://api.openai.com/v1      model = gpt-4o-mini
+  Ollama  ：base_url = http://127.0.0.1:11434/v1     model = qwen2.5:7b（不需要 Key）
+
+【怎么用】
+  1. 打开作业页 → 自动划区；
+  2. 点"AI 自动作答"，等几秒，答案会填进每道题；
+  3. 你可以逐题检查/修改；
+  4. 确认后点"生成手写作答"，导出带手写答案的 PDF。
+
+【没有 Key 时】
+  不会报错崩溃：会提示你去"AI 设置"配置；
+  也可以把题目交给外部 AI（按 /worksheet/prompt 的提示词作答），
+  把答案存成 JSON，用"打开答案JSON"导入。
+
+注意：Key 是私密的，不要把 llm.json 发给别人或传到网上。
