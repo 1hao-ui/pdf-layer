@@ -33,7 +33,7 @@ GET  /llm/status         → 自动做题模型配置（脱敏）：是否已配
 --------
 · 默认只监听 127.0.0.1；没有鉴权，不要暴露到公网/局域网；
 · 读文件：只允许项目内文件，或用户显式传入且存在的普通文件；系统目录一律拒绝；
-· 写文件：只能写 _refs/pdf-layer/out/，文件名做 sanitize，不能带路径；
+· 写文件：只能写 源码/pdf-layer/out/，文件名做 sanitize，不能带路径；
 · 请求体上限、单次渲染超时、渲染串行化，单次失败返回 JSON 错误、服务不崩。
 
 依赖：Python 3.10+（实测 3.14）、Pillow、PyMuPDF、fontTools（stdlib 之外仅此）。
@@ -180,7 +180,7 @@ def _candidate_paths(path):
     """把用户传的路径展开成候选绝对路径。
 
     绝对路径只取自身；相对路径依次尝试「服务进程 cwd → 项目根目录 →
-    _refs/pdf-layer」，这样 GUI（cwd=pdf-layer）和脚本（cwd=项目根）都顺手。
+    源码/pdf-layer」，这样 GUI（cwd=pdf-layer）和脚本（cwd=项目根）都顺手。
     """
     p = os.path.expanduser(os.path.expandvars(str(path).strip()))
     if os.path.isabs(p):
@@ -208,7 +208,7 @@ def _resolve_read_file(path, allowed_exts=None, what="文件"):
     if found is None:
         found = candidates[0] if len(candidates) == 1 else candidates
         raise ApiError(404, "%s不存在：%s" % (what, found),
-                       hint="相对路径依次按服务进程 cwd、项目根目录、_refs/pdf-layer 解析")
+                       hint="相对路径依次按服务进程 cwd、项目根目录、源码/pdf-layer 解析")
     if not os.path.isfile(found):
         raise ApiError(400, "%s不是普通文件：%s" % (what, found))
     if allowed_exts:

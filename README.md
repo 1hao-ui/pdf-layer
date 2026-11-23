@@ -215,7 +215,7 @@ Z体 是作者本人手写笔迹的数字化成果，**版权归作者所有，�
 ## 图形界面（多段落 / 背景导入 / PDF 内书写）
 
 ```powershell
-cd _refs\pdf-layer
+cd 源码\pdf-layer
 py -3 gui.py          # 或双击 run_gui.bat
 ```
 
@@ -235,7 +235,7 @@ py -3 gui.py          # 或双击 run_gui.bat
 ## AI 接口（供 AI 调用这个工具）
 
 ```powershell
-cd _refs\pdf-layer
+cd 源码\pdf-layer
 py -3 ai_api.py                 # http://127.0.0.1:8321
 py -3 ai_api.py --self-test     # 28 项自测
 ```
@@ -262,7 +262,7 @@ py -3 ai_api.py --self-test     # 28 项自测
 **独立模块，不弹窗口**：命令行或 AI 接口驱动。
 
 ```powershell
-cd _refs\pdf-layer
+cd 源码\pdf-layer
 py -3 做题.py analyze 作业.pdf [--numbers "4.2.1,4.2.2,..."] --out layout.json
 py -3 做题.py answer 作业.pdf --layout layout.json --answers answers.json --out 手写作答.pdf
 py -3 做题.py run 作业.pdf --answers answers.json --out 手写作答.pdf

@@ -7,8 +7,11 @@
 import os
 
 ICON_PATH = os.path.normpath(os.path.join(SPECPATH, "..", "assets", "icon", "app.ico"))
-ROOT = r"C:\Users\a\Desktop\手写体生成器"
-APP = os.path.join(ROOT, "_refs", "pdf-layer")
+# 目录一律从 spec 自身位置推导：spec 在 <项目>/源码/pdf-layer/packaging/，
+# 上两级是仓库根，再上一级是项目根（字体输出/ 在那里）。
+# 不要再写死 C:\Users\... 之类的绝对路径——项目一挪就失效。
+APP = os.path.normpath(os.path.join(SPECPATH, os.pardir))
+ROOT = os.path.normpath(os.path.join(APP, os.pardir, os.pardir))
 FONTS = os.path.join(ROOT, "字体输出")
 
 DATAS = [

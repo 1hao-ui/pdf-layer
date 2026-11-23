@@ -1,0 +1,39 @@
+{
+  "style_note": "汉字 ZTi-Han 2 套 + 符号 ZTi-Sym 4 套加权",
+  "main_font": "pass2.ttf",
+  "math_font": "pass2.ttf",
+  "han_dir": "ZTi-Han",
+  "sym_dir": "ZTi-Sym",
+  "cal_han": {
+    "size_scale": 1.4902,
+    "dy": 0.0,
+    "dx": 0.0,
+    "adv_scale": 0.7192
+  },
+  "cal_sym": {
+    "size_scale": 1.2827,
+    "dy": 0.0,
+    "dx": 0.25,
+    "adv_scale": 1.0
+  },
+  "text": {
+    "w": 315.5,
+    "h": 46.0,
+    "size": [
+      1262,
+      184
+    ],
+    "mode": "RGBA",
+    "sha": "782bbaf183bc9e8ba0abcd59a3472325cf8051b706c0e41d5f7b4fffa0450ba1"
+  },
+  "formula": {
+    "w": 354.5,
+    "h": 29.25,
+    "size": [
+      1418,
+      117
+    ],
+    "mode": "RGBA",
+    "sha": "dfaf3d9b6ba65a469788ee4f5426e336112fb03c40c85bd32cc35ba83b201733"
+  }
+}

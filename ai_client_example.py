@@ -19,7 +19,7 @@
     POST /render        spec → PNG（写 out/ai_client_render.png）+ PDF
     POST /render_pdf    把答案叠加到刚生成的 PDF 上（写 out/ai_client_overlay.pdf）
 
-只依赖标准库 urllib；产物写在 _refs/pdf-layer/out/ 下。
+只依赖标准库 urllib；产物写在 源码/pdf-layer/out/ 下。
 """
 from __future__ import annotations
 

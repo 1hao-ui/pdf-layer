@@ -1,6 +1,6 @@
 # 手写体生成器 AI 接口说明（v1.0.0）
 
-> 适用文件：`_refs/pdf-layer/ai_api.py`、`ai_prompt.py`、`ai_client_example.py`
+> 适用文件：`源码/pdf-layer/ai_api.py`、`ai_prompt.py`、`ai_client_example.py`
 > 运行环境：Windows + `py -3`（Python 3.10+，实测 3.14）；除 Pillow / PyMuPDF / fontTools 外只用标准库。
 > 默认地址：`http://127.0.0.1:8321`（只监听本机）
 
@@ -32,7 +32,7 @@
 ### 1.1 启动服务
 
 ```powershell
-cd _refs\pdf-layer
+cd 源码\pdf-layer
 py -3 ai_api.py                     # http://127.0.0.1:8321
 py -3 ai_api.py --port 8322         # 换端口（GUI 按钮约定用 8321，别改）
 py -3 ai_api.py --host 127.0.0.1    # 默认值；不要改成 0.0.0.0（无鉴权）
@@ -46,7 +46,7 @@ py -3 ai_api.py --self-test         # 临时端口起服务，跑全部端点自
 [ai_api] 手写体 AI 接口 v1.0.0（handwrite-render）
 [ai_api] 服务已启动: http://127.0.0.1:8321
 [ai_api] 端点: GET /health  GET /capabilities  POST /render  /render_pdf  /prompt  /answer
-[ai_api] 文档: C:\Users\a\Desktop\手写体生成器\_refs\pdf-layer\docs\AI接口说明.md
+[ai_api] 文档: C:\Users\a\Desktop\手写体生成器\源码\pdf-layer\docs\AI接口说明.md
 [ai_api] 按 Ctrl+C 停止
 ```
 
@@ -60,7 +60,7 @@ py -3 ai_api.py --self-test         # 临时端口起服务，跑全部端点自
 ### 1.2 自测
 
 ```powershell
-cd _refs\pdf-layer
+cd 源码\pdf-layer
 py -3 ai_api.py --self-test
 ```
 
@@ -74,7 +74,7 @@ py -3 ai_api.py --self-test
 ### 1.3 示例客户端
 
 ```powershell
-cd _refs\pdf-layer
+cd 源码\pdf-layer
 py -3 ai_client_example.py                  # 连 127.0.0.1:8321；连不上会自动起临时服务演示
 py -3 ai_client_example.py --base http://127.0.0.1:8322
 py -3 ai_client_example.py --no-auto-start  # 强制要求已有服务
@@ -453,7 +453,7 @@ block = next(b for b in resp.content if b.type == "tool_use")
 这是**本机自用**接口，没有鉴权，设计上不对外网暴露：
 
 - **只听 127.0.0.1**（`--host` 默认值）。改成 `0.0.0.0` 会打印提示但仍然无鉴权，请勿在不可信网络这样做。
-- **读文件白名单**：允许项目目录（`手写体生成器\`）内任意存在的普通文件；项目外只允许用户显式传入且存在的普通文件；系统目录（`%SystemRoot%`、`Program Files`、`Program Files (x86)`、`ProgramData`）一律 403。相对路径依次按「服务进程 cwd → 项目根目录 → `_refs/pdf-layer`」解析。背景图/PDF 还会校验扩展名并尝试打开。
+- **读文件白名单**：允许项目目录（`手写体生成器\`）内任意存在的普通文件；项目外只允许用户显式传入且存在的普通文件；系统目录（`%SystemRoot%`、`Program Files`、`Program Files (x86)`、`ProgramData`）一律 403。相对路径依次按「服务进程 cwd → 项目根目录 → `源码/pdf-layer`」解析。背景图/PDF 还会校验扩展名并尝试打开。
 - **写文件只能落 `out/`**：`write=true` 时文件名只取 basename、非法字符替换为 `_`、扩展名强制为 `.png/.pdf`，不可能写到 `out/` 之外。
 - **不做磁盘缓存/不上传**：所有渲染在本机内存完成，不联网。
 - **大请求防护**：请求体 ≤ 8 MB；segments ≤ 80；渲染串行 + 30s 超时；单请求异常只影响该请求，服务继续运行。
@@ -497,7 +497,7 @@ A：自动排版给的高度是估算值；公式多/字号大时可能估少。
 A：用 `curl.exe`（不是 `curl` 别名）并写 `\"` 转义；或直接用 `ai_client_example.py` / Python 发请求；控制台先 `$env:PYTHONIOENCODING='utf-8'`。
 
 **Q8：GUI 怎么起这个服务？**
-A：用 `subprocess.Popen([sys.executable, "ai_api.py"])`，工作目录 `_refs/pdf-layer`；轮询 `GET /health` 直到 200 即就绪；停止时 `terminate()`。端口/参数保持默认（`--host 127.0.0.1 --port 8321`），不要改约定。
+A：用 `subprocess.Popen([sys.executable, "ai_api.py"])`，工作目录 `源码/pdf-layer`；轮询 `GET /health` 直到 200 即就绪；停止时 `terminate()`。端口/参数保持默认（`--host 127.0.0.1 --port 8321`），不要改约定。
 
 **Q9：能一次渲染很多段/多页吗？**
 A：当前一个请求只渲染**一页**（A4 或指定 PDF 页）。多页请按页循环调用 `/render` 或对多页 PDF 每页调 `/render_pdf`；单请求最多 80 段。
@@ -593,7 +593,7 @@ A：要。字表在进程内缓存（`allowed_charset()`），重启 `ai_api.py`
 ### 7.4 CLI 快速开始
 
 ```powershell
-cd _refs\pdf-layer
+cd 源码\pdf-layer
 py -3 做题.py analyze 作业.pdf --out out/作业_layout.json
 py -3 做题.py answer 作业.pdf --layout out/作业_layout.json ^
     --answers answers.json --out out/手写作答.pdf --png out/预览.png

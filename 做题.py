@@ -22,7 +22,7 @@
 analyze/run 时加 ``--numbers "4.2.1,4.2.2,..."``，答案文件就能按真实题号匹配。
 
 只依赖 Pillow / PyMuPDF / numpy / scipy（图片模式用），**不 import tkinter**，
-可以在服务器/脚本里无界面调用。产物默认写到 ``_refs/pdf-layer/out/``。
+可以在服务器/脚本里无界面调用。产物默认写到 ``源码/pdf-layer/out/``。
 """
 from __future__ import annotations
 
