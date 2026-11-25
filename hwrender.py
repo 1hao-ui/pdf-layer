@@ -181,16 +181,29 @@ def _is_cjk_punct(ch):
 _font_cache = {}
 
 
+def _registry_font(kind):
+    """注册表里当前启用的字库主字体（没有就返回 None）。"""
+    try:
+        from fontlib import registry
+        return registry.active_font(kind)
+    except Exception:
+        return None
+
+
 def _pick_math_font(font_path):
     """给公式挑一款拉丁字形更清楚的手写字体。
 
-    正文用的马善政楷书是连笔毛笔体，拉丁 `I` 会被读成 `9`；公式里 I（电流）极常见，
-    所以默认换成同目录下的龙藏体（同样 OFL、同样是手写），字形清楚得多。
-    找不到就退回正文字体。
+    现在符号/拉丁都来自作者亲笔的 ZTi-Sym（204 字含全部 ASCII），
+    公式优先用它；不再依赖任何第三方字体。找不到就退回正文字体。
     """
+    cand = _registry_font("sym")
+    if cand and os.path.exists(cand) \
+            and os.path.abspath(cand) != os.path.abspath(font_path):
+        return cand
     d = os.path.dirname(os.path.abspath(font_path))
-    for name in ("LongCang-Regular-merged.ttf", "LongCang-Regular.ttf"):
-        p = os.path.join(d, name)
+    for rel in ("ZTi-Sym/pass2.ttf", os.path.join("..", "..", "字体输出",
+                                                   "ZTi-Sym", "pass2.ttf")):
+        p = os.path.normpath(os.path.join(d, rel))
         if os.path.exists(p) and os.path.abspath(p) != os.path.abspath(font_path):
             return p
     return font_path
@@ -267,14 +280,18 @@ class Hand:
 
         用户手写/扫描的字库通常只覆盖正文那几十个字，不会去描 Ω √ ∑ 这类符号；
         若主字体和变体字体都缺符号，笔迹化拿不到轮廓，会渲染出豆腐块。
-        主字体若已是 *-merged.ttf（注入过符号）就直接用它，保持旧行为不变。
+        主字体若已含符号就直接用它；否则用注册表启用的符号库（ZTi-Sym，
+        作者亲笔）。第三方合并字体已全部移出字库。
         """
         c = self._cmap(font_path)
         if c is not None and all(ord(s) in c for s in "Ω√≈"):
             return font_path
-        for name in ("MaShanZheng-Regular-merged.ttf", "LongCang-Regular-merged.ttf",
-                     "ZhiMangXing-Regular-merged.ttf", "LiuJianMaoCao-Regular-merged.ttf"):
-            p = os.path.join(FONT_DIR, name)
+        cand = _registry_font("sym")
+        if cand and os.path.exists(cand):
+            return cand
+        for p in (os.path.join(FONT_DIR, "ZTi-Sym", "pass2.ttf"),
+                  os.path.normpath(os.path.join(
+                      FONT_DIR, "..", "..", "字体输出", "ZTi-Sym", "pass2.ttf"))):
             if os.path.exists(p):
                 return p
         return font_path

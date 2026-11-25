@@ -8,11 +8,11 @@ import os
 from PIL import Image, ImageDraw, ImageFont
 
 import hwrender as H
+import symbols
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "out")
 os.makedirs(OUT, exist_ok=True)
-FONT = os.path.join(HERE, "fonts", "MaShanZheng-Regular-merged.ttf")
 
 A4_W_PT, A4_H_PT = 595.0, 842.0
 SCALE = H.SCALE                     # 4x 超采样
@@ -56,7 +56,7 @@ def main():
         y += 20
 
     # 手写层
-    hand = H.Hand(FONT, size_pt=H.DEFAULT_SIZE_PT, seed=20261118)
+    hand = symbols.make_han_hand(size_pt=H.DEFAULT_SIZE_PT, seed=20261118)
     img, w_pt, h_pt = hand.render_block(TEXT, width_pt=404)
     print("手写块: %.1f x %.1f pt | 顶部 y=226pt | 底部 %.1f pt (页底限 676pt)"
           % (w_pt, h_pt, 226 + h_pt))

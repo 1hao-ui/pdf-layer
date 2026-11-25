@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""symbols.py — 自建手写字库（ZTi-Sym 符号 + ZTi-Han 汉字）接入层。
+"""symbols.py — 手写字库接入层（注册表 → 汉字库 + 符号库）。
 
 背景
 ----
@@ -7,23 +7,24 @@
 再用 `handstroke` 把轮廓骨架化成「笔道」。骨架化能去掉印刷感，但字形本身
 仍是印刷体，而且骨架提取对 ∑ ∏ ∫ 这类复杂字形会失败（实测切成 160+ 段碎片）。
 
-现在有两套**真人手写字库**，都来自同一个人的笔迹：
-  · ZTi-Sym（204 字：数字/拉丁/希腊/运算符/集合逻辑/标点/单位），写了 4 遍；
+现在字库全部是**作者本人笔迹**，由 `字体输出/字库索引.json` 注册：
+  · ZTi-Sym（204 字：数字/拉丁/希腊/运算符/集合逻辑/标点/单位），4 遍；
     4 套按权重轮换（pass1 潦草降频），同字异形，且不再骨架化。
-  · ZTi-Han（366 个汉字），写了 2 遍；pass2 为主字体、pass1 作同字异形。
-汉字库覆盖不到的汉字，由 hwrender 的 `han_fallback_fonts` 按
-「老 ZTi-Scan/otf → 龙藏 → 马善政」回退（按与 ZTi-Han 的风格接近程度排序），
-不会留豆腐块。
+  · ZTi-Han（500 个汉字），2 遍；pass2 为主字体、pass1 作同字异形。
+  · 用户用「字库工作台」自建的库（`fontlib/`），登记后同样可用。
+缺字只按「其它已启用亲笔库 → 老 ZTi」回退；**第三方字体已于 2026-11-25
+全部移出字库**，缺字会留空并由界面提示补写。
 
 用法
 ----
     from symbols import make_hand, make_han_hand
-    # 汉字走中文手写字体，符号走 ZTi-Sym 4 套加权（老用法）
-    hand = make_hand(size_pt=12.4, han_font="fonts/MaShanZheng-Regular-merged.ttf")
-    # 汉字走 ZTi-Han 2 套，符号走 ZTi-Sym 4 套加权（推荐、GUI 默认）
+    # 汉字走当前启用的汉字库，符号走 ZTi-Sym 4 套加权（推荐、GUI 默认）
     hand = make_han_hand(size_pt=12.4)
+    # 指定某个自建库（不改注册表的 active）
+    hand = make_han_hand(size_pt=12.4, library_id="my-hand")
     img, w, h = hand.render_block("线电压380V，∑P=52kW", width_pt=404)
     print(han_coverage_summary("线电压380V，∑P=52kW"))
+    print(missing_han_chars("线电压380V，∑P=52kW"))   # 缺哪些字，供补字用
 
 若字库目录不存在（例如只克隆了仓库、没拷字体输出目录），`make_hand` 和
 `make_han_hand` 都会自动退回普通 `hwrender.Hand`，不会崩。
@@ -32,6 +33,19 @@ import os
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def _registry_dir(kind):
+    """注册表里当前启用的字库目录（``字体输出/字库索引.json``）。
+
+    找不到注册表/没启用任何字库时返回空串，调用方继续走旧的目录候选，
+    保证「只拷了仓库没拷字库」也能用。
+    """
+    try:
+        from fontlib import registry
+        return registry.active_dir(kind) or ""
+    except Exception:
+        return ""
 
 # 打包成 exe 后（PyInstaller），数据目录在 sys._MEIPASS；字库随包放在
 # _MEIPASS/字体输出 与 _MEIPASS/fonts 下，这里统一给出候选目录。
@@ -52,9 +66,15 @@ WEIGHTS = {1: 1, 2: 3, 3: 2, 4: 2}
 
 
 def sym_dir():
-    """返回可用的符号字库目录；找不到返回 None。"""
-    for d in SYM_DIR_CANDIDATES:
-        if d and os.path.isdir(d) and os.path.exists(os.path.join(d, "pass2.ttf")):
+    """返回可用的符号字库目录；找不到返回 None。
+
+    优先级：注册表启用的符号库 → 环境变量 → 项目 ``字体输出/ZTi-Sym``
+    → 仓库内 ``fonts/ZTi-Sym``（兼容只拷了仓库的情形）。
+    """
+    for d in (_registry_dir("sym"),) + SYM_DIR_CANDIDATES:
+        if d and os.path.isdir(d) and any(
+                os.path.exists(os.path.join(d, "pass%d.ttf" % i))
+                for i in (1, 2, 3, 4)):
             return d
     return None
 
@@ -83,19 +103,20 @@ HAN_DIR_CANDIDATES = ((
     os.path.normpath(os.path.join(HERE, "..", "..", "字体输出", "ZTi-Han")),
     os.path.normpath(os.path.join(HERE, "fonts", "ZTi-Han")),
 ))
-# 汉字缺字回退：按「与 ZTi-Han 的书写风格接近程度」排序（style_fingerprint 实测
-# han 笔画宽 6.0 / 墨迹占比 0.108）：
-#   老 ZTi-Scan-01..04.ttf（0.83x / 0.71x，最像）→ 老 ZTi-01..04.otf
-#   → 龙藏合并字体（1.33x / 1.45x）→ 马善政合并字体（1.83x / 1.86x，毛笔，最后兜底）
+# 汉字缺字回退：注册表里其它已启用的汉字库（风格同源），再退到老 ZTi 亲笔库。
+# 第三方字体（龙藏/马善政/志莽行）已于 2026-11-25 全部移出字库，不再回退——
+# 缺字由「自建字库」补写，界面会提示缺哪些字并一键出模板。
 _OLD_ZTI_DIR = os.path.join(HERE, "fonts", "ZTi")
-_LONGCANG_FONT = os.path.join(HERE, "fonts", "LongCang-Regular-merged.ttf")
-_MASHAN_FONT = os.path.join(HERE, "fonts", "MaShanZheng-Regular-merged.ttf")
 _CMAP_CACHE = {}
 
 
 def han_dir():
-    """返回可用的汉字字库目录；找不到返回 None。"""
-    for d in HAN_DIR_CANDIDATES:
+    """返回可用的汉字字库目录；找不到返回 None。
+
+    优先级：注册表启用的汉字库 → 环境变量 → 项目 ``字体输出/ZTi-Han``
+    → 仓库内 ``fonts/ZTi-Han``。
+    """
+    for d in (_registry_dir("han"),) + HAN_DIR_CANDIDATES:
         if not d or not os.path.isdir(d):
             continue
         if any(os.path.exists(os.path.join(d, "pass%d.ttf" % i)) for i in (1, 2, 3, 4)):
@@ -134,25 +155,31 @@ def _han_variant_fonts():
             if os.path.abspath(p) != os.path.abspath(main)]
 
 
-def _han_fallback_fonts():
-    """汉字缺字回退链（顺序 = 与 ZTi-Han 的风格接近程度）。
+def _han_fallback_fonts(exclude_main=None):
+    """汉字缺字回退链：**只回退作者本人笔迹**。
 
-    老 ZTi-Scan-01..04.ttf → 老 ZTi-01..04.otf → 龙藏合并字体 → 马善政合并字体。
-    注：老 ZTi 的 137 字全部包含在 366 字表内，对覆盖率补 0；真正补缺字的
-    是龙藏/马善政，但顺序仍按风格排（链只用于主字体缺字时取字形）。
+    顺序：注册表里其它已启用的汉字库 → 老 ZTi-Scan/otf（作者亲笔，148 字）。
+    第三方字体已全部移出字库（2026-11-25）：缺字不再悄悄换成别人的字体，
+    而是由界面统计「缺哪些字」并用自建字库补写。
     """
     out = []
+    main = exclude_main or han_main_font()
+    try:
+        from fontlib import registry
+        for p in registry.fallback_fonts("han", exclude=main):
+            if p and os.path.exists(p):
+                out.append(p)
+    except Exception:
+        pass
     if os.path.isdir(_OLD_ZTI_DIR):
         names = [n for n in os.listdir(_OLD_ZTI_DIR)
                  if n.lower().endswith((".otf", ".ttf"))]
         # 扫描件（ZTi-Scan，最像）在前，其次 otf；各自按名字排序
         for n in sorted(names, key=lambda n: (0 if "scan" in n.lower() else 1, n)):
             p = os.path.join(_OLD_ZTI_DIR, n)
-            if os.path.exists(p):
+            if os.path.exists(p) and os.path.abspath(p) not in [
+                    os.path.abspath(x) for x in out]:
                 out.append(p)
-    for p in (_LONGCANG_FONT, _MASHAN_FONT):
-        if os.path.exists(p):
-            out.append(p)
     return out
 
 
@@ -258,19 +285,28 @@ def make_hand(han_font, size_pt=None, seed=20261118, weights=None,
 
 
 # ---------------------------------------------------------------- 汉字手写体
+def sym_main_font():
+    """符号主字体：pass2 优先。"""
+    passes = _passes()
+    if not passes:
+        return None
+    return passes.get(2) or passes[sorted(passes)[0]]
+
+
 def make_han_hand(size_pt=None, seed=20261118, jitter=1.0, ink=None,
-                  weights=None, han_fallback=True, **kwargs):
-    """构造「汉字 ZTi-Han 2 套 + 符号 ZTi-Sym 4 套加权」的全手写 Hand。
+                  weights=None, han_fallback=True, library_id=None, **kwargs):
+    """构造「汉字手写库 + 符号 ZTi-Sym 4 套加权」的全手写 Hand。
 
     参数
     ----
     size_pt    字号 pt；不传则用 hwrender.DEFAULT_SIZE_PT
     seed/jitter/ink  引擎参数（同 hwrender.Hand）
     weights    ZTi-Sym 4 套权重，默认 {1:1, 2:3, 3:2, 4:2}
+    library_id 指定用注册表里的某个汉字库（默认 = 当前启用的那个）
     han_fallback
-               True 时把「老 ZTi-Scan/otf → 龙藏 → 马善政合并字体」作为
-               `han_fallback_fonts` 传给引擎：汉字主字体缺字时按链回退
-               （顺序按与 ZTi-Han 的风格接近程度排，马善政字最全、最后兜底）。
+               True 时把「注册表里其它已启用的汉字库 → 老 ZTi 亲笔库」作为
+               `han_fallback_fonts` 传给引擎：汉字主字体缺字时按链回退。
+               缺字不再悄悄换成第三方字体。
     preserve_strokes（可选，经 **kwargs 传入）
                True（默认）关闭 handstroke 符号二次笔迹化，保留 ZTi-Sym 原笔迹。
     """
@@ -286,20 +322,35 @@ def make_han_hand(size_pt=None, seed=20261118, jitter=1.0, ink=None,
         except Exception:
             pass
 
-    main = han_main_font()
+    lib_name = "ZTi-Han"
+    if library_id:
+        try:
+            from fontlib import registry
+            lib = registry.get(library_id)
+            paths = registry.pass_paths(lib)
+            main = paths[0] if paths else None
+            han_variants = [p for p in paths[1:]
+                            if os.path.abspath(p) != os.path.abspath(main)]
+            if lib:
+                lib_name = lib.get("name") or lib.get("id") or lib_name
+        except Exception:
+            main, han_variants = None, []
+    else:
+        main = han_main_font()
+        han_variants = _han_variant_fonts()
+
     if not main:
-        # 没有自建汉字库：退回「马善政/老 ZTi + ZTi-Sym」的老路径，不能崩。
-        olds = [p for p in ([_MASHAN_FONT] + _han_fallback_fonts())
-                if os.path.exists(p)]
+        # 没有可用的汉字库：退到老 ZTi 亲笔库；再不行就用符号库兜底（不崩）。
+        olds = [p for p in _han_fallback_fonts() if os.path.exists(p)]
         if olds:
             return make_hand(olds[0], size_pt=size_pt, seed=seed, jitter=jitter,
                              ink=ink, weights=weights, **kwargs)
-        return H.Hand(_MASHAN_FONT, size_pt=size_pt or H.DEFAULT_SIZE_PT,
+        sym_any = next(iter(_passes().values()), None)
+        return H.Hand(sym_any or "", size_pt=size_pt or H.DEFAULT_SIZE_PT,
                       seed=seed, jitter=jitter, ink=ink or H.INK, **kwargs)
 
-    han_variants = _han_variant_fonts()
     passes = _passes()
-    sym_main = passes.get(2) or (passes[sorted(passes)[0]] if passes else None)
+    sym_main = sym_main_font()
 
     kw = dict(size_pt=size_pt or H.DEFAULT_SIZE_PT, seed=seed,
               jitter=jitter, ink=ink or H.INK)
@@ -308,13 +359,9 @@ def make_han_hand(size_pt=None, seed=20261118, jitter=1.0, ink=None,
         kw.setdefault("symbol_font_path", sym_main)
     kw.update(kwargs)
     if han_fallback:
-        fb = _han_fallback_fonts()
+        fb = _han_fallback_fonts(exclude_main=main)
         if fb and _hand_takes_han_fallback(H):
             kw.setdefault("han_fallback_fonts", fb)
-    # 中文标点/括号的大小参照：用接入前的旧默认字体（马善政），
-    # 否则括号会按回退字体变小一圈（实测 52px → 42px）。
-    if _hand_takes_param(H, "punct_ref_font") and os.path.exists(_MASHAN_FONT):
-        kw.setdefault("punct_ref_font", _MASHAN_FONT)
 
     w = dict(WEIGHTS if weights is None else weights)
     pool = []
@@ -322,9 +369,8 @@ def make_han_hand(size_pt=None, seed=20261118, jitter=1.0, ink=None,
         if i in passes:
             pool += [passes[i]] * max(0, int(w.get(i, 0)))
     if not pool:
-        # ZTi-Sym 不在时：数字/符号退回字体最全的合并字体（不轮换）
-        alt = next((p for p in ([_MASHAN_FONT] + _han_fallback_fonts())
-                    if os.path.exists(p)), None)
+        # 符号库不在时：数字/符号退回汉字回退链里的第一套（不轮换）
+        alt = next((p for p in _han_fallback_fonts() if os.path.exists(p)), None)
         if alt:
             kw.setdefault("math_font_path", alt)
             kw.setdefault("symbol_font_path", alt)
@@ -339,10 +385,11 @@ def make_han_hand(size_pt=None, seed=20261118, jitter=1.0, ink=None,
             self._sym_pool = list(pool)
             self._variants_active = True
             if n_sym:
-                self.style_note = ("汉字 ZTi-Han %d 套 + 符号 ZTi-Sym %d 套加权"
-                                   % (n_han, n_sym))
+                self.style_note = ("汉字 %s %d 套 + 符号 ZTi-Sym %d 套加权"
+                                   % (lib_name, n_han, n_sym))
             else:
-                self.style_note = "汉字 ZTi-Han %d 套（符号库缺失，已回退）" % n_han
+                self.style_note = "汉字 %s %d 套（符号库缺失，已回退）" % (
+                    lib_name, n_han)
 
         def _check_style_consistency(self, text, threshold=0.75):
             # 汉字、符号都出自同一人的笔迹，风格天然一致；不做覆盖率回退，
@@ -390,15 +437,30 @@ def make_han_hand(size_pt=None, seed=20261118, jitter=1.0, ink=None,
     return _HanHand()
 
 
-def han_coverage_summary(text):
-    """统计 text 里的汉字由 ZTi-Han 主字体覆盖的比例（短字符串，供 GUI 显示）。
+def missing_han_chars(text):
+    """text 里当前汉字库没有的字（去重、有序），供「补字模板」一键使用。"""
+    main = han_main_font()
+    if not main:
+        return []
+    cm = _font_cmap(main)
+    if cm is None:
+        return []
+    out = []
+    for c in (text or ""):
+        if _is_cjk(c) and ord(c) not in cm and c not in out:
+            out.append(c)
+    return out
 
-    例："汉字覆盖 90%（29/32，缺 入总部 回退）"——缺字会由 han_fallback_fonts
-    回退到老 ZTi / 马善政，所以不是空白，但需要提示用户哪些字不在自建字库里。
+
+def han_coverage_summary(text):
+    """统计 text 里的汉字由当前汉字库主字体覆盖的比例（短字符串，供 GUI 显示）。
+
+    例："汉字覆盖 90%（29/32，缺 入总部 回退）"——缺字会先按 han_fallback_fonts
+    回退到其它亲笔字库；都没有就不会再借用第三方字体，需要补写。
     """
     main = han_main_font()
     if not main:
-        return "汉字库 ZTi-Han 缺失，已退回老字体"
+        return "汉字库缺失，已退回老字体"
     chars = [c for c in (text or "") if _is_cjk(c)]
     if not chars:
         return "汉字覆盖 —（无汉字）"
@@ -413,17 +475,18 @@ def han_coverage_summary(text):
     s = "汉字覆盖 %.0f%%（%d/%d" % (100.0 * hit / len(chars), hit, len(chars))
     if miss:
         shown = "".join(miss[:12]) + ("…" if len(miss) > 12 else "")
-        s += "，缺 %s 回退" % shown
+        s += "，缺 %s 需补写" % shown
     return s + "）"
 
 
 if __name__ == "__main__":
     import sys
-    print("符号字库目录:", sym_dir() or "未找到")
+    print("汉字库目录:", han_dir() or "未找到")
+    print("符号库目录:", sym_dir() or "未找到")
     if not available():
         sys.exit(1)
     from PIL import Image
-    hand = make_hand(os.path.join(HERE, "fonts", "MaShanZheng-Regular-merged.ttf"))
+    hand = make_han_hand()
     print("Hand:", hand.style_note)
     txt = "线电压380V，√3≈1.732，∑P=52.1kW，θ=30°，η=95%，25℃"
     img, w, h = hand.render_block(txt, width_pt=404)

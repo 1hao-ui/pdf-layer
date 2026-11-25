@@ -5,11 +5,11 @@ import fitz
 from PIL import Image
 
 import hwrender as H
+import symbols
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.join(HERE, "out")
 os.makedirs(OUT, exist_ok=True)
-FONT = os.path.join(HERE, "fonts", "MaShanZheng-Regular-merged.ttf")
 
 TEXT = r"""4.3.5 解：图4.03中，三角形联结的$Z_b$与星形联结的$Z_a$并联接入线电压$380\,\mathrm{V}$的三相电源。
 星形部分：相电压$U_{\mathrm{相}}=\frac{380}{\sqrt{3}}\approx 220\,\mathrm{V}$，$|Z_a|=\sqrt{3^2+4^2}=5\,\Omega$，相电流$I=\frac{220}{5}=44\,\mathrm{A}$。
@@ -40,7 +40,7 @@ def make_page():
 def main():
     doc = make_page()
     page = doc[0]
-    hand = H.Hand(FONT, size_pt=H.DEFAULT_SIZE_PT, seed=20261118)
+    hand = symbols.make_han_hand(size_pt=H.DEFAULT_SIZE_PT, seed=20261118)
     img, w, h = hand.render_block(TEXT, width_pt=404)
     img.save(os.path.join(OUT, "block_raw.png"))
 

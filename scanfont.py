@@ -594,12 +594,15 @@ def cmd_selftest(args):
     k = args.dpi / 72.0
     W, H = int(PAGE_W * k), int(PAGE_H * k)
     fallback = "C:/Windows/Fonts/msyh.ttc"
-    # 用 4 款「规整可辨」的字体模拟 4 遍手写；草书体（刘建毛草/龙藏）会让
-    # 自测预览难以辨认，但那只影响演示观感，不影响脚本链路的正确性。
-    fonts = [os.path.join(HERE, "fonts", n) for n in (
-        "MaShanZheng-Regular-merged.ttf", "ZhiMangXing-Regular-merged.ttf")]
-    fonts += ["C:/Windows/Fonts/simkai.ttf", "C:/Windows/Fonts/simhei.ttf"]
-    fonts = [p for p in fonts if os.path.exists(p)] or [fallback]
+    # 用作者自己的 4 遍笔迹模拟 4 页扫描件（不再依赖第三方字体）。
+    fonts = []
+    try:
+        import symbols
+        fonts = [symbols.han_main_font()] + list(symbols._han_variant_fonts())
+        fonts += list(symbols._passes().values())
+    except Exception:
+        pass
+    fonts = [p for p in fonts if p and os.path.exists(p)] or [fallback]
     gray_ref = int(255 * 0.87)
 
     for p in range(1, 5):

@@ -4,21 +4,70 @@
   "ascii_sample": "0123456789",
   "ascii_height_ratio": 0.86,
   "base": "MaShanZheng-Regular-merged.ttf",
-  "note": "只做字号对齐；墨色/粗细/清晰度不校准。键为「项目相对路径」时优先按路径匹配（见 fontcal.cal_key）。ZTi-Han 的 size_scale 按 --target 口径（symbol=与数字同高 / old=对齐马善政）。",
+  "note": "只做字号对齐；键为「项目相对路径」。2026-11-25 清理：删掉第三方字体与passN 这类会串值的 basename 键；ZTi-Sym 改用路径键（数值不变）。",
   "fonts": {
-    "MaShanZheng-Regular-merged.ttf": {
-      "size_scale": 1.0,
+    "字体输出/ZTi-Han/pass1.ttf": {
+      "size_scale": 1.4902,
+      "adv_scale": 0.7192,
       "dy": 0.0,
       "dx": 0.0
     },
-    "LongCang-Regular-merged.ttf": {
-      "size_scale": 1.5145,
+    "字体输出/ZTi-Han/pass2.ttf": {
+      "size_scale": 1.4902,
+      "adv_scale": 0.7192,
       "dy": 0.0,
-      "dx": -1.0
+      "dx": 0.0
     },
-    "ZhiMangXing-Regular-merged.ttf": {
-      "size_scale": 1.15,
-      "dy": -1.5,
+    "fonts/ZTi-Han/pass1.ttf": {
+      "size_scale": 1.4902,
+      "adv_scale": 0.7192,
+      "dy": 0.0,
+      "dx": 0.0
+    },
+    "fonts/ZTi-Han/pass2.ttf": {
+      "size_scale": 1.4902,
+      "adv_scale": 0.7192,
+      "dy": 0.0,
+      "dx": 0.0
+    },
+    "字体输出/ZTi-Sym/pass1.ttf": {
+      "size_scale": 1.1389,
+      "dy": 0.0,
+      "dx": 0.0
+    },
+    "fonts/ZTi-Sym/pass1.ttf": {
+      "size_scale": 1.1389,
+      "dy": 0.0,
+      "dx": 0.0
+    },
+    "字体输出/ZTi-Sym/pass2.ttf": {
+      "size_scale": 1.2827,
+      "dy": 0.0,
+      "dx": 0.25
+    },
+    "fonts/ZTi-Sym/pass2.ttf": {
+      "size_scale": 1.2827,
+      "dy": 0.0,
+      "dx": 0.25
+    },
+    "字体输出/ZTi-Sym/pass3.ttf": {
+      "size_scale": 1.3512,
+      "dy": 0.0,
+      "dx": 0.5
+    },
+    "fonts/ZTi-Sym/pass3.ttf": {
+      "size_scale": 1.3512,
+      "dy": 0.0,
+      "dx": 0.5
+    },
+    "字体输出/ZTi-Sym/pass4.ttf": {
+      "size_scale": 1.2654,
+      "dy": 0.0,
+      "dx": 0.5
+    },
+    "fonts/ZTi-Sym/pass4.ttf": {
+      "size_scale": 1.2654,
+      "dy": 0.0,
       "dx": 0.5
     },
     "ZTi-01.otf": {
@@ -60,50 +109,6 @@
       "size_scale": 1.3529,
       "dy": -1.0,
       "dx": 9.5
-    },
-    "pass1.ttf": {
-      "size_scale": 1.1389,
-      "dy": 0.0,
-      "dx": 0.0
-    },
-    "pass2.ttf": {
-      "size_scale": 1.2827,
-      "dy": 0.0,
-      "dx": 0.25
-    },
-    "pass3.ttf": {
-      "size_scale": 1.3512,
-      "dy": 0.0,
-      "dx": 0.5
-    },
-    "pass4.ttf": {
-      "size_scale": 1.2654,
-      "dy": 0.0,
-      "dx": 0.5
-    },
-    "字体输出/ZTi-Han/pass1.ttf": {
-      "size_scale": 1.4902,
-      "adv_scale": 0.7192,
-      "dy": 0.0,
-      "dx": 0.0
-    },
-    "字体输出/ZTi-Han/pass2.ttf": {
-      "size_scale": 1.4902,
-      "adv_scale": 0.7192,
-      "dy": 0.0,
-      "dx": 0.0
-    },
-    "fonts/ZTi-Han/pass1.ttf": {
-      "size_scale": 1.4902,
-      "adv_scale": 0.7192,
-      "dy": 0.0,
-      "dx": 0.0
-    },
-    "fonts/ZTi-Han/pass2.ttf": {
-      "size_scale": 1.4902,
-      "adv_scale": 0.7192,
-      "dy": 0.0,
-      "dx": 0.0
     }
   }
 }

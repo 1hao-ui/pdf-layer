@@ -45,11 +45,10 @@ SAMPLE_ASCII = "0123456789"            # 数字样本（只含符号的字库用
 ASCII_HEIGHT_RATIO = 0.86
 
 # 只渲染 ASCII/符号的字体：必须用 ASCII 样本测，且不做垂直位移补偿
-# （数字要严格坐在基线上）。
+# （数字要严格坐在基线上）。这张表只用于「读不到 cmap 时」的兜底判断，
+# 现在优先按 cmap 里有没有汉字来判断，避免 ZTi-Han 与 ZTi-Sym 同名 passN 串味。
 ASCII_FONTS = (
-    "LongCang-Regular-merged.ttf",
     "pass1.ttf", "pass2.ttf", "pass3.ttf", "pass4.ttf",
-    "ZTi-Sym-推荐-pass2.ttf",
 )
 
 DEFAULTS = {
@@ -95,6 +94,20 @@ def _lookup_keys(path):
     return keys
 
 
+def _looks_ascii(path):
+    """字体里没有汉字 → 按符号字库处理（用 ASCII 样本、不做垂直补偿）。
+
+    比只看文件名可靠：ZTi-Han 和 ZTi-Sym 都有 pass2.ttf，按 basename 会把
+    汉字库当符号库标定。
+    """
+    try:
+        from fontTools.ttLib import TTFont
+        cm = TTFont(path).getBestCmap() or {}
+        return not any(0x4E00 <= cp <= 0x9FFF for cp in cm)
+    except Exception:
+        return os.path.basename(path) in ASCII_FONTS
+
+
 def _specs(fonts):
     """把字体列表规范成 (路径, 样本, 目标高度比例)。"""
     out = []
@@ -102,7 +115,7 @@ def _specs(fonts):
         if isinstance(item, tuple):
             out.append(item)
         else:
-            is_ascii = os.path.basename(item) in ASCII_FONTS
+            is_ascii = _looks_ascii(item)
             out.append((item,
                         SAMPLE_ASCII if is_ascii else SAMPLE,
                         ASCII_HEIGHT_RATIO if is_ascii else 1.0))
@@ -194,7 +207,7 @@ def calibrate(fonts, base_font, save=True, rounds=3):
 
         # 位置：ASCII 字库不做垂直补偿（数字严格坐基线）；
         # 其他字库按墨迹中心偏差补，让基线与主字体一致。
-        if sample is SAMPLE_ASCII or os.path.basename(path) in ASCII_FONTS:
+        if sample is SAMPLE_ASCII or _looks_ascii(path):
             c["dy"] = 0.0
         else:
             c["dy"] = round(base["dy"] - m["dy"], 3)
@@ -218,6 +231,33 @@ def calibrate(fonts, base_font, save=True, rounds=3):
 
 
 _cache = None
+# 预览用的临时校准值：{cal_key: params}，不落盘，params_for 优先查它。
+_overrides = {}
+
+
+def set_override(path, params):
+    """临时注入某套字体的校准值（效果预览用，不写 fontcal.json）。
+
+    键用**绝对路径**：预览的字体常在 out/ 下，按 basename 会和
+    ``字体输出/ZTi-Han/pass2.ttf`` 撞名，把预览值串到正式字库上。
+    """
+    _overrides[os.path.abspath(path)] = dict(params or {})
+    _cache_reset()
+
+
+def clear_override(path=None):
+    """清掉一套或全部临时校准值。"""
+    if path is None:
+        _overrides.clear()
+    else:
+        _overrides.pop(os.path.abspath(path), None)
+    _cache_reset()
+
+
+def _cache_reset():
+    global _cache, _glyph_cache
+    _cache = None
+    _glyph_cache = None
 
 
 def load():
@@ -317,6 +357,12 @@ def params_for(path):
     """
     if not path:
         return dict(DEFAULTS)
+    # 预览用的临时值优先（不写盘，退出/清 cache 即失效）
+    ov = _overrides.get(os.path.abspath(path))
+    if ov is not None:
+        p = dict(DEFAULTS)
+        p.update({kk: vv for kk, vv in ov.items() if kk in DEFAULTS})
+        return p
     tab = load()
     got = None
     for k in _lookup_keys(path):
