@@ -29,3 +29,6 @@ llm.json
 
 # Single-file exe exceeds GitHub 100MB limit; publish as split 7z volumes
 发布/*.exe
+
+# --smoke 自检产物（每次运行都会重写）
+smoke_*.txt

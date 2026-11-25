@@ -17,14 +17,14 @@
     "adv_scale": 1.0
   },
   "text": {
-    "w": 315.5,
+    "w": 278.75,
     "h": 46.0,
     "size": [
-      1262,
+      1115,
       184
     ],
     "mode": "RGBA",
-    "sha": "782bbaf183bc9e8ba0abcd59a3472325cf8051b706c0e41d5f7b4fffa0450ba1"
+    "sha": "7e6c922f3a66ed9d3b1252cfc2e0f2bb7a6f69e333795c76de921a75d30e90f2"
   },
   "formula": {
     "w": 354.5,
