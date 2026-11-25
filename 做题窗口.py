@@ -11,6 +11,7 @@
     1. 打开作业页（PDF / 图片）；
     2. 自动划题：调用 worksheet.analyze()，只显示题目列表和答题区高亮，**不渲染、不写文件**；
     3. 手动查看/修改答案（编辑框实时进内存，切题不丢），可改字号/对齐/答题区 4 个 pt 数值；
+       题目页没有留白时勾「答案写到新空白页」，生成时每页作业后插空白页写答案；
     4. **实时叠加预览**：AI 作答 / 编辑答案后自动把手写效果叠到作业页上（纯内存，
        防抖 + 后台线程 + 按答案签名缓存），不导出 PDF 也能看到最终效果；预览支持
        滚轮缩放、拖拽平移、适合窗口；
@@ -35,6 +36,7 @@ import queue
 import re
 import sys
 import threading
+import time
 import traceback
 from datetime import datetime
 
@@ -360,23 +362,36 @@ class _QuestionList(ttk.Frame):
 def make_page_model_shim(overrides):
     """构造一个可传给 worksheet.render_answers 的 page_model 代理。
 
-    overrides: 与「有答案的题目（按 spec 顺序）」一一对应的 [(size_pt, align), ...]；
-    size_pt 为 None 表示保留 worksheet 自动字号。排版/导出仍调用真正的 page_model。
+    overrides: {题目 id: (size_pt, align)}；size_pt 为 None 表示保留
+    worksheet 自动字号。worksheet 给每个段落挂了 ``_qid``，代理按题号
+    查表注入，因此空白答题页里一题拆成多段（续页）也不会错位。
+
+    兼容旧的「按顺序 pop」列表写法（list of (size, align)）。
     """
     import types
     import page_model as PM
 
-    queue = list(overrides or [])
+    if isinstance(overrides, dict):
+        table = dict(overrides)
+    else:
+        table = None
+        queue = list(overrides or [])
 
     class _Page(PM.Page):
         def add_paragraph(self, paragraph=None, **kw):
             p = super().add_paragraph(paragraph, **kw)
-            if not queue:
-                return p
-            try:
-                size, align = queue.pop(0)
-            except Exception:
-                return p
+            size = align = None
+            if table is not None:
+                try:
+                    size, align = table.get(str(getattr(p, "_qid", "")),
+                                            (None, None))
+                except Exception:
+                    size = align = None
+            elif queue:
+                try:
+                    size, align = queue.pop(0)
+                except Exception:
+                    size = align = None
             if size:
                 p.size_pt = float(size)
                 p.line_pt = round(float(size) * LINE_RATIO, 2)
@@ -389,6 +404,7 @@ def make_page_model_shim(overrides):
     mod.Paragraph = PM.Paragraph
     mod.export_pdf = PM.export_pdf
     mod.render_page = PM.render_page
+    mod.handwriting_layer = PM.handwriting_layer
     mod.SCALE = getattr(PM, "SCALE", 4)
     return mod
 
@@ -460,6 +476,7 @@ class WorksheetWindow:
         self.last_coverage = None
         self.generated_mode = False
         self._generated_img = None
+        self._generated_page = 0       # 生成预览对应的输出 PDF 页（空白页模式会偏移）
         self._page_cache = {}
         self._preview_img = None
         self._preview_photo = None
@@ -483,7 +500,7 @@ class WorksheetWindow:
         # ---- 输出路径（会话内记忆；窗口启动不写任何配置文件）----
         self._outname_custom = False
 
-        root.title("ZTi 智能做题助手 · AI 作答 + 手写写回")
+        root.title("ZTi 智能做题助手 v1.2 · AI 作答 + 手写写回")
         _set_window_icon(root)
         self._setup_window_geometry()
         self._build_ui()
@@ -883,6 +900,20 @@ class WorksheetWindow:
             style=self._style("card_muted", "Card.Muted.TLabel"))
         self.rect_hint.pack(side="left", padx=6)
 
+        # ---- 答案位置：原答题区 / 新插空白页（题目页没有留白时用）----
+        mode_row = ttk.Frame(parent, style=self._style("card", "Card.TFrame"))
+        mode_row.pack(fill="x", pady=(5, 0))
+        self.var_blank = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            mode_row, text="答案写到新空白页",
+            variable=self.var_blank,
+            command=self._on_answer_mode_change).pack(side="left")
+        self.blank_hint = ttk.Label(
+            mode_row,
+            text="勾选后：每页作业后插一页空白页写答案（题目页没留白时用）",
+            style=self._style("card_muted", "Card.Muted.TLabel"))
+        self.blank_hint.pack(side="left", padx=6)
+
         # ---- 输出文件：目录 + 文件名（默认时间戳，均可自定义）----
         out_row = ttk.Frame(parent, style=self._style("card", "Card.TFrame"))
         out_row.pack(fill="x", pady=(6, 0))
@@ -969,6 +1000,8 @@ class WorksheetWindow:
             parts.append("第 %d/%d 页" % (self.page + 1, max(1, len(pages))))
             parts.append("%d 题" % len(self.questions))
             parts.append("已填 %d 题" % self._filled_count())
+            if self._answer_mode() == worksheet.ANSWER_MODE_BLANK:
+                parts.append("空白页作答")
         else:
             parts.append("未打开作业页")
         try:
@@ -993,8 +1026,15 @@ class WorksheetWindow:
         try:
             if self.spec:
                 total = max(1, len(self.spec.get("pages") or []))
-                if self.generated_mode:
+                blank = self._answer_mode() == worksheet.ANSWER_MODE_BLANK
+                if self.generated_mode and blank:
+                    title = ("生成预览 · 输出第 %d 页（空白答题页）"
+                             % (int(getattr(self, "_generated_page", 0)) + 1))
+                elif self.generated_mode:
                     title = "生成预览 · 第 %d 页" % (self.page + 1)
+                elif blank and self.page in self._live_cache:
+                    title = ("实时预览 · 第 %d 页的空白答题页（答案已叠加，未保存）"
+                             % (self.page + 1))
                 elif (self.live_preview_on
                       and self.page in self._live_cache):
                     title = ("实时预览 · 第 %d/%d 页（答案已叠加，未保存）"
@@ -1085,6 +1125,7 @@ class WorksheetWindow:
         self.preview_png_path = None
         self.generated_mode = False
         self._generated_img = None
+        self._generated_page = 0
         self._page_cache = {}
         self._invalidate_live()
         if not getattr(self, "_outname_custom", False):
@@ -1192,6 +1233,9 @@ class WorksheetWindow:
             sub = "第%d页 · 答题区%d行 · %s" % (
                 int(q.get("page", 0)) + 1, int(q.get("answer_lines") or 0),
                 conf_txt)
+            if self._answer_mode() == worksheet.ANSWER_MODE_BLANK:
+                sub = "第%d页 · 空白答题页 · %s" % (
+                    int(q.get("page", 0)) + 1, conf_txt)
             items.append((title, sub))
         try:
             self.qlist.set_items(items, selected=self.current)
@@ -1257,10 +1301,14 @@ class WorksheetWindow:
                     self.var_rect[i].set("")
                 return
             qid = str(q.get("id"))
+            if self._answer_mode() == worksheet.ANSWER_MODE_BLANK:
+                where = "空白答题页"
+            else:
+                where = "答题区 %d 行" % int(q.get("answer_lines") or 0)
             self.cur_label.configure(
-                text="当前题：%s · 第 %d 页 · 答题区 %d 行" % (
+                text="当前题：%s · 第 %d 页 · %s" % (
                     q.get("number") or qid, int(q.get("page", 0)) + 1,
-                    int(q.get("answer_lines") or 0)))
+                    where))
             self.text_editor.delete("1.0", "end")
             self.text_editor.insert("1.0", self.answers.get(qid) or "")
             self.text_editor.edit_modified(False)
@@ -1361,6 +1409,34 @@ class WorksheetWindow:
         self._update_status()
         return True
 
+    # ------------------------------------------------------------ 答案位置
+    def _answer_mode(self):
+        """当前答案位置：inline（原答题区）/ blank（新插空白页）。"""
+        try:
+            if self.var_blank.get():
+                return worksheet.ANSWER_MODE_BLANK
+        except Exception:
+            pass
+        return worksheet.ANSWER_MODE_INLINE
+
+    def _on_answer_mode_change(self):
+        blank = self._answer_mode() == worksheet.ANSWER_MODE_BLANK
+        if blank:
+            self.log("答案位置：新空白页（生成时每页作业后插页；"
+                     "原页答题区数值不再生效）")
+        else:
+            self.log("答案位置：原页答题区")
+        # 换答案位置后旧的多页预览不再对应当前模式，回到实时叠加
+        self.generated_mode = False
+        self._generated_img = None
+        self._generated_page = 0
+        self._rebuild_question_views()
+        self._sync_editor_from_current()
+        self._invalidate_live()
+        self._redraw_canvas()
+        self._update_status()
+        self._schedule_live_preview(True, 60)
+
     # ------------------------------------------------------------ 页码 / 预览
     def _page_dims(self, page_idx):
         pages = (self.spec or {}).get("pages") or []
@@ -1443,7 +1519,8 @@ class WorksheetWindow:
                 [sorted((str(k), str(v)) for k, v in a.items()),
                  sorted((str(k), float(v)) for k, v in self.sizes.items()),
                  sorted((str(k), str(v)) for k, v in self.aligns.items()),
-                 sorted((k, v) for k, v in rects.items())],
+                 sorted((k, v) for k, v in rects.items()),
+                 self._answer_mode()],
                 ensure_ascii=False, sort_keys=True, default=str)
         except Exception:
             return repr(sorted(a.items()))
@@ -1492,8 +1569,7 @@ class WorksheetWindow:
         try:
             overrides = self._build_overrides(set(answers))
             shim = (make_page_model_shim(overrides)
-                    if any(s is not None or a is not None
-                           for s, a in overrides) else None)
+                    if overrides else None)
         except Exception:
             shim = None
         self._live_busy = True
@@ -1502,7 +1578,9 @@ class WorksheetWindow:
         def worker():
             try:
                 imgs, warns, cov = worksheet.preview_pages(
-                    spec, answers, page_model=shim, only_page=page_idx)
+                    spec, answers, page_model=shim, only_page=page_idx,
+                    answer_mode=self._answer_mode(),
+                    preferred_sizes=self.sizes)
                 self._live_queue.put((sig, imgs, warns, cov, None))
             except Exception as e:            # noqa: BLE001
                 self._live_queue.put((sig, {}, [], {}, e))
@@ -1714,23 +1792,34 @@ class WorksheetWindow:
             c.create_rectangle(ox, oy, ox + tw, oy + th,
                                outline=pal.get("border", "#E6E8EF"))
             if mode == "generated":
+                if self._answer_mode() == worksheet.ANSWER_MODE_BLANK:
+                    head = ("生成预览 · 输出第 %d 页（空白答题页）· %s"
+                            % (int(self._generated_page) + 1,
+                               os.path.basename(self.generated_path or "")))
+                else:
+                    head = ("生成预览 · %s（点「预览当前页」返回实时叠加）"
+                            % os.path.basename(self.generated_path or ""))
                 c.create_text(
-                    10, 8, anchor="nw",
-                    text="生成预览 · %s（点「预览当前页」返回实时叠加）"
-                         % os.path.basename(self.generated_path or ""),
+                    10, 8, anchor="nw", text=head,
                     fill=pal.get("muted", "#6B7280"),
                     font=(self.font_family, 9))
                 return
             if mode == "live":
+                blank = self._answer_mode() == worksheet.ANSWER_MODE_BLANK
+                if blank:
+                    head = ("实时叠加 · 空白答题页（第 %d 页的答案，"
+                            "生成时插在该页后）" % (self.page + 1))
+                else:
+                    head = ("实时叠加 · 已写入 %d 题答案（未保存，仅内存预览）"
+                            % self._filled_count())
                 c.create_text(
-                    10, 8, anchor="nw",
-                    text="实时叠加 · 已写入 %d 题答案（未保存，仅内存预览）"
-                         % self._filled_count(),
+                    10, 8, anchor="nw", text=head,
                     fill=pal.get("accent", "#4F6BED"),
                     font=(self.font_family, 9))
                 # 实时预览下只标当前题答题区（细虚线），不遮挡手写字迹
                 q = self._selected_question()
-                if q is not None and int(q.get("page") or 0) == self.page:
+                if (not blank and q is not None
+                        and int(q.get("page") or 0) == self.page):
                     rect = q.get("answer_rect") or []
                     if len(rect) == 4:
                         x0, y0 = self._page_to_screen(
@@ -1746,25 +1835,34 @@ class WorksheetWindow:
             pages = self.spec.get("pages") or []
             page_idx = min(self.page, max(0, len(pages) - 1))
             pw, ph = self._page_dims(page_idx)
-            for q in self.questions:
-                if int(q.get("page") or 0) != page_idx:
-                    continue
-                rect = q.get("answer_rect") or []
-                if len(rect) != 4:
-                    continue
-                x0, y0 = self._page_to_screen(
-                    rect[0], rect[1], page_idx, img, z, ox, oy)
-                x1, y1 = self._page_to_screen(
-                    rect[2], rect[3], page_idx, img, z, ox, oy)
-                cur = (self._selected_question() is not None
-                       and self._selected_question().get("id") == q.get("id"))
-                if cur:
-                    continue
-                c.create_rectangle(
-                    x0, y0, x1, y1,
-                    outline=pal.get("border_strong",
-                                    pal.get("border", "#D7DAE3")),
-                    dash=(4, 3), width=1)
+            blank = self._answer_mode() == worksheet.ANSWER_MODE_BLANK
+            if blank:
+                c.create_text(
+                    10, 24, anchor="nw",
+                    text="空白答题页模式：答案写到每页作业后新插的空白页，"
+                         "原页答题区不再使用",
+                    fill=pal.get("accent", "#4F6BED"),
+                    font=(self.font_family, 9))
+            else:
+                for q in self.questions:
+                    if int(q.get("page") or 0) != page_idx:
+                        continue
+                    rect = q.get("answer_rect") or []
+                    if len(rect) != 4:
+                        continue
+                    x0, y0 = self._page_to_screen(
+                        rect[0], rect[1], page_idx, img, z, ox, oy)
+                    x1, y1 = self._page_to_screen(
+                        rect[2], rect[3], page_idx, img, z, ox, oy)
+                    cur = (self._selected_question() is not None
+                           and self._selected_question().get("id") == q.get("id"))
+                    if cur:
+                        continue
+                    c.create_rectangle(
+                        x0, y0, x1, y1,
+                        outline=pal.get("border_strong",
+                                        pal.get("border", "#D7DAE3")),
+                        dash=(4, 3), width=1)
             q = self._selected_question()
             if q is not None and int(q.get("page") or 0) == page_idx:
                 qrect = q.get("rect") or []
@@ -1778,7 +1876,7 @@ class WorksheetWindow:
                         outline=pal.get("muted", "#6B7280"),
                         dash=(2, 2), width=1)
                 rect = q.get("answer_rect") or []
-                if len(rect) == 4:
+                if not blank and len(rect) == 4:
                     x0, y0 = self._page_to_screen(
                         rect[0], rect[1], page_idx, img, z, ox, oy)
                     x1, y1 = self._page_to_screen(
@@ -1967,18 +2065,43 @@ class WorksheetWindow:
         ttk.Entry(frm, textvariable=var_key, width=52, show="*").grid(
             row=5, column=0, sticky="we", pady=(0, 10))
         ttk.Label(frm, text="本地 Ollama 可免 Key：http://127.0.0.1:11434/v1",
-                  style="Muted.TLabel").grid(row=6, column=0, sticky="w")
+                  style="Muted.TLabel").grid(row=6, column=0, sticky="w",
+                                             pady=(0, 8))
+        limits = ttk.Frame(frm)
+        limits.grid(row=7, column=0, sticky="we", pady=(0, 8))
+        ttk.Label(limits, text="等待上限（秒）").pack(side="left")
+        var_timeout = tk.StringVar(value="%.0f" % float(
+            cfg.get("timeout") or 300))
+        ttk.Spinbox(limits, textvariable=var_timeout, from_=30, to=1800,
+                    increment=30, width=7).pack(side="left", padx=(4, 14))
+        ttk.Label(limits, text="最大输出 tokens").pack(side="left")
+        var_tokens = tk.StringVar(value=str(int(
+            cfg.get("max_tokens") or 8192)))
+        ttk.Spinbox(limits, textvariable=var_tokens, from_=1024, to=32768,
+                    increment=1024, width=8).pack(side="left", padx=(4, 0))
+        ttk.Label(frm, text="题多/难题时把等待上限和 tokens 调大，避免中途被截断",
+                  style="Muted.TLabel").grid(row=8, column=0, sticky="w")
         btns = ttk.Frame(frm)
-        btns.grid(row=7, column=0, sticky="e", pady=(10, 0))
+        btns.grid(row=9, column=0, sticky="e", pady=(10, 0))
 
         def save():
             try:
-                path = llm_client.save_config(var_base.get(), var_key.get(),
-                                              var_model.get())
+                timeout = float(var_timeout.get())
+                max_tokens = int(var_tokens.get())
+            except (TypeError, ValueError):
+                messagebox.showerror("数值不合法",
+                                     "等待上限要是秒数，最大输出要是整数 tokens",
+                                     parent=top)
+                return
+            try:
+                path = llm_client.save_config(
+                    var_base.get(), var_key.get(), var_model.get(),
+                    timeout=timeout, max_tokens=max_tokens)
             except Exception as e:
                 messagebox.showerror("保存失败", str(e), parent=top)
                 return
-            self.log("AI 配置已保存：%s" % path)
+            self.log("AI 配置已保存：%s（等待 %.0f 秒 / 最多 %d tokens）"
+                     % (path, timeout, max_tokens))
             messagebox.showinfo("已保存", "AI 配置已保存到：\n%s" % path,
                                 parent=top)
             top.destroy()
@@ -2014,24 +2137,50 @@ class WorksheetWindow:
                 self._dlg_ai_settings()
             return
         cfg = llm_client.public_config()
+        self._ai_started = time.monotonic()
+        self._ai_limit = float(cfg.get("timeout") or 300.0)
         self._set_busy(True, "AI 正在作答…（%s）" % cfg.get("model"))
-        self.log("AI 作答中：%s @ %s" % (cfg.get("model"), cfg.get("base_url")))
+        self.log("AI 作答中：%s @ %s（等待上限 %.0f 秒，最多 %s tokens）"
+                 % (cfg.get("model"), cfg.get("base_url"), self._ai_limit,
+                    cfg.get("max_tokens")))
 
         import queue
         import threading
 
         self._ai_queue = queue.Queue()
+        # 空白答题页模式下，提示词不再受原页那条「1 行答题区」限制
+        prompt_spec = self.spec
+        if self._answer_mode() == worksheet.ANSWER_MODE_BLANK:
+            prompt_spec = dict(self.spec)
+            prompt_spec["answer_mode"] = worksheet.ANSWER_MODE_BLANK
 
         def worker():
             try:
                 got = llm_client.solve_worksheet(
-                    self.spec, ai_prompt.worksheet_prompt(self.spec))
+                    prompt_spec, ai_prompt.worksheet_prompt(prompt_spec))
                 self._ai_queue.put((got, None))
             except Exception as e:                       # noqa: BLE001
                 self._ai_queue.put((None, e))
 
         threading.Thread(target=worker, daemon=True, name="ai-solve").start()
         self.root.after(80, self._ai_poll)
+        self.root.after(1000, self._ai_tick)
+
+    def _ai_tick(self):
+        """AI 作答期间每秒刷新一次已等待时间，避免用户以为程序卡死。"""
+        if getattr(self, "_ai_queue", None) is None:
+            return
+        try:
+            elapsed = time.monotonic() - self._ai_started
+            self.status_label.configure(
+                text="AI 正在作答… 已等待 %d 秒（上限 %.0f 秒，题多可在「AI 设置」调大）"
+                     % (int(elapsed), self._ai_limit))
+        except Exception:
+            pass
+        try:
+            self.root.after(1000, self._ai_tick)
+        except Exception:
+            pass
 
     def _ai_poll(self):
         """主线程轮询 AI 结果：跨线程只传 queue，避免 tkinter 线程安全问题。"""
@@ -2120,8 +2269,8 @@ class WorksheetWindow:
             self.generate(out_pdf=path)
 
     def _build_overrides(self, matched_ids):
-        """按 spec 顺序给出每道「有答案」题的字号/对齐覆盖。"""
-        overrides = []
+        """按题目 id 给出字号/对齐覆盖：{qid: (size|None, align|None)}。"""
+        overrides = {}
         for pg in (self.spec or {}).get("pages") or []:
             for q in pg.get("questions") or []:
                 qid = str(q.get("id"))
@@ -2132,8 +2281,9 @@ class WorksheetWindow:
                 custom_size = (size is not None
                                and abs(float(size) - DEFAULT_SIZE_PT) > 1e-6)
                 custom_align = (align in ("center", "right"))
-                overrides.append((float(size) if custom_size else None,
-                                  align if custom_align else None))
+                if custom_size or custom_align:
+                    overrides[qid] = (float(size) if custom_size else None,
+                                      align if custom_align else None)
         return overrides
 
     def generate(self, out_pdf=None, preview_png=None):
@@ -2165,10 +2315,11 @@ class WorksheetWindow:
         try:
             overrides = self._build_overrides(set(answers))
             shim = (make_page_model_shim(overrides)
-                    if any(s is not None or a is not None
-                           for s, a in overrides) else None)
+                    if overrides else None)
             pdf_path, warnings, coverage = worksheet.render_answers(
-                self.spec, answers, out_pdf=out_pdf, page_model=shim)
+                self.spec, answers, out_pdf=out_pdf, page_model=shim,
+                answer_mode=self._answer_mode(),
+                preferred_sizes=self.sizes)
         except Exception:
             tb = traceback.format_exc()
             self._set_busy(False)
@@ -2181,14 +2332,29 @@ class WorksheetWindow:
                  % (self.generated_path, coverage.get("answered", 0),
                     coverage.get("questions", 0),
                     100.0 * float(coverage.get("coverage") or 0.0)))
+        for src, outs in (coverage.get("blank_pages") or {}).items():
+            self.log("空白答题页：第 %d 页作业 → 输出第 %s 页"
+                     % (int(src) + 1,
+                        "、".join(str(int(x) + 1) for x in outs)))
         for w in warnings[:20]:
             self.log("[warning] " + str(w))
-        # 预览：渲染 PDF 里「第一道有答案的题」所在页
+        # 预览：渲染 PDF 里「第一道有答案的题」所在页；空白答题页模式下
+        # 要换算成插入后的输出页号（源页后面多了空白页）。
         preview_page = self._first_answered_page(answers)
+        out_page = preview_page
+        blank_map = (coverage or {}).get("blank_pages") or {}
+        try:
+            outs = (blank_map.get(preview_page)
+                    or blank_map.get(str(preview_page)) or [])
+            if outs:
+                out_page = int(outs[0])
+        except Exception:
+            out_page = preview_page
         self.page = preview_page
+        self._generated_page = int(out_page)
         try:
             self._generated_img = self._render_pdf_page_image(
-                self.generated_path, preview_page)
+                self.generated_path, out_page)
         except Exception:
             self._generated_img = None
             self.log("[warning] 生成预览失败：\n" + traceback.format_exc())
@@ -2238,6 +2404,11 @@ class WorksheetWindow:
 # 入口
 # ======================================================================
 def main(argv=None):
+
+    # === ZTi 授权校验（由 激活系统/tools/install_to_host.py 插入，勿手改）===
+    from zti_lic import require as _zti_require
+    _zti_require("ziti", ui="tk", argv=argv, app_version="1.2")
+    # === ZTi 授权校验结束 ===
     parser = argparse.ArgumentParser(
         prog="做题窗口.py",
         description="独立的做题窗口：打开作业页 → 自动划题 → 手改答案 → 手动生成手写作答")
@@ -2287,8 +2458,13 @@ def main(argv=None):
         app.load_source(args.ai_smoke, numbers=args.numbers)
         app.ai_solve()
         import time as _time
+        try:
+            import llm_client as _llm
+            _limit = float(_llm.config().get("timeout") or 300.0) + 30.0
+        except Exception:
+            _limit = 330.0
         t0 = _time.time()
-        while app._busy and _time.time() - t0 < 180:
+        while app._busy and _time.time() - t0 < _limit:
             root.update()
             _time.sleep(0.05)
         for _ in range(40):

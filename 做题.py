@@ -14,6 +14,10 @@
     # 3) analyze + answer 一步
     py -3 做题.py run 作业.pdf --answers answers.json --out out/手写作答.pdf
 
+    # 4) 题目页没有留白：答案写到每页作业后新插的空白页
+    py -3 做题.py answer 作业.pdf --layout layout.json --answers answers.json --blank-page
+    py -3 做题.py solve 作业.pdf --blank-page --out out/手写作答.pdf
+
 答案文件（answers.json）支持两种写法：
     {"1": "解：……", "2": "解：……"}          # 键 = 题号或 Q1 形式的 id
     [{"id": "Q1", "text": "解：……"}, ...]
@@ -87,13 +91,19 @@ def _cmd_analyze(args):
     return 0
 
 
-def _do_answer(source, spec, answers_path, out_pdf, out_png):
+def _do_answer(source, spec, answers_path, out_pdf, out_png, blank_page=False):
     answers = _load_json(answers_path, "答案文件")
+    mode = worksheet.ANSWER_MODE_BLANK if blank_page else None
     pdf_path, warnings, coverage = worksheet.render_answers(
-        spec, answers, out_pdf=out_pdf, out_png=out_png)
+        spec, answers, out_pdf=out_pdf, out_png=out_png, answer_mode=mode)
     print("\n作答结果：%d/%d 题有答案，整体覆盖率 %.0f%%"
           % (coverage["answered"], coverage["questions"],
              100.0 * coverage["coverage"]))
+    if coverage.get("answer_mode") == worksheet.ANSWER_MODE_BLANK:
+        print("答案位置：新插入的空白页（每页作业后）")
+        for src, outs in (coverage.get("blank_pages") or {}).items():
+            print("  第 %d 页作业 → 输出第 %s 页"
+                  % (int(src) + 1, "、".join(str(int(x) + 1) for x in outs)))
     for qid, info in coverage["sizes"].items():
         print("  %-8s 字号 %.1fpt  行距 %.1fpt  估算 %d 行  （可用 %.0fpt）%s"
               % (qid, info["size_pt"], info["line_pt"], info["lines_est"],
@@ -119,7 +129,8 @@ def _cmd_answer(args):
         spec["source"] = os.path.abspath(
             os.path.expanduser(os.path.expandvars(args.source)))
     out_pdf = args.out or _default_out(source, "_answered.pdf")
-    return _do_answer(source, spec, args.answers, out_pdf, args.png)
+    return _do_answer(source, spec, args.answers, out_pdf, args.png,
+                      blank_page=args.blank_page)
 
 
 def _cmd_run(args):
@@ -137,7 +148,8 @@ def _cmd_run(args):
         print(json.dumps(spec, ensure_ascii=False, indent=2))
     out_pdf = args.out or _default_out(args.source, "_answered.pdf")
     out_png = args.png or _default_out(args.source, "_answered.png")
-    return _do_answer(args.source, spec, args.answers, out_pdf, out_png)
+    return _do_answer(args.source, spec, args.answers, out_pdf, out_png,
+                      blank_page=args.blank_page)
 
 
 def _cmd_solve(args):
@@ -161,7 +173,11 @@ def _cmd_solve(args):
     if args.layout_out:
         print("\nlayout 已保存: %s" % worksheet.save_spec(spec, args.layout_out))
 
-    prompt = ai_prompt.worksheet_prompt(spec)
+    prompt_spec = spec
+    if args.blank_page:
+        prompt_spec = dict(spec)
+        prompt_spec["answer_mode"] = worksheet.ANSWER_MODE_BLANK
+    prompt = ai_prompt.worksheet_prompt(prompt_spec)
     if not llm_client.available():
         print("\n没有配置答题模型：设置 HANDWRITE_LLM_API_KEY（可选 "
               "HANDWRITE_LLM_BASE_URL / HANDWRITE_LLM_MODEL）后重试；")
@@ -170,7 +186,7 @@ def _cmd_solve(args):
         return 2
     print("\n调模型作答中…（%s）" % llm_client.public_config()["model"])
     try:
-        got = llm_client.solve_worksheet(spec, prompt, vision=args.vision)
+        got = llm_client.solve_worksheet(prompt_spec, prompt, vision=args.vision)
     except llm_client.LlmError as e:
         print("模型调用失败：%s" % e)
         if getattr(e, "hint", None):
@@ -186,7 +202,8 @@ def _cmd_solve(args):
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(got["answers"], f, ensure_ascii=False, indent=2)
         out_pdf = args.out or _default_out(source, "_AI作答.pdf")
-        code = _do_answer(source, spec, tmp, out_pdf, args.png)
+        code = _do_answer(source, spec, tmp, out_pdf, args.png,
+                          blank_page=args.blank_page)
         if args.answers_out:
             shutil.copyfile(tmp, args.answers_out)
             print("答案 JSON: %s" % args.answers_out)
@@ -250,6 +267,9 @@ def build_parser():
                       help="输出 PDF（默认 out/<作业名>_answered.pdf）")
     sp_b.add_argument("--png", default=None,
                       help="输出 PNG 预览（多页时只出第一个有答案的页）")
+    sp_b.add_argument("--blank-page", action="store_true",
+                      help="答案写到新插入的空白页（每页作业后插页），"
+                           "不写在原页答题区；适合只有题目、没有留白的作业页")
     sp_b.set_defaults(func=_cmd_answer)
 
     sp_c = sub.add_parser("run", help="analyze + answer 一步完成",
@@ -265,6 +285,8 @@ def build_parser():
     sp_c.add_argument("--layout-out", default=None,
                       help="顺便把 analyze 的 layout 存到该路径")
     sp_c.add_argument("--json", action="store_true", help="stdout 打印完整 spec JSON")
+    sp_c.add_argument("--blank-page", action="store_true",
+                      help="答案写到新插入的空白页（每页作业后插页）")
     sp_c.set_defaults(func=_cmd_run)
 
     sp_d = sub.add_parser("solve", help="自动做题：划题 → 调模型作答 → 手写作答 PDF",
@@ -282,6 +304,8 @@ def build_parser():
                       help="1/0：扫描件题干截图是否发给模型")
     sp_d.add_argument("--answers-out", default=None,
                       help="把模型给出的答案另存为 JSON（可手改后 answer）")
+    sp_d.add_argument("--blank-page", action="store_true",
+                      help="答案写到新插入的空白页（每页作业后插页）")
     sp_d.set_defaults(func=_cmd_solve)
     return p
 

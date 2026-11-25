@@ -1,8 +1,17 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""ZTi 智能做题助手打包 spec：
+"""ZTi 智能做题助手 v1.2 打包 spec：**单个 exe**。
 
-主程序 = 做题窗口（做题软件）；手写体生成器作为附带的「手写工具」；
-三个 exe 共享一份运行时（_internal）。
+1.2 起整个产品就是一个可执行文件：
+
+    ZTi智能做题助手.exe     做题窗口 + 内置手写渲染 + 授权校验
+
+不再打包的两个入口（源码仍保留，但不随发布包分发）：
+
+    gui.py       手写工具窗口。作者自用测试 / 另做单独产品用，本产品不需要。
+    ai_api.py    本地 AI 接口（HTTP 服务）。需要外部程序调用时用源码跑
+                 `py -3 ai_api.py`，普通用户用不到，软件内的 AI 自动作答不依赖它。
+
+历史：1.1 及以前打三个 exe、共享一份 _internal、各自独立授权。
 """
 import os
 
@@ -14,14 +23,34 @@ APP = os.path.normpath(os.path.join(SPECPATH, os.pardir))
 ROOT = os.path.normpath(os.path.join(APP, os.pardir, os.pardir))
 FONTS = os.path.join(ROOT, "字体输出")
 
+# ---------------------------------------------------------------------------
+# 手写字体：构建时加密，包里不放明文 TTF
+#
+# 字体是这个产品最核心的东西。以前直接把 `字体输出\ZTi-Han|ZTi-Sym\*.ttf`
+# 打进包，任何人拷走文件夹就能拿去 Word/Photoshop 用。
+# 现在构建时封存成一个加密块，运行时由 zti_lic.fonts 在**授权校验通过之后**
+# 解密还原到原位置——渲染链路一行不用改。
+# ---------------------------------------------------------------------------
+import sys as _sys
+import tempfile as _tempfile
+
+if APP not in _sys.path:
+    _sys.path.insert(0, APP)
+from zti_lic import fonts as _zfonts  # noqa: E402
+
+_SEAL_DIR = _tempfile.mkdtemp(prefix="zti_fontseal_")
+_SEALED = _zfonts.seal(
+    os.path.join(FONTS),
+    out_path=os.path.join(_SEAL_DIR, _zfonts.BLOB_NAME),
+)
+print("[ZTi] 字体已加密：%d 个文件 / %.2f MB -> %s"
+      % (_SEALED["files"], _SEALED["bytes"] / 1048576, _SEALED["path"]))
+
 DATAS = [
-    (os.path.join(FONTS, "ZTi-Han"), "字体输出/ZTi-Han"),
-    (os.path.join(FONTS, "ZTi-Sym"), "字体输出/ZTi-Sym"),
+    (_SEALED["path"], "字体输出"),
+    (os.path.join(FONTS, "字库索引.json"), "字体输出"),
     (os.path.join(APP, "fonts", "fontcal.json"), "fonts"),
     (os.path.join(APP, "fonts", "fontcal_glyph.json"), "fonts"),
-    (os.path.join(APP, "fonts", "LongCang-Regular-merged.ttf"), "fonts"),
-    (os.path.join(APP, "fonts", "MaShanZheng-Regular-merged.ttf"), "fonts"),
-    (os.path.join(APP, "fonts", "ZhiMangXing-Regular-merged.ttf"), "fonts"),
     (os.path.join(APP, "vendor"), "vendor"),
     (os.path.join(APP, "assets"), "assets"),
 ]
@@ -29,9 +58,17 @@ DATAS = [
 HIDDEN = [
     "mthw", "mthw.math_renderer", "mthw.handwriting", "mthw.config",
     "mthw.latex_parser",
+    # 字库注册表是延迟导入（symbols/hwrender 里才 import），显式列出
+    "fontlib", "fontlib.registry", "fontlib.charsets", "fontlib.template",
+    "fontlib.intake", "fontlib.autotune", "fontlib.builder", "fontlib.preview",
+    # 激活系统：guard 和 ui 之间是延迟导入，显式列出避免 PyInstaller 漏掉
+    "zti_lic", "zti_lic._ed25519", "zti_lic._pubkey", "zti_lic._b32", "zti_lic._fontkey", "zti_lic.fonts",
+    "zti_lic._console", "zti_lic._endpoint", "zti_lic.license",
+    "zti_lic.payload", "zti_lic.machine", "zti_lic.store", "zti_lic.trial",
+    "zti_lic.net", "zti_lic.activation", "zti_lic.guard", "zti_lic.ui",
 ]
 
-# 主程序：做题窗口（做题软件）
+# 唯一的主程序：做题窗口
 a_main = Analysis([os.path.join(APP, "做题窗口.py")], pathex=[APP],
                   datas=DATAS, hiddenimports=HIDDEN, noarchive=False)
 pyz_main = PYZ(a_main.pure)
@@ -39,23 +76,5 @@ exe_main = EXE(pyz_main, a_main.scripts, [],
                exclude_binaries=True, name="ZTi智能做题助手", icon=ICON_PATH,
                debug=False, strip=False, upx=False, console=False)
 
-# 附带工具：手写体生成器（GUI）
-a_gui = Analysis([os.path.join(APP, "gui.py")], pathex=[APP],
-                 datas=[], hiddenimports=HIDDEN, noarchive=False)
-pyz_gui = PYZ(a_gui.pure)
-exe_gui = EXE(pyz_gui, a_gui.scripts, [],
-              exclude_binaries=True, name="ZTi手写工具", icon=ICON_PATH,
-              debug=False, strip=False, upx=False, console=False)
-
-# AI 接口（给 AI/自动化调用，可不开）
-a_api = Analysis([os.path.join(APP, "ai_api.py")], pathex=[APP],
-                 datas=[], hiddenimports=HIDDEN, noarchive=False)
-pyz_api = PYZ(a_api.pure)
-exe_api = EXE(pyz_api, a_api.scripts, [],
-              exclude_binaries=True, name="ZTiAI接口", icon=ICON_PATH,
-              debug=False, strip=False, upx=False, console=True)
-
 coll = COLLECT(exe_main, a_main.binaries, a_main.datas,
-               exe_gui, a_gui.binaries,
-               exe_api, a_api.binaries,
                strip=False, upx=False, name="ZTi智能做题助手")

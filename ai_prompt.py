@@ -328,7 +328,12 @@ WORKSHEET_LINE_RATIO = 1.85           # 行距 = 字号 × 1.85
 
 
 def _worksheet_question_lines(spec):
-    """把 spec 的题目摊平成 [(题号, 文字, answer_lines, 每行字数, 总字数)]。"""
+    """把 spec 的题目摊平成 [(题号, 文字, answer_lines, 每行字数, 总字数)]。
+
+    answer_mode=blank 时答案写到新插的空白页上，不应再用原页那个可能只有
+    一两行的 answer_rect 限制 AI；这里按整页空白答题页的可写量给预算。
+    """
+    blank = str((spec or {}).get("answer_mode") or "").strip().lower() == "blank"
     out = []
     for pg in (spec or {}).get("pages") or []:
         for q in pg.get("questions") or []:
@@ -338,10 +343,18 @@ def _worksheet_question_lines(spec):
                 height = max(1.0, float(rect[3]) - float(rect[1]))
             except (TypeError, ValueError, IndexError):
                 width, height = 483.0, 180.0
-            lines = int(q.get("answer_lines") or 0)
-            if lines <= 0:
+            if blank:
+                page_w = float(pg.get("width_pt") or 595.0)
+                page_h = float(pg.get("height_pt") or 842.0)
+                width = max(120.0, page_w - 112.0)      # 空白页左右各 56pt
+                height = max(60.0, page_h - 104.0 - 8.0)  # 上 56 / 下 48
                 lines = max(1, int(height / (WORKSHEET_SIZE_PT *
                                              WORKSHEET_LINE_RATIO)))
+            else:
+                lines = int(q.get("answer_lines") or 0)
+                if lines <= 0:
+                    lines = max(1, int(height / (WORKSHEET_SIZE_PT *
+                                                 WORKSHEET_LINE_RATIO)))
             per_line = max(1, int(width / WORKSHEET_CHARS_PER_LINE_REF))
             out.append({
                 "number": str(q.get("number") or q.get("id") or ""),

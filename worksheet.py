@@ -11,7 +11,8 @@
    · 数字版 PDF：``page.get_text("dict")`` 取文字行，按题号正则识别题目块
      （支持 ``4.2.1`` 多级编号、``1.`` / ``（1）`` / ``一、``）；题干被换行时
      用行距把续行并入同一题；答题区 = 题目下方到下一题/页底之间的空白，并把
-     其中的横线识别为 ``answer_lines``；
+     其中的横线识别为 ``answer_lines``；页面里的插图（图片块）也会并进题目区，
+     答题区在插图前止步，不会把答案写在图上；
    · 图片/扫描件（以及没有文字层的 PDF 页）：numpy 行/列墨迹投影 +
      scipy.ndimage 连通域去噪；用「表头长横线 / 页脚居中页码」排除页眉页脚，
      用「首行缩进」判断题目起始行（换行续行并入同题）；没有文字层所以
@@ -23,6 +24,8 @@
    各题 ``answer_rect``；字号默认 12.4pt（不从大往小试，也不因区域大而放大），
    只有答案超过答题区高度时才逐步缩到 8pt；仍放不下只给 warning 不截断；
    导出叠加到原 PDF（原内容保留）或 PNG 预览。
+   ``answer_mode="blank"`` 时不写原页：每个作业页后插入空白答题页，答案按题
+   顺序排版（带题号），一题太长自动续页——适合「只有题目、没有留白」的作业页；
 3. ``load_spec / save_spec`` —— spec 的 JSON 读写。
 
 坐标统一为 pt（1pt = 1/72 英寸），页面坐标原点在左上角。
@@ -126,6 +129,13 @@ IMG_INDENT_MIN_RATIO = 0.6        # 判定「题目首行」的最小左缩进 =
 IMG_INDENT_MAX_RATIO = 6.0        # 缩进过大（右侧插图/图注）不算题目首行
 IMG_BODY_LEFT_PCT = 10            # 正文左边界取各文字行左边界的 10 分位
 
+# ---- 数字版 PDF 里的插图（文字层只报文字位置，插图同样占版面）
+IMG_BLOCK_MIN_W_PT = 12.0         # 小于该宽度的图按图标/噪点忽略
+IMG_BLOCK_MIN_H_PT = 8.0
+IMG_BLOCK_MIN_AREA_RATIO = 0.002  # 面积 < 页面 0.2% 的图忽略（logo/角标）
+IMG_BLOCK_FULL_PAGE_RATIO = 0.92  # 覆盖 ≥92% 页面的图按「整页扫描底图」忽略
+IMG_HEADER_SKIP_RATIO = 0.06      # 页眉/页脚区域的小图忽略
+
 # ---- 渲染
 SIZE_DEFAULT_PT = 12.4            # 答题默认字号（与 page_model/hwrender 默认一致）
 SIZE_STEP_PT = 0.5
@@ -134,6 +144,14 @@ LINE_RATIO = 1.85                 # 行距 = 字号 × 1.85
 FIT_TOLERANCE_PT = 2.0            # 估算所需高度允许的误差（pt）
 LINE_EST_PT = SIZE_DEFAULT_PT * LINE_RATIO   # 估算 answer_lines 用的行高 ≈ 22.94pt
 DEFAULT_INK = (16, 16, 18)        # 墨色（与 hwrender.INK 一致）
+
+# ---- 答案位置：原页答题区 / 新插入的空白页
+ANSWER_MODE_INLINE = "inline"     # 写回原页面的 answer_rect（默认）
+ANSWER_MODE_BLANK = "blank"       # 每页作业后插空白页写答案（题目页没有留白时用）
+BLANK_ANSWER_MARGIN_PT = 56.0     # 空白答题页左右留白
+BLANK_ANSWER_TOP_PT = 56.0
+BLANK_ANSWER_BOTTOM_PT = 48.0
+BLANK_ANSWER_GAP_PT = 18.0        # 两道题答案之间留白
 
 # 语义硬换行标记，必须与 hwrender.HARD_BREAK 一致。
 # 作用：告诉渲染器「这里写完一句/算完一步，必须另起一行」。不能直接用 '\n'，
@@ -318,6 +336,51 @@ def _pdf_text_lines(page):
     return lines
 
 
+def _pdf_image_rects(page, page_w, page_h):
+    """数字版 PDF 页里的插图矩形（pt，[l, t, r, b]）。
+
+    文字层只告诉你「哪里有字」；几何图、电路图、表格截图同样是题目内容，
+    却没有任何文字行。以前划区只看文字，答案就会直接盖在插图上。这里把
+    足够大的图片块收集起来，交给题目分块「并进题目区 / 让答题区止步」。
+
+    只过滤小图标、页眉 logo、页脚小图和整页扫描底图；规则偏保守——
+    宁可在个别页把插图当成题目内容，也不要漏掉真正的图。
+    """
+    rects = []
+    try:
+        blocks = page.get_text("dict").get("blocks") or []
+    except Exception:
+        return rects
+    page_area = max(1.0, float(page_w) * float(page_h))
+    for block in blocks:
+        if block.get("type") != 1:          # 1 = 图片块
+            continue
+        bbox = block.get("bbox")
+        if not bbox or len(bbox) != 4:
+            continue
+        try:
+            r = [float(v) for v in bbox]
+        except (TypeError, ValueError):
+            continue
+        w, h = r[2] - r[0], r[3] - r[1]
+        if w < IMG_BLOCK_MIN_W_PT or h < IMG_BLOCK_MIN_H_PT:
+            continue
+        if w * h < IMG_BLOCK_MIN_AREA_RATIO * page_area:
+            continue
+        if (w >= IMG_BLOCK_FULL_PAGE_RATIO * page_w
+                and h >= IMG_BLOCK_FULL_PAGE_RATIO * page_h):
+            continue                        # 整页扫描底图，交给图片模式
+        if r[3] <= IMG_HEADER_SKIP_RATIO * page_h:
+            continue                        # 页眉校徽/logo
+        if (r[1] >= (1.0 - IMG_HEADER_SKIP_RATIO) * page_h
+                and h < 0.12 * page_h):
+            continue                        # 页脚小图
+        rects.append([round(r[0], 1), round(r[1], 1),
+                      round(r[2], 1), round(r[3], 1)])
+    rects.sort(key=lambda rc: (rc[1], rc[0]))
+    return rects
+
+
 def _collect_gray_lines(page, page_w):
     """收集一页里的「水平横线」（含浅灰虚线），返回 [{y, x0, x1, gray}]。
 
@@ -388,9 +451,35 @@ def estimate_answer_lines(height_pt):
     return max(1, int((max(0.0, float(height_pt)) - 4.0) / LINE_EST_PT))
 
 
+def _trim_region_to_obstacles(top, bottom, obstacles, pad=2.0):
+    """把答题区 [top, bottom] 裁到不与插图重叠；图在中间时保留较大的一侧。"""
+    for _ in range(len(obstacles or []) + 2):
+        hit = None
+        for rect in obstacles or []:
+            if rect[3] <= top + 0.5 or rect[1] >= bottom - 0.5:
+                continue
+            hit = rect
+            break
+        if hit is None:
+            return top, bottom
+        ot, ob = hit[1], hit[3]
+        if ot <= top + 0.5:
+            top = ob + pad
+        elif ob >= bottom - 0.5:
+            bottom = ot - pad
+        elif (ob - top) >= (bottom - ot):
+            bottom = ot - pad
+        else:
+            top = ob + pad
+        if bottom <= top + 1.0:
+            return top, top
+    return top, bottom
+
+
 def _finalize_answer_regions(stubs, page_w, page_h, page_no, warnings,
                              lines_in=None, image_mode=False,
-                             content_left=0.0, content_right=None):
+                             content_left=0.0, content_right=None,
+                             obstacles=None):
     """给每个题目块定 answer_rect / answer_lines（就地修改 stubs）。
 
     规则：
@@ -398,6 +487,7 @@ def _finalize_answer_regions(stubs, page_w, page_h, page_no, warnings,
     · 若某题自然答题区 < MIN_ANSWER_H_PT（题目上下排布很紧，常见于扫描的
       教材/试卷页：题干都在页顶、下面是整片空白），则改为「整页空白区按题
       顺序从上往下分配」，这样答案不会压到下一题题干；
+    · obstacles（数字版 PDF 的插图矩形）参与避让：分配后再裁一次，答案不压图；
     · answer_lines：区域内有识别到横线 → 横线条数；否则按高度估算。
     """
     if not stubs:
@@ -433,7 +523,10 @@ def _finalize_answer_regions(stubs, page_w, page_h, page_no, warnings,
                             % (page_no + 1, max(0.0, total)))
         for i in range(len(stubs)):
             t = blank_top + i * (each + gap)
-            regions.append((t, t + each))
+            b = t + each
+            if obstacles:
+                t, b = _trim_region_to_obstacles(t, b, obstacles)
+            regions.append((t, b))
         if len(stubs) > 1:
             warnings.append(
                 "第 %d 页题目排布较紧，答题区改为按整页空白区顺序分配"
@@ -478,8 +571,13 @@ def _finalize_answer_regions(stubs, page_w, page_h, page_no, warnings,
 # ======================================================================
 # 数字版 PDF：题目块
 # ======================================================================
-def _pdf_question_stubs(lines, page_w, page_h, page_no, warnings):
-    """从一页的文字行里识别题目块（返回 stubs：rect/text/number/pad/limit）。"""
+def _pdf_question_stubs(lines, page_w, page_h, page_no, warnings,
+                        image_rects=None):
+    """从一页的文字行里识别题目块（返回 stubs：rect/text/number/pad/limit）。
+
+    image_rects 是 `_pdf_image_rects()` 找到的插图：紧随题干的插图会并进本题
+    的 rect，答题区的下边界也会在下一张插图前止步（答案不压图）。
+    """
     starts = [i for i, ln in enumerate(lines)
               if parse_question_number(ln["text"]) is not None]
     if not starts:
@@ -490,13 +588,15 @@ def _pdf_question_stubs(lines, page_w, page_h, page_no, warnings):
                            MAX_QUESTIONS_PER_PAGE))
         starts = starts[:MAX_QUESTIONS_PER_PAGE]
     start_set = set(starts)
+    image_rects = list(image_rects or [])
+    image_claimed = set()
     line_h = _median([max(1.0, ln["bbox"][3] - ln["bbox"][1]) for ln in lines])
     pad = _clamp(line_h * ANSWER_PAD_RATIO, ANSWER_PAD_MIN_PT, ANSWER_PAD_MAX_PT)
     bottom_margin = _clamp(page_h * ANSWER_BOTTOM_MARGIN_RATIO,
                            ANSWER_BOTTOM_MARGIN_MIN, ANSWER_BOTTOM_MARGIN_MAX)
 
     stubs = []
-    for si in starts:
+    for k, si in enumerate(starts):
         block = [lines[si]]
         j = si + 1
         while j < len(lines) and j not in start_set:
@@ -512,12 +612,32 @@ def _pdf_question_stubs(lines, page_w, page_h, page_no, warnings):
         qrect = _rect_key(_union_bbox([ln["bbox"] for ln in block]))
         qtext = "".join(ln["text"].strip() for ln in block).strip()
         number = parse_question_number(block[0]["text"])
+        next_top = (lines[starts[k + 1]]["bbox"][1]
+                    if k + 1 < len(starts) else page_h)
+        # 题干下方/旁边的插图属于本题：并进题目区，答案从图下面开始写
+        for ii, ir in enumerate(image_rects):
+            if ii in image_claimed:
+                continue
+            if ir[1] >= next_top - 1.0:
+                continue                    # 图在下一题的位置，归下一题
+            if ir[3] <= qrect[1] + 1.0:
+                continue                    # 整张图都在本题题干上方
+            image_claimed.add(ii)
+            qrect = _rect_key(_union_bbox([qrect, ir]))
         # 本题下方第一条「不属于本题块」的文字行（通常就是下一题/页脚）
         below = [ln for ln in lines if ln["bbox"][1] > qrect[3] + 0.5]
         if below:
             limit = min(ln["bbox"][1] for ln in below) - pad
         else:
             limit = page_h - bottom_margin
+        # 答题区也不能越过下一题（否则插图把 rect 拉长时会压到下一题）
+        if k + 1 < len(starts):
+            limit = min(limit, next_top - pad)
+        # 本题下方还有没被任何题认领的插图：答题区在它上面止步
+        below_imgs = [ir for ii, ir in enumerate(image_rects)
+                      if ii not in image_claimed and ir[1] > qrect[3] + 0.5]
+        if below_imgs:
+            limit = min(limit, min(ir[1] for ir in below_imgs) - pad)
         stubs.append({"rect": qrect, "text": qtext, "number": number,
                       "pad": pad, "limit": limit})
     return stubs
@@ -892,8 +1012,10 @@ def _analyze_pdf(path, page=None, dpi=SCAN_DPI_DEFAULT):
                     % (idx + 1))
                 page_warn.extend(scan_warn)
             else:
+                image_rects = _pdf_image_rects(pg, page_w, page_h)
                 stubs = _pdf_question_stubs(lines, page_w, page_h, idx,
-                                            page_warn)
+                                            page_warn,
+                                            image_rects=image_rects)
                 if stubs:
                     content_left = min(ln["bbox"][0] for ln in lines)
                     content_right = max(ln["bbox"][2] for ln in lines)
@@ -908,7 +1030,13 @@ def _analyze_pdf(path, page=None, dpi=SCAN_DPI_DEFAULT):
                     _finalize_answer_regions(
                         stubs, page_w, page_h, idx, page_warn,
                         lines_in=_lines_in, image_mode=False,
-                        content_left=content_left, content_right=content_right)
+                        content_left=content_left, content_right=content_right,
+                        obstacles=image_rects)
+                    if image_rects:
+                        page_warn.append(
+                            "第 %d 页识别到 %d 处插图：已并入题目区，"
+                            "答题区自动避让，不会把答案写在图上"
+                            % (idx + 1, len(image_rects)))
                     for s in stubs:
                         if not s.get("_lines_detected", False):
                             page_warn.append(
@@ -1297,17 +1425,21 @@ def estimate_line_count(text, width_pt, size_pt):
     return max(1, total)
 
 
-def fit_answer_size(text, answer_rect):
+def fit_answer_size(text, answer_rect, start_size=SIZE_DEFAULT_PT):
     """为一段答案在 answer_rect 里挑可用字号。
 
     默认 12.4pt（与渲染器默认一致，不因答题区大就放大）；只有估算高度超过
-    答题区才每次降 0.5pt，最低 8pt。返回
+    答题区才每次降 0.5pt，最低 8pt。``start_size`` 允许调用方从别的字号开始
+    （空白答题页会用用户为该题设的字号）。返回
     ``(size_pt, line_pt, lines, need_pt, fits)``；仍放不下时 fits=False。
     """
     rect = _rect_key(answer_rect)
     avail_h = max(1.0, rect[3] - rect[1])
     width = max(1.0, rect[2] - rect[0])
-    size = SIZE_DEFAULT_PT
+    try:
+        size = max(SIZE_MIN_PT, min(30.0, float(start_size)))
+    except (TypeError, ValueError):
+        size = SIZE_DEFAULT_PT
     while size >= SIZE_MIN_PT - 1e-9:
         line_pt = round(size * LINE_RATIO, 1)
         lines = estimate_line_count(text, width, size)
@@ -1495,12 +1627,224 @@ def semantic_breaks(text):
     return HARD_BREAK.join(x for x in out if x.strip())
 
 
+# ---------------------------------------------------------------- 空白答题页
+def _resolve_answer_mode(spec, answer_mode=None):
+    """归一化答案位置：inline（原页答题区）/ blank（新插空白页）。"""
+    mode = str(answer_mode or (spec or {}).get("answer_mode")
+               or ANSWER_MODE_INLINE).strip().lower()
+    return ANSWER_MODE_BLANK if mode == ANSWER_MODE_BLANK else ANSWER_MODE_INLINE
+
+
+def _answer_heading(number):
+    """空白页上每题开头的题号前缀：1. / 4.2.1 / （3） 原样保留。"""
+    num = str(number or "").strip()
+    if not num:
+        return ""
+    if re.search(r"[.．、)）]$", num):
+        return num + "  "
+    if re.search(r"[.．]\d", num):       # 4.2.1 这种多级编号不再加句点
+        return num + "  "
+    return num + ".  "
+
+
+def _split_answer_chunks(text, width_pt, max_lines, size_pt):
+    """按语义硬换行把长答案切成「一页装得下」的块。
+
+    只按 HARD_BREAK 切，不会把一句话劈开；最后一块仍可能超长，交给
+    fit_answer_size 缩字号兜底。
+    """
+    pieces = [p for p in str(text).split(HARD_BREAK)]
+    out, cur = [], []
+    for piece in pieces:
+        trial = HARD_BREAK.join(cur + [piece]) if cur else piece
+        if cur and estimate_line_count(trial, width_pt, size_pt) > max_lines:
+            out.append(HARD_BREAK.join(cur))
+            cur = [piece]
+        else:
+            cur.append(piece)
+    if cur:
+        out.append(HARD_BREAK.join(cur))
+    return [x for x in out if x.strip()] or [str(text)]
+
+
+def _compose_blank_answer_pages(spec, matches, pm, seed, jitter,
+                                warnings, coverage, preferred_sizes=None):
+    """把答案排到「新插入的空白页」上（每页作业后插页）。
+
+    返回 (pages_out, page_indices)：page_indices 是答案所属的**源页下标**，
+    导出时据此把空白页插到对应作业页后面；一题太长时会自动续页。
+    preferred_sizes 是 {题号: pt}：GUI 里为该题改过字号时，空白页间距也
+    按该字号估算，避免大字号答案互相压住。
+    """
+    preferred_sizes = preferred_sizes or {}
+    pages_out, page_indices = [], []
+    running = 0
+    for pg_i, pg in enumerate(spec.get("pages") or []):
+        qs = [q for q in (pg.get("questions") or [])
+              if str(q.get("id")) in matches]
+        if not qs:
+            continue
+        page_w = float(pg.get("width_pt") or 595.0)
+        page_h = float(pg.get("height_pt") or 842.0)
+        left = BLANK_ANSWER_MARGIN_PT
+        right = max(left + 120.0, page_w - BLANK_ANSWER_MARGIN_PT)
+        width = right - left
+        bottom_limit = page_h - BLANK_ANSWER_BOTTOM_PT
+        page = pm.Page(width_pt=page_w, height_pt=page_h)
+        top = BLANK_ANSWER_TOP_PT
+        for q in qs:
+            qid = str(q.get("id"))
+            try:
+                base_size = _clamp(float(preferred_sizes.get(qid)
+                                         or SIZE_DEFAULT_PT),
+                                   SIZE_MIN_PT, 30.0)
+            except (TypeError, ValueError):
+                base_size = SIZE_DEFAULT_PT
+            line_base = round(base_size * LINE_RATIO, 1)
+            max_lines = max(1, int((bottom_limit - BLANK_ANSWER_TOP_PT)
+                                   // line_base))
+            text = semantic_breaks(humanize_answer(matches[qid]))
+            chunks = _split_answer_chunks(
+                _answer_heading(q.get("number")) + text,
+                width, max_lines, base_size) or [text]
+            total_lines, total_need = 0, 0.0
+            min_size = base_size
+            first_avail = None
+            all_fits = True
+            line_pt = round(base_size * LINE_RATIO, 1)
+            for ci, chunk in enumerate(chunks):
+                gap = BLANK_ANSWER_GAP_PT if (ci == 0 and page.paragraphs) else 0.0
+                need_default = (estimate_line_count(chunk, width, base_size)
+                                * line_base)
+                if page.paragraphs and top + gap + need_default > bottom_limit:
+                    pages_out.append(page)
+                    page_indices.append(pg_i)
+                    page = pm.Page(width_pt=page_w, height_pt=page_h)
+                    top = BLANK_ANSWER_TOP_PT
+                    gap = 0.0
+                top += gap
+                avail = max(1.0, bottom_limit - top)
+                if first_avail is None:
+                    first_avail = avail
+                size, line_pt, lines, need, fits = fit_answer_size(
+                    chunk, [left, top, right, bottom_limit],
+                    start_size=base_size)
+                min_size = min(min_size, size)
+                all_fits = all_fits and bool(fits)
+                if size < SIZE_DEFAULT_PT - 1e-9:
+                    if qid not in coverage["scaled_ids"]:
+                        coverage["scaled_ids"].append(qid)
+                if not fits:
+                    warnings.append(
+                        "题目 %s 的答案超过一整页空白答题页（8pt 仍放不下），"
+                        "已照常书写，可能写出版心" % qid)
+                # 留 8pt 余量，避免实际笔迹比估算高一点就压到下一题
+                block_h = min(max(need + 8.0, 12.0), avail)
+                rect = [left, top, right, round(top + block_h, 1)]
+                para = pm.Paragraph(
+                    text=chunk, rect=rect, size_pt=size, line_pt=line_pt,
+                    align="left", jitter=jitter,
+                    seed=int(seed) + running * 17,
+                    ink=tuple(DEFAULT_INK))
+                try:
+                    para._qid = qid
+                except Exception:
+                    pass
+                page.add_paragraph(para)
+                running += 1
+                total_lines += lines
+                total_need += need
+                top = rect[3] + (0.0 if ci < len(chunks) - 1
+                                 else BLANK_ANSWER_GAP_PT)
+            coverage["answered_ids"].append(qid)
+            coverage["sizes"][qid] = {
+                "size_pt": round(min_size, 1), "line_pt": line_pt,
+                "lines_est": total_lines, "need_pt": round(total_need, 1),
+                "avail_pt": round(first_avail if first_avail is not None
+                                   else (bottom_limit - BLANK_ANSWER_TOP_PT), 1),
+                "fits": all_fits, "page": "blank",
+                "chunks": len(chunks),
+            }
+        pages_out.append(page)
+        page_indices.append(pg_i)
+    return pages_out, page_indices
+
+
+def _export_blank_answer_pdf(pm, spec, pages_out, page_indices, out_pdf):
+    """按「作业页 → 该页的空白答题页」顺序拼最终 PDF（原页原样保留）。
+
+    返回 {源页下标: [输出页下标, ...]}，供 GUI 生成后定位预览页。
+    """
+    import pymupdf as fitz
+    from collections import defaultdict
+
+    sheets = defaultdict(list)
+    for page, src_i in zip(pages_out, page_indices):
+        sheets[int(src_i)].append(page)
+
+    source = str(spec.get("source") or "")
+    kind = spec.get("kind") or ("pdf" if source.lower().endswith(".pdf")
+                                else "image")
+    out = fitz.open()
+    mapping = {}
+
+    def add_sheet(sheet):
+        pg = out.new_page(width=float(sheet.width_pt),
+                          height=float(sheet.height_pt))
+        layer = pm.handwriting_layer(sheet)
+        buf = io.BytesIO()
+        layer.save(buf, format="PNG")
+        pg.insert_image(pg.rect, stream=buf.getvalue(), overlay=True,
+                        keep_proportion=False)
+
+    try:
+        if kind == "pdf" and source and os.path.exists(source):
+            src = fitz.open(source)
+            try:
+                for i in range(len(src)):
+                    out.insert_pdf(src, from_page=i, to_page=i)
+                    if sheets.get(i):
+                        mapping[i] = []
+                        for sheet in sheets[i]:
+                            mapping[i].append(len(out))
+                            add_sheet(sheet)
+            finally:
+                src.close()
+        else:
+            for i, pg_spec in enumerate(spec.get("pages") or []):
+                if i == 0 and sheets.get(0):
+                    base = pm.Page(
+                        width_pt=float(pg_spec.get("width_pt") or 595.0),
+                        height_pt=float(pg_spec.get("height_pt") or 842.0),
+                        bg_kind="image", bg_path=source)
+                    _, base_img = pm.render_page(base)
+                    out_pg = out.new_page(width=base.width_pt,
+                                          height=base.height_pt)
+                    buf = io.BytesIO()
+                    base_img.convert("RGB").save(buf, format="PNG")
+                    out_pg.insert_image(out_pg.rect, stream=buf.getvalue(),
+                                        overlay=False, keep_proportion=False)
+                if sheets.get(i):
+                    mapping[i] = []
+                    for sheet in sheets[i]:
+                        mapping[i].append(len(out))
+                        add_sheet(sheet)
+        out.save(out_pdf, deflate=True, garbage=3)
+    finally:
+        out.close()
+    return mapping
+
+
 def _compose_answer_pages(spec, answers, page_model=None,
-                          seed=20261118, jitter=1.0):
+                          seed=20261118, jitter=1.0, answer_mode=None,
+                          preferred_sizes=None):
     """把答案排进 spec 的答题区，只构造 Page 对象（不落盘、不渲染位图）。
 
     这是 render_answers / preview_pages 共用的排版内核：GUI 的实时预览
     与 CLI / HTTP API 的导出因此走完全相同的字号、人性化与笔迹逻辑。
+
+    answer_mode=blank 时不排进原页答题区，而是在每题所属作业页后面新插
+    空白页写答案（见 _compose_blank_answer_pages）。
 
     返回 (pm, pages_out, page_indices, warnings, coverage)：
       pages_out   与 page_indices 一一对应（page_indices 是 spec.pages 下标，
@@ -1543,6 +1887,16 @@ def _compose_answer_pages(spec, answers, page_model=None,
         "scaled_ids": [],
         "warnings": [],
     }
+    mode = _resolve_answer_mode(spec, answer_mode)
+    coverage["answer_mode"] = mode
+    if mode == ANSWER_MODE_BLANK:
+        pages_out, page_indices = _compose_blank_answer_pages(
+            spec, matches, pm, seed, jitter, warnings, coverage,
+            preferred_sizes=preferred_sizes)
+        if not pages_out:
+            raise ValueError("答案没有匹配到任何页面")
+        return pm, pages_out, page_indices, warnings, coverage
+
     for pg_i, pg in enumerate(spec.get("pages") or []):
         page_questions = [q for q in (pg.get("questions") or [])
                           if str(q.get("id")) in matches]
@@ -1577,10 +1931,15 @@ def _compose_answer_pages(spec, answers, page_model=None,
             # 从 answer_rect 顶部开始写、宽度≈rect 宽（只留 0.5pt 防裁边）
             para_rect = [round(rect[0] + 0.5, 1), round(rect[1] + 0.5, 1),
                          round(rect[2] - 0.5, 1), round(rect[3] - 1.0, 1)]
-            page.add_paragraph(pm.Paragraph(
+            para = pm.Paragraph(
                 text=text, rect=para_rect, size_pt=size, line_pt=line_pt,
                 align="left", jitter=jitter, seed=int(seed) + i * 17,
-                ink=tuple(DEFAULT_INK)))
+                ink=tuple(DEFAULT_INK))
+            try:
+                para._qid = qid        # GUI 的 page_model 代理按题目注入覆盖
+            except Exception:
+                pass
+            page.add_paragraph(para)
             coverage["answered_ids"].append(qid)
             coverage["sizes"][qid] = {
                 "size_pt": size, "line_pt": line_pt, "lines_est": lines,
@@ -1597,7 +1956,8 @@ def _compose_answer_pages(spec, answers, page_model=None,
 
 
 def render_answers(spec, answers, out_pdf=None, out_png=None, page_model=None,
-                   seed=20261118, jitter=1.0):
+                   seed=20261118, jitter=1.0, answer_mode=None,
+                   preferred_sizes=None):
     """把答案手写排进 spec 的答题区并导出 PDF / PNG。
 
     参数
@@ -1608,19 +1968,28 @@ def render_answers(spec, answers, out_pdf=None, out_png=None, page_model=None,
     out_png    : 输出 PNG 预览路径（多页时只出第一个有答案的页）
     page_model : 可注入 page_model 模块（默认按同目录导入）
     seed/jitter: 手写笔迹参数，传给 symbols.make_han_hand
+    answer_mode: "inline"（默认，写回原页答题区）/"blank"（每页作业后插
+                 空白页写答案）；也读 spec["answer_mode"]。
+    preferred_sizes: {题号: pt}，用户为某题指定的字号（空白页排间距用）。
 
     返回 (pdf_path, warnings, coverage_summary)；答案一个都没匹配到题目时
     抛 ValueError（CLI/API 转成明确错误）。
     """
-    pm, pages_out, _page_indices, warnings, coverage = _compose_answer_pages(
-        spec, answers, page_model=page_model, seed=seed, jitter=jitter)
+    mode = _resolve_answer_mode(spec, answer_mode)
+    pm, pages_out, page_indices, warnings, coverage = _compose_answer_pages(
+        spec, answers, page_model=page_model, seed=seed, jitter=jitter,
+        answer_mode=mode, preferred_sizes=preferred_sizes)
     pdf_path = None
     if out_pdf:
         out_dir = os.path.dirname(os.path.abspath(out_pdf))
         if out_dir:
             os.makedirs(out_dir, exist_ok=True)
-        page_arg = pages_out if len(pages_out) > 1 else pages_out[0]
-        pm.export_pdf(page_arg, out_pdf)
+        if mode == ANSWER_MODE_BLANK:
+            coverage["blank_pages"] = _export_blank_answer_pdf(
+                pm, spec, pages_out, page_indices, out_pdf)
+        else:
+            page_arg = pages_out if len(pages_out) > 1 else pages_out[0]
+            pm.export_pdf(page_arg, out_pdf)
         pdf_path = out_pdf
         for p in pages_out:
             warnings.extend(list(getattr(p, "_warn", [])))
@@ -1640,7 +2009,8 @@ def render_answers(spec, answers, out_pdf=None, out_png=None, page_model=None,
 
 
 def preview_pages(spec, answers, page_model=None, only_page=None,
-                  seed=20261118, jitter=1.0):
+                  seed=20261118, jitter=1.0, answer_mode=None,
+                  preferred_sizes=None):
     """「实时预览」内核：把答案手写叠加到作业页背景，纯内存、不写任何文件。
 
     与 render_answers 共用 _compose_answer_pages 排版，再对需要的页调用
@@ -1651,14 +2021,20 @@ def preview_pages(spec, answers, page_model=None, only_page=None,
     ----
     only_page : 只渲染这个页下标（None 表示渲染所有有答案的页）；
                 答案覆盖率等统计仍按全量计算。
+    answer_mode : "blank" 时返回的图是「该页作业后面新插的空白答题页」，
+                同一源页有多张答题页时只返回第一张（预览用）。
 
     返回 (images, warnings, coverage)，images 为 {页下标: PIL.Image(RGB)}。
     """
+    mode = _resolve_answer_mode(spec, answer_mode)
     pm, pages_out, page_indices, warnings, coverage = _compose_answer_pages(
-        spec, answers, page_model=page_model, seed=seed, jitter=jitter)
+        spec, answers, page_model=page_model, seed=seed, jitter=jitter,
+        answer_mode=mode, preferred_sizes=preferred_sizes)
     images = {}
     for page_idx, page in zip(page_indices, pages_out):
         if only_page is not None and int(page_idx) != int(only_page):
+            continue
+        if mode == ANSWER_MODE_BLANK and int(page_idx) in images:
             continue
         _, img = pm.render_page(page)
         warnings.extend(list(getattr(page, "_warn", [])))
@@ -1707,6 +2083,7 @@ def save_spec(spec, path):
 __all__ = [
     "SPEC_VERSION", "QUESTION_RE", "analyze", "render_answers",
     "preview_pages", "_compose_answer_pages",
+    "ANSWER_MODE_INLINE", "ANSWER_MODE_BLANK",
     "questions_brief", "collect_crops", "format_spec", "normalize_answers",
     "fit_answer_size", "estimate_line_count", "estimate_answer_lines",
     "humanize_answer", "semantic_breaks", "HARD_BREAK",

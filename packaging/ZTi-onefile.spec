@@ -17,11 +17,9 @@ FONTS = os.path.join(ROOT, "字体输出")
 DATAS = [
     (os.path.join(FONTS, "ZTi-Han"), "字体输出/ZTi-Han"),
     (os.path.join(FONTS, "ZTi-Sym"), "字体输出/ZTi-Sym"),
+    (os.path.join(FONTS, "字库索引.json"), "字体输出"),
     (os.path.join(APP, "fonts", "fontcal.json"), "fonts"),
     (os.path.join(APP, "fonts", "fontcal_glyph.json"), "fonts"),
-    (os.path.join(APP, "fonts", "LongCang-Regular-merged.ttf"), "fonts"),
-    (os.path.join(APP, "fonts", "MaShanZheng-Regular-merged.ttf"), "fonts"),
-    (os.path.join(APP, "fonts", "ZhiMangXing-Regular-merged.ttf"), "fonts"),
     (os.path.join(APP, "vendor"), "vendor"),
     (os.path.join(APP, "assets"), "assets"),
 ]
@@ -29,6 +27,8 @@ DATAS = [
 HIDDEN = [
     "mthw", "mthw.math_renderer", "mthw.handwriting", "mthw.config",
     "mthw.latex_parser",
+    "fontlib", "fontlib.registry", "fontlib.charsets", "fontlib.template",
+    "fontlib.intake", "fontlib.autotune", "fontlib.builder", "fontlib.preview",
 ]
 
 a = Analysis([os.path.join(APP, "做题窗口.py")], pathex=[APP],

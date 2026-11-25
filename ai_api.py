@@ -1189,12 +1189,17 @@ def _do_worksheet_answer(body):
     write = bool(body.get("write", False))
     rb = body.get("return_base64", True)
     filename = body.get("filename")
+    mode_raw = str(body.get("answer_mode") or "").strip().lower()
+    answer_mode = (ws.ANSWER_MODE_BLANK if mode_raw == ws.ANSWER_MODE_BLANK
+                   else ws.ANSWER_MODE_INLINE if mode_raw == ws.ANSWER_MODE_INLINE
+                   else None)
     _ensure_out_dir()
     fd, tmp = tempfile.mkstemp(prefix=TMP_PREFIX, suffix=".pdf", dir=OUT_DIR)
     os.close(fd)
 
     def job():
-        pdf, warns, cov = ws.render_answers(spec, answers, out_pdf=tmp)
+        pdf, warns, cov = ws.render_answers(
+            spec, answers, out_pdf=tmp, answer_mode=answer_mode)
         with open(tmp, "rb") as f:
             data = f.read()
         return data, warns, cov
@@ -1249,6 +1254,11 @@ def _do_worksheet_prompt(body):
             raise ApiError(404, str(e))
         except ValueError as e:
             raise ApiError(400, str(e))
+    mode_raw = str(body.get("answer_mode") or "").strip().lower()
+    if isinstance(spec, dict) and mode_raw in (ws.ANSWER_MODE_INLINE,
+                                               ws.ANSWER_MODE_BLANK):
+        spec = dict(spec)
+        spec["answer_mode"] = mode_raw
     prompt = ai_prompt.worksheet_prompt(spec)
     han, sym = ai_prompt.allowed_charset()
     return {"ok": True, "prompt": prompt, "prompt_length": len(prompt),
@@ -1299,6 +1309,9 @@ def _do_worksheet_solve(body):
     if not isinstance(spec.get("pages"), list) or not ws.questions_brief(spec):
         raise ApiError(400, "没有识别到题目：请检查 page/numbers 或改传 spec")
 
+    mode_raw = str(body.get("answer_mode") or "").strip().lower()
+    if mode_raw in (ws.ANSWER_MODE_INLINE, ws.ANSWER_MODE_BLANK):
+        spec["answer_mode"] = mode_raw
     prompt = ai_prompt.worksheet_prompt(spec)
     questions = ws.questions_brief(spec)
 
