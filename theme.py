@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
-"""theme.py — 「手写体生成器 · PDF Layer」视觉主题模块。
+"""theme.py — 「手写体生成器」视觉主题模块（沙滩主题）。
 
-设计目标：中文界面、干净现代、浅色为主。纯标准库（tkinter / ttk），零第三方
+设计目标：中文界面、干净克制、沙滩配色。浅色是「晴日海滩」（沙 / 泡沫 / 礁湖青 /
+珊瑚），深色是「夜海」（深海蓝 / 月光青）。纯标准库（tkinter / ttk），零第三方
 依赖；没有 tkinter 或没有可用显示时依然可以 import，`apply_theme()` 只返回设计
 令牌（tokens），不会抛异常。
 
@@ -69,7 +70,7 @@ __all__ = [
     "resolve_font_family",
 ]
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
 
 # --------------------------------------------------------------------------- tkinter 可选导入
 try:  # pragma: no cover - 取决于运行环境
@@ -87,83 +88,89 @@ except Exception:  # 无 tkinter 的解释器（精简版/嵌入式）也能 imp
 
 # --------------------------------------------------------------------------- 设计令牌：色板
 # 命名是一套「语义色」，不写死控件：改主题只改这里。
-# 浅色：页面 #F7F8FA / 卡片 #FFFFFF / 边框 #E6E8EF / 正文 #1F2430 / 次要 #6B7280
-#       主色 #4F6BED / 成功 #22A06B / 警示 #E5484D
+#
+# 主题：沙滩（Beach）—— 浅色是「晴日海滩」，深色是「夜海」。
+#   沙   #F6EDDD  页面底色（晒暖的沙）
+#   泡沫 #FFFCF4  卡片 / 面板（浪花白）
+#   海   #0C7F8B  主色（礁湖青），只给主操作与选中
+#   珊瑚 #DE6A55  警示 / 破坏性操作
+#   浮木 #322C24  正文文字（深木色，比纯黑软）
+#   画布 #D5E7E6  预览区（浅海），衬托暖白纸面
 PALETTE_LIGHT = {
     # 底层（大面）
-    "bg": "#F7F8FA",            # 页面背景（窗口底色）
-    "card": "#FFFFFF",          # 卡片 / 面板
-    "card_alt": "#F2F4F8",      # 卡片内的浅色块、表头、只读底
-    "sidebar": "#F2F4F8",       # 左侧栏底色（白卡片叠在它上面）
-    "toolbar": "#FFFFFF",       # 顶栏
-    "panel": "#FFFFFF",         # 工具条/状态栏底色（同 toolbar；兼容 gui 的 panel 键）
-    "log": "#FFFFFF",           # 底部日志栏
-    "canvas": "#E9EBF2",        # 画布工作区（衬托 A4 白纸）
-    "canvas_dot": "#D5DAE6",    # 画布点阵网格（比 canvas 略深，别抢纸）
-    "track": "#EDEFF5",         # 进度条 / 滑杆 / 空状态轨道
+    "bg": "#F6EDDD",            # 页面背景（窗口底色，暖沙）
+    "card": "#FFFCF4",          # 卡片 / 面板（浪花白）
+    "card_alt": "#F8EFDE",      # 卡片内的浅色块、表头、只读底
+    "sidebar": "#F1E4CF",       # 左侧栏底色（沙丘，卡片叠在上面）
+    "toolbar": "#FFFCF4",       # 顶栏
+    "panel": "#FFFCF4",         # 工具条/状态栏底色（兼容 gui 的 panel 键）
+    "log": "#FFFCF4",           # 日志栏
+    "canvas": "#D5E7E6",        # 画布工作区（浅海，衬托暖白纸）
+    "canvas_dot": "#BFD6D3",    # 画布点阵网格（比 canvas 略深，别抢纸）
+    "track": "#EDE0CA",         # 进度条 / 滑杆 / 空状态轨道
     # 线
-    "border": "#E6E8EF",        # 1px 常规边框
-    "border_strong": "#D7DAE3",  # 需要强调的边框（输入框、次级按钮）
+    "border": "#E7D9C2",        # 1px 常规边框
+    "border_strong": "#D6C4A6",  # 需要强调的边框（输入框、次级按钮）
     # 文字
-    "text": "#1F2430",          # 正文
-    "muted": "#6B7280",         # 次要文字 / 说明
-    "faint": "#9AA1AE",         # 占位、禁用、极次要
+    "text": "#322C24",          # 正文（浮木色）
+    "muted": "#7B7061",         # 次要文字 / 说明
+    "faint": "#A99C86",         # 占位、禁用、极次要
     "on_accent": "#FFFFFF",     # 主色/深色块上的文字
     # 品牌与状态
-    "accent": "#4F6BED",        # 主色
-    "accent_hover": "#3F59D6",
-    "accent_pressed": "#3550C8",
-    "accent_soft": "#EEF1FE",   # 主色浅底（选中、标签、强调块）
-    "success": "#22A06B",
-    "success_soft": "#E7F6EF",
-    "danger": "#E5484D",        # 警示 / 破坏性操作
-    "danger_hover": "#D33A40",
-    "danger_soft": "#FDECEC",
+    "accent": "#0C7F8B",        # 主色（礁湖青）
+    "accent_hover": "#0A6C77",
+    "accent_pressed": "#085A64",
+    "accent_soft": "#DBEFEE",   # 主色浅底（选中、标签、强调块）
+    "success": "#2E9B6B",
+    "success_soft": "#E2F2E7",
+    "danger": "#DE6A55",        # 警示 / 破坏性操作（珊瑚）
+    "danger_hover": "#C8553F",
+    "danger_soft": "#FAE6DE",
     # 交互态（selection 是"选中底色"，配白字；gui 的列表/输入框选中都用它）
-    "hover": "#F0F2F7",
-    "pressed": "#E7EAF2",
-    "selection": "#4F6BED",
+    "hover": "#F2E6D2",
+    "pressed": "#E9DAC1",
+    "selection": "#0C7F8B",
     # 纸张（A4 预览）：纸永远是白的，纸上的字/字迹要固定用 paper_ink，
     # 不能跟着深色模式变亮（否则深色下白纸上的浅字看不见）。
-    "paper": "#FFFFFF",
-    "paper_edge": "#E6E8EF",
-    "paper_ink": "#1F2430",
-    "shadow": "#0F172A",        # 阴影基色（Canvas 画阴影时自己加 alpha）
+    "paper": "#FFFDF8",         # 暖白纸（不是纯白，像晒过的纸）
+    "paper_edge": "#E4D6BD",
+    "paper_ink": "#27231C",
+    "shadow": "#6A5B45",        # 阴影基色（Canvas 画阴影时自己加 alpha）
 }
 
-# 深色：页面 #16181D / 卡片 #23262F / 正文 #EDEFF5 / 次要 #A7ADBB / 主色不变
+# 深色：夜海 —— 深海蓝底 + 月光青主色；纸面依旧是暖白
 PALETTE_DARK = {
-    "bg": "#16181D",
-    "card": "#23262F",
-    "card_alt": "#1E2129",
-    "sidebar": "#1A1D23",
-    "toolbar": "#1C1F26",
-    "panel": "#1C1F26",
-    "log": "#1C1F26",
-    "canvas": "#0F1115",
-    "canvas_dot": "#2E3440",
-    "track": "#2B2F3A",
-    "border": "#333845",
-    "border_strong": "#414755",
-    "text": "#EDEFF5",
-    "muted": "#A7ADBB",
-    "faint": "#727A8A",
+    "bg": "#101F27",
+    "card": "#182A33",
+    "card_alt": "#14242C",
+    "sidebar": "#0D1A21",
+    "toolbar": "#142530",
+    "panel": "#142530",
+    "log": "#142530",
+    "canvas": "#09141A",
+    "canvas_dot": "#22343B",
+    "track": "#273A43",
+    "border": "#2A3E47",
+    "border_strong": "#3A515B",
+    "text": "#EAF2F0",
+    "muted": "#9DAFB2",
+    "faint": "#6D8286",
     "on_accent": "#FFFFFF",
-    "accent": "#4F6BED",        # 与浅色同一主色（品牌一致性）
-    "accent_hover": "#6480F5",
-    "accent_pressed": "#3F59D6",
-    "accent_soft": "#262C42",
-    "success": "#37C08A",
-    "success_soft": "#1E2F28",
-    "danger": "#F2666B",
-    "danger_hover": "#E5484D",
-    "danger_soft": "#33202A",
-    "hover": "#2C3038",
-    "pressed": "#262A32",
-    "selection": "#2A3352",
-    "paper": "#FFFFFF",         # 纸永远是白的（深色界面里更亮眼）
-    "paper_edge": "#333845",
-    "paper_ink": "#1F2430",     # 白纸上的字永远用深墨色
+    "accent": "#45BEC8",        # 月光青
+    "accent_hover": "#63D2DB",
+    "accent_pressed": "#2FA6B1",
+    "accent_soft": "#163A41",
+    "success": "#4FD3A0",
+    "success_soft": "#15322A",
+    "danger": "#F08A78",
+    "danger_hover": "#E0695A",
+    "danger_soft": "#3A2621",
+    "hover": "#1C303A",
+    "pressed": "#182A33",
+    "selection": "#1D4E57",
+    "paper": "#FFFDF8",         # 纸永远是暖白的（深色界面里更亮眼）
+    "paper_edge": "#2A3E47",
+    "paper_ink": "#27231C",     # 纸上的字永远用深墨色
     "shadow": "#000000",
 }
 
@@ -222,6 +229,8 @@ STYLES = {
     "muted": "Muted.TLabel",
     "value": "Value.TLabel",
     "mono": "Mono.TLabel",
+    "brand": "Brand.TLabel",                 # 顶栏品牌名（主色加粗）
+    "chip": "Chip.TLabel",                   # 小胶囊标签（主色浅底 + 主色字）
     # 文字（容器内配套变体，背景色跟着容器走）
     "card_label": "Card.TLabel",
     "card_section": "Card.SectionHeader.TLabel",
@@ -576,6 +585,11 @@ def _configure_styles(style, palette, fonts):
         for suffix in variants:
             c("%s.%s" % (prefix, suffix), background=bg)
 
+    # 顶栏品牌名 / 小胶囊标签（不跟容器变体走）
+    c("Brand.TLabel", background=pal["toolbar"], foreground=accent, font=h1)
+    c("Chip.TLabel", background=accent_soft, foreground=accent, font=muted_f,
+      padding=(7, 2))
+
     # 卡片内标题用 "Card.SectionHeader.TLabel"，深色下不会露出灰底
 
     # ---- 按钮 ------------------------------------------------------------
@@ -639,6 +653,17 @@ def _configure_styles(style, palette, fonts):
       background=[("pressed", pal["pressed"]), ("active", pal["hover"])],
       foreground=[("active", pal["text"]), ("pressed", pal["text"])],
       bordercolor=[("active", pal["hover"])])
+
+    # 分区折叠按钮：卡片上的「▾ 标题」，整行可点，hover 才显色
+    c("Section.TButton", background=card, foreground=pal["text"], font=section,
+      bordercolor=card, lightcolor=card, darkcolor=card, borderwidth=0,
+      relief="flat", padding=(0, 3), anchor="w", focusthickness=0)
+    m("Section.TButton",
+      background=[("active", pal["card_alt"]), ("pressed", pal["pressed"])],
+      foreground=[("active", accent)],
+      bordercolor=[("active", pal["card_alt"])],
+      lightcolor=[("active", pal["card_alt"])],
+      darkcolor=[("active", pal["card_alt"])])
 
     # ---- 输入类 ----------------------------------------------------------
     c("TEntry", fieldbackground=card, background=card, foreground=pal["text"],

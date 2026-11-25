@@ -12,21 +12,29 @@
 · ``ai_api.py``：可选。工具栏「AI 接口」用 ``py -3 ai_api.py`` 子进程启动，
   这里只负责拉起进程 + 探测端口 + 显示状态，不 import 它。
 
-界面结构
---------
+界面结构（2026-11 沙滩主题）
+---------------------------
+三个页面共用同一块画布，只切换左侧工作台；次要动作全部收进「⋯」菜单。
+
 ┌────────────────────────────────────────────────────────────────────┐
-│ 工具栏：背景图 / PDF / 页导航 │ 渲染 / PNG / PDF / 项目 │ 适应 / 深浅 / AI │
+│ ≈ 手写体生成器   [书写][样式][输出]                    渲染  ⋯      │
+│ ≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋ 海浪 ≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋≋ │
 ├───────────────┬────────────────────────────────────────────────────┤
-│ 左侧滚动卡片： │  整页画布：背景 + 多段落手写层，矩形可拖动 / 缩放   │
-│  页面与背景    │  滚轮以光标为中心缩放，中键 / 空格拖动，双击适应     │
-│  段落列表      │                                                    │
-│  段落参数      │                                                    │
-│  字体与墨色    │                                                    │
+│ 书写：段落     │  整页画布（浅海）：暖白纸 + 多段落手写层            │
+│   列表 / 正文  │  矩形可拖动 / 缩放；纸面空白处拖框 = 重设当前段区域  │
+│   + 背景按钮   │  滚轮以光标为中心缩放，中键 / 空格拖动，双击适应    │
+│ 样式：字体 /   │                                                    │
+│   墨色 / 高级  │                                                    │
+│ 输出：导出 /   │                                                    │
+│   项目 / AI    │                                                    │
 ├───────────────┴────────────────────────────────────────────────────┤
-│ 可折叠日志 / 控制台（保留旧命令，可记录意见到 feedback.md）          │
+│ 日志抽屉（默认收起；「⋯」菜单或输出页打开，保留旧命令）            │
 ├────────────────────────────────────────────────────────────────────┤
-│ 状态栏：背景 / 页尺寸 / 段数 / 缩放 / 汉字覆盖率                     │
+│ 状态栏：背景 / 页尺寸 / 段数 / 缩放（缺字时才追加覆盖率提示）        │
 └────────────────────────────────────────────────────────────────────┘
+
+配色与控件样式全部来自 ``theme.py``（沙滩 / 夜海两套调色板）；本文件不写死颜色，
+只通过 ``self.pal`` / ttk 语义样式名取色。
 
 线程规则
 --------
@@ -78,21 +86,44 @@ PROJECT_DIR = os.path.normpath(os.path.join(HERE, "..", ".."))
 AI_DEFAULT_PORT = int(os.environ.get("AI_API_PORT") or 8765)
 
 # ---------------------------------------------------------------- 字体
-HAN_OWN = "__HAN_OWN__"      # 「我的手写体」别名：汉字 ZTi-Han + 符号 ZTi-Sym
+HAN_OWN = "__HAN_OWN__"      # 「我的手写体」别名：当前启用的汉字库 + 符号库
 
-FONT_LABELS = [
-    ("★ 我的手写体（汉字+符号，全手写）", HAN_OWN),
-    ("马善政楷书（毛笔，正文默认）", "MaShanZheng-Regular-merged.ttf"),
-    ("龙藏体（硬笔，数字/拉丁默认）", "LongCang-Regular-merged.ttf"),
-    ("志莽行书", "ZhiMangXing-Regular-merged.ttf"),
-    ("刘建毛草", "LiuJianMaoCao-Regular-merged.ttf"),
-    ("ZTi 我的手写·字嗨 4 套", "ZTi/ZTi-01.otf"),
-    ("ZTi 我的手写·真迹扫描 4 套", "ZTi/ZTi-Scan-01.ttf"),
-]
-MATH_FONT_DEFAULT = "LongCang-Regular-merged.ttf"
 
-# 默认字体：自建手写汉字库存在就用「我的手写体」，否则退回马善政（保持旧行为）
-DEFAULT_FONT = HAN_OWN if symbols.han_available() else "MaShanZheng-Regular-merged.ttf"
+def _legacy_font_labels():
+    """老的 ZTi 亲笔字库（作者本人笔迹，留作对比/回退，不是第三方字体）。"""
+    d = os.path.join(HERE, "fonts", "ZTi")
+    if not os.path.isdir(d):
+        return []
+    return [("ZTi 我的手写·字嗨 4 套", "ZTi/ZTi-01.otf"),
+            ("ZTi 我的手写·真迹扫描 4 套", "ZTi/ZTi-Scan-01.ttf")]
+
+
+def font_labels():
+    """字体下拉框：我的手写体 + 注册表里的自建字库 + 老 ZTi 亲笔库。
+
+    不再列任何第三方字体（2026-11-25 已全部移出字库）。新建的字库会在
+    「字库工作台」里自动出现在这里。
+    """
+    labels = [("★ 我的手写体（汉字+符号，全手写）", HAN_OWN)]
+    try:
+        from fontlib import registry
+        for lib in registry.libraries(kind="han", enabled_only=True):
+            if lib.get("builtin"):
+                continue        # 内置库就是「★ 我的手写体」，不重复列
+            labels.append(("我的字库 · %s（%d 字）" % (
+                lib.get("name") or lib["id"], lib.get("char_count") or 0),
+                "lib:" + lib["id"]))
+    except Exception:
+        pass
+    labels += _legacy_font_labels()
+    return labels
+
+
+FONT_LABELS = font_labels()
+MATH_FONT_DEFAULT = "ZTi-Sym"      # 逻辑名，_font_path() 解析成当前符号库主字体
+
+# 默认字体：始终用「我的手写体」（注册表没配好时由 _font_path 兜底）
+DEFAULT_FONT = HAN_OWN
 
 
 def _label_for(fn):
@@ -100,6 +131,8 @@ def _label_for(fn):
     for lab, f in FONT_LABELS:
         if f == fn:
             return lab
+    if fn and str(fn).startswith("lib:"):
+        return "我的字库"
     return FONT_LABELS[0][0]
 
 
@@ -107,12 +140,26 @@ DEFAULT_FONT_LABEL = _label_for(DEFAULT_FONT)
 
 
 def _font_path(name):
-    """字体文件名 -> 路径；"__HAN_OWN__" 解析成 ZTi-Han 主字体。"""
+    """字体文件名 -> 路径；别名解析成注册表里当前启用的字库。"""
     if name == HAN_OWN:
         p = symbols.han_main_font()
         if p:
             return p
-        name = "MaShanZheng-Regular-merged.ttf"     # 字库缺失时兜底，不崩
+        name = "ZTi/ZTi-Scan-01.ttf"     # 字库缺失时兜底，不崩
+    if name == MATH_FONT_DEFAULT:
+        p = symbols.sym_main_font()
+        if p:
+            return p
+        name = "ZTi/ZTi-Scan-01.ttf"
+    if isinstance(name, str) and name.startswith("lib:"):
+        try:
+            from fontlib import registry
+            p = registry.main_font(name[4:])
+            if p:
+                return p
+        except Exception:
+            pass
+        return symbols.han_main_font() or ""
     return os.path.join(HERE, "fonts", name)
 
 
@@ -123,14 +170,20 @@ SAMPLE_TEXT = r"""4.3.5 解：图4.03中，三角形联结的$Z_b$与星形联�
 
 
 def _variant_fonts(main_name=None):
-    """ZTi 多套字库（同字多形）。
+    """同字多形的其它套（自建字库的 pass2..passN，或老的 ZTi 8 套）。
 
-    · 主字体是普通字体：把 fonts/ZTi 下 8 套全给（毛笔/硬笔混排会被
-      风格护栏挡住并退回单套，保持原行为）。
-    · 主字体本身是 ZTi：只轮换**同组**另外 3 套——实测字嗨（ZTi-0N.otf）
+    · 主字体来自注册表（lib:xxx）：把该库除主字体外的各遍全给。
+    · 主字体是老的 ZTi：只轮换**同组**另外 3 套——字嗨（ZTi-0N.otf）
       与真迹扫描（ZTi-Scan-0N.ttf）墨迹占比差 1.4 倍，护栏会拒绝混编；
       分成两组各转各的，同字多形才真正生效。
     """
+    if isinstance(main_name, str) and main_name.startswith("lib:"):
+        try:
+            from fontlib import registry
+            paths = registry.pass_paths(main_name[4:])
+            return [p for p in paths[1:]]
+        except Exception:
+            return []
     d = os.path.join(HERE, "fonts", "ZTi")
     if not os.path.isdir(d):
         return []
@@ -176,52 +229,52 @@ enable_dpi_awareness()
 
 # ================================================================ 调色板 / 主题
 FALLBACK_LIGHT = {
-    "bg": "#eef1f5",
-    "panel": "#ffffff",
-    "sidebar": "#f6f8fa",
-    "card": "#ffffff",
-    "card_alt": "#f1f4f8",
-    "text": "#1f2328",
-    "muted": "#6b7280",
-    "border": "#d5dbe3",
-    "accent": "#2563eb",
-    "accent_hover": "#1d4ed8",
-    "accent_text": "#ffffff",
-    "danger": "#dc2626",
-    "danger_hover": "#b91c1c",
-    "danger_soft": "#fdecec",
-    "canvas": "#dfe4ea",
-    "canvas_dot": "#c6cdd7",
-    "log_bg": "#14181d",
-    "log_fg": "#d7dde4",
-    "selection": "#cfe1ff",
-    "selection_text": "#111827",
-    "white": "#ffffff",
-    "shadow": "#b9c1cc",
+    "bg": "#F6EDDD",
+    "panel": "#FFFCF4",
+    "sidebar": "#F1E4CF",
+    "card": "#FFFCF4",
+    "card_alt": "#F8EFDE",
+    "text": "#322C24",
+    "muted": "#7B7061",
+    "border": "#E7D9C2",
+    "accent": "#0C7F8B",
+    "accent_hover": "#0A6C77",
+    "accent_text": "#FFFFFF",
+    "danger": "#DE6A55",
+    "danger_hover": "#C8553F",
+    "danger_soft": "#FAE6DE",
+    "canvas": "#D5E7E6",
+    "canvas_dot": "#BFD6D3",
+    "log_bg": "#FFFCF4",
+    "log_fg": "#322C24",
+    "selection": "#DBEFEE",
+    "selection_text": "#0C7F8B",
+    "white": "#FFFDF8",
+    "shadow": "#6A5B45",
 }
 
 FALLBACK_DARK = {
-    "bg": "#15181c",
-    "panel": "#1b2027",
-    "sidebar": "#181d23",
-    "card": "#20262e",
-    "card_alt": "#262d36",
-    "text": "#e6e9ed",
-    "muted": "#98a2ae",
-    "border": "#343c47",
-    "accent": "#5b93ff",
-    "accent_hover": "#79a8ff",
-    "accent_text": "#0b1017",
-    "danger": "#ff5f5f",
-    "danger_hover": "#ff8080",
-    "danger_soft": "#33202a",
-    "canvas": "#0e1115",
-    "canvas_dot": "#2a313a",
-    "log_bg": "#0a0d10",
-    "log_fg": "#cfd6de",
-    "selection": "#2e4d7d",
-    "selection_text": "#ffffff",
-    "white": "#f4f6f8",
+    "bg": "#101F27",
+    "panel": "#142530",
+    "sidebar": "#0D1A21",
+    "card": "#182A33",
+    "card_alt": "#14242C",
+    "text": "#EAF2F0",
+    "muted": "#9DAFB2",
+    "border": "#2A3E47",
+    "accent": "#45BEC8",
+    "accent_hover": "#63D2DB",
+    "accent_text": "#FFFFFF",
+    "danger": "#F08A78",
+    "danger_hover": "#E0695A",
+    "danger_soft": "#3A2621",
+    "canvas": "#09141A",
+    "canvas_dot": "#22343B",
+    "log_bg": "#142530",
+    "log_fg": "#EAF2F0",
+    "selection": "#1D4E57",
+    "selection_text": "#FFFFFF",
+    "white": "#FFFDF8",
     "shadow": "#000000",
 }
 
@@ -532,6 +585,8 @@ def make_hand_factory(render_cfg):
     def factory(p):
         kw = dict(size_pt=float(p.size_pt), ink=tuple(p.ink),
                   jitter=float(p.jitter), seed=int(p.seed))
+        if isinstance(font, str) and font.startswith("lib:"):
+            return symbols.make_han_hand(library_id=font[4:], **kw)
         if font == HAN_OWN and symbols.han_available():
             return symbols.make_han_hand(**kw)
         fp = _font_path(font)
@@ -705,7 +760,8 @@ class _ParagraphList(_ttk.Frame if _ttk is not None else object):
         self._dpi = max(1.0, float(dpi_scale or 1.0))
         self._title_font = None
         self._sub_font = None
-        self._row_h = max(int(46 * self._dpi), 34)
+        self._compact = True
+        self._row_h = max(int(34 * self._dpi), 30)
         self._canvas = _tk.Canvas(self, highlightthickness=0, bd=0,
                                   height=self._row_h * self._rows + 2)
         self._vsb = _ttk.Scrollbar(self, orient="vertical",
@@ -724,28 +780,45 @@ class _ParagraphList(_ttk.Frame if _ttk is not None else object):
         try:
             self._title_font = tkfont.Font(family=family, size=10)
             self._sub_font = tkfont.Font(family=family, size=9)
-            self._row_h = max(
-                int(46 * self._dpi),
-                self._title_font.metrics("linespace")
-                + self._sub_font.metrics("linespace")
-                + int(12 * self._dpi))
         except Exception:
             self._title_font = self._sub_font = None
-            self._row_h = max(int(46 * self._dpi), 34)
+        self._relayout()
+        self.redraw()
+
+    def _relayout(self):
+        """按「单行摘要 / 双行摘要」重算行高与画布高度。"""
         try:
-            self._canvas.configure(bg=self._pal.get("card", "#ffffff"),
-                                   height=self._row_h * self._rows + 2)
+            lh = self._title_font.metrics("linespace") if self._title_font else 18
+        except Exception:
+            lh = 18
+        if self._compact:
+            height = max(28, lh + int(13 * self._dpi))
+        else:
+            try:
+                sh = self._sub_font.metrics("linespace") if self._sub_font else 16
+            except Exception:
+                sh = 16
+            height = max(int(46 * self._dpi), lh + sh + int(12 * self._dpi))
+        self._row_h = int(height)
+        n = len(self._items)
+        visible = self._rows if n == 0 else min(self._rows, max(1, n))
+        self._visible = visible
+        try:
+            self._canvas.configure(
+                bg=self._pal.get("card", "#FFFCF4"),
+                height=self._row_h * visible + 2)
         except Exception:
             pass
-        self.redraw()
 
     # ---- 数据 / 选中
     def set_items(self, items, selected=None):
         self._items = list(items or [])
+        self._compact = not any((sub or "").strip() for _t, sub in self._items)
         if selected is not None:
             self._selected = int(selected) if 0 <= int(selected) < len(self._items) else None
         elif self._selected is not None and self._selected >= len(self._items):
             self._selected = None
+        self._relayout()
         self.redraw()
 
     def select(self, idx, notify=False):
@@ -775,28 +848,35 @@ class _ParagraphList(_ttk.Frame if _ttk is not None else object):
                 y = i * self._row_h
                 sel = (i == self._selected)
                 fill = soft if sel else alt
-                c.create_rectangle(4, y + 3, w - 10, y + self._row_h - 3,
+                c.create_rectangle(4, y + 2, w - 10, y + self._row_h - 2,
                                    fill=fill,
                                    outline=(accent if sel else border),
                                    width=1)
                 if sel:
-                    c.create_rectangle(4, y + 3, 7, y + self._row_h - 3,
+                    c.create_rectangle(4, y + 2, 7, y + self._row_h - 2,
                                        fill=accent, outline="")
-                tx = 14
-                ty = y + max(4, int(5 * self._dpi))
-                maxw = max(40, w - 26)
+                tx = 15
+                maxw = max(40, w - 28)
                 title_font = self._title_font
                 sub_font = self._sub_font
-                c.create_text(tx, ty, anchor="nw",
-                              text=self._trim(title, title_font, maxw),
-                              font=title_font, fill=text)
-                line_h = (title_font.metrics("linespace") if title_font else 18)
-                c.create_text(tx, ty + line_h + 1, anchor="nw",
-                              text=self._trim(sub, sub_font, maxw),
-                              font=sub_font, fill=muted)
-                if sel:
-                    # 选中胶囊：右侧显示段序号
-                    pass
+                try:
+                    line_h = (title_font.metrics("linespace")
+                              if title_font else 18)
+                except Exception:
+                    line_h = 18
+                if self._compact or not (sub or "").strip():
+                    ty = y + (self._row_h - line_h) / 2.0
+                    c.create_text(tx, ty, anchor="nw",
+                                  text=self._trim(title, title_font, maxw),
+                                  font=title_font, fill=text)
+                else:
+                    ty = y + max(4, int(5 * self._dpi))
+                    c.create_text(tx, ty, anchor="nw",
+                                  text=self._trim(title, title_font, maxw),
+                                  font=title_font, fill=text)
+                    c.create_text(tx, ty + line_h + 1, anchor="nw",
+                                  text=self._trim(sub, sub_font, maxw),
+                                  font=sub_font, fill=muted)
             total = max(1, self._row_h * max(1, len(self._items)))
             c.configure(scrollregion=(0, 0, w, total))
             if self._selected is not None and total > 1:
@@ -915,7 +995,7 @@ class App:
         if font_cfg and any(f == font_cfg for _lab, f in FONT_LABELS):
             self.cfg["font"] = font_cfg
 
-        root.title("手写体生成器 · PDF 手写层")
+        root.title("手写体生成器")
         self._apply_window_geometry()
 
         self._setup_fonts()
@@ -940,11 +1020,9 @@ class App:
         self._bind_global()
         self._timed(80, self._init_toolbar_state)
 
-        self.log("控制台就绪。输入 help 查看命令；直接写文字会记入 feedback.md。")
+        self.log("就绪。示例文字已载入，点右上「渲染」更新预览。")
         if DEFAULT_FONT == HAN_OWN:
-            self.log("默认字体：★ 我的手写体（汉字 ZTi-Han 2 套 + 符号 ZTi-Sym 4 套，全手写）")
-        self.log("界面主题：%s（%s）" % ("深色" if self.dark else "浅色", self._theme_hint))
-        self.log("背景：空白 A4；在画布上拖动段落矩形或点「框选」划区域。")
+            self.log("字体：★ 我的手写体（汉字 ZTi-Han + 符号 ZTi-Sym）")
         if self.auto_render:
             self._render_after = self._timed(250, self._start_render_thread)
 
@@ -1001,6 +1079,7 @@ class App:
             "geometry": self.get_geometry_string(),
             "dark": bool(self.dark),
             "font": self.cfg.get("font") or DEFAULT_FONT,
+            "page": getattr(self, "page_key", None) or "write",
             "updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
         try:
@@ -1089,13 +1168,15 @@ class App:
         """theme.py 未就绪时自建命名样式，避免默认 gray95 观感。"""
         if not theme_active():
             self._setup_fallback_styles()
-        # 主题给按钮样式设了固定宽度（-11 字符），这里统一改回「按文字自适应」，
-        # 否则所有按钮都同宽 156px，单行工具栏放不下。
-        # 另外补两个本模块专用样式：描边危险按钮 / 浅底卡片按钮（theme.py 里没有）。
+        # 主题给按钮样式设了固定宽度（-11 字符），这里统一改回「按文字自适应」。
+        # 另外补两个本模块专用样式：描边危险按钮 / 浅底卡片按钮（theme.py 里也有，
+        # 这里按当前的 pal 再刷一遍，保证切深浅色后仍是新颜色）。
+        pal = self.pal
         try:
             st = self.ttk.Style()
             for name in ("TButton", "Ghost.TButton", "Accent.TButton",
-                         "Danger.TButton", "Tool.TButton"):
+                         "Danger.TButton", "Tool.TButton", "Section.TButton",
+                         "Soft.TButton", "DangerOutline.TButton"):
                 st.configure(name, width=0)
             st.configure("DangerOutline.TButton",
                          background=pal["card"], foreground=pal["danger"],
@@ -1117,8 +1198,8 @@ class App:
                          darkcolor=pal["border"], borderwidth=1,
                          relief="solid", padding=(6, 6), focusthickness=0)
             st.map("Soft.TButton",
-                   background=[("pressed", pal["selection"]),
-                               ("active", pal["selection"])],
+                   background=[("pressed", pal["pressed"]),
+                               ("active", pal["hover"])],
                    foreground=[("active", pal["text"])],
                    bordercolor=[("active", pal["accent"])])
         except Exception:
@@ -1234,7 +1315,7 @@ class App:
             pass
 
     def _apply_tk_colors(self):
-        """tk 原生控件（Canvas/Text/Listbox）跟主题走。"""
+        """tk 原生控件（Canvas/Text/Listbox/顶栏按钮）跟主题走。"""
         pal = self.pal
         try:
             self.root.configure(bg=pal["bg"])
@@ -1247,8 +1328,8 @@ class App:
         except Exception:
             pass
         try:
-            self.log_text.configure(bg=pal["log_bg"], fg=pal["log_fg"],
-                                    insertbackground=pal["log_fg"],
+            self.log_text.configure(bg=pal["card"], fg=pal["text"],
+                                    insertbackground=pal["text"],
                                     selectbackground=pal["selection"],
                                     selectforeground=pal["selection_text"])
         except Exception:
@@ -1275,10 +1356,27 @@ class App:
                 self._float_inner.configure(style="Toolbar.TFrame")
         except Exception:
             pass
+        # 顶栏上的 tk 按钮（品牌标 / ⋯ / 三页）不吃 ttk 样式，要手动刷色
+        for attr, fg in (("brand_mark", pal["accent"]), ("more_btn", pal["muted"])):
+            w = getattr(self, attr, None)
+            if w is not None:
+                try:
+                    w.configure(bg=pal["toolbar"], fg=fg,
+                                activebackground=pal["hover"],
+                                activeforeground=pal["text"])
+                except Exception:
+                    pass
+        try:
+            self._update_nav()
+        except Exception:
+            pass
+        try:
+            self._draw_wave()
+        except Exception:
+            pass
         try:
             for dot in list(getattr(self, "_ai_dots", [])):
-                dot.configure(bg=pal["panel"],
-                              fg=pal.get("muted", "#6b7280"))
+                dot.configure(bg=pal["card"], fg=pal.get("muted", "#7B7061"))
         except Exception:
             pass
 
@@ -1288,12 +1386,7 @@ class App:
         self._theme_hint = "theme.py" if theme_active() else "内置兜底"
         self._setup_styles()
         self._apply_tk_colors()
-        try:
-            self.theme_btn.configure(text="深浅色")
-        except Exception:
-            pass
         self._redraw_view()
-        self.log("主题：%s（%s）" % ("深色" if self.dark else "浅色", self._theme_hint))
 
     def toggle_dark(self):
         self.set_dark(not self.dark)
@@ -1328,32 +1421,47 @@ class App:
             setattr(self, attr, None)
 
     # ============================================================ UI 骨架
+    # 三个页面共用同一块画布，只切换左侧工作台：
+    #   书写 —— 段落 / 正文 / 背景       样式 —— 字体 / 墨色与笔迹 / 高级
+    #   输出 —— 导出 / 项目 / AI / 日志
+    # 次要动作收进「⋯」菜单，说明性小字一律不进界面（放到「快捷键」里）。
+    PAGES = (("write", "书写"), ("style", "样式"), ("out", "输出"))
+    SASH_X = 336                 # 左侧工作台宽度（逻辑 px，按 DPI 放大）
+    TOOLBAR_FULL_MIN = 900       # 兼容旧接口；新版顶栏固定单行
+
+    def _sash_px(self):
+        return max(300, int(round(self.SASH_X * getattr(self, "_dpi_scale", 1.0))))
+
     def _build_ui(self):
-        tk, ttk = self.tk, self.ttk
+        ttk = self.ttk
         self._outer = ttk.Frame(self.root, style="TFrame")
         self._outer.pack(fill="both", expand=True)
         self._build_toolbar(self._outer)
+        self._build_wave(self._outer)
         self._build_statusbar(self._outer)
-        self._build_console(self._outer)
+        self._build_console(self._outer)            # 日志抽屉：默认收起
 
         self.paned = ttk.PanedWindow(self._outer, orient="horizontal")
-        self.paned.pack(fill="both", expand=True, padx=0, pady=0)
+        self.paned.pack(fill="both", expand=True)
 
         left = ttk.Frame(self.paned, style="Sidebar.TFrame")
         self.paned.add(left, weight=0)
         self._scroll = _ScrollFrame(left, bg=self.pal["sidebar"])
         self._scroll.pack(fill="both", expand=True)
-        box = self._scroll.inner
-        self._build_page_card(box)
-        self._build_list_card(box)
-        self._build_param_card(box)
-        self._build_font_card(box)
-        # 底部留白
-        ttk.Frame(box, style="Sidebar.TFrame", height=10).pack(fill="x")
+        host = self._scroll.inner
+        self._panels = {}
+        for key, _label in self.PAGES:
+            self._panels[key] = ttk.Frame(host, style="Sidebar.TFrame")
+        self._build_write_panel(self._panels["write"])
+        self._build_style_panel(self._panels["style"])
+        self._build_out_panel(self._panels["out"])
 
         right = ttk.Frame(self.paned, style="Card.TFrame")
         self.paned.add(right, weight=1)
         self._build_canvas(right)
+
+        self.page_key = None
+        self.show_page(self._config.get("page") or "write")
 
         self._sash_done = False
         self._sash_tries = 0
@@ -1367,8 +1475,8 @@ class App:
         if event.width < 500:
             return
         try:
-            self.paned.sashpos(0, 356)
-            if self.paned.sashpos(0) >= 220:
+            self.paned.sashpos(0, self._sash_px())
+            if self.paned.sashpos(0) >= 240:
                 self._sash_done = True
                 self._bind_sidebar_wheel(self._scroll.inner)
                 self._update_wraplengths()
@@ -1380,8 +1488,8 @@ class App:
         if self.closing:
             return
         try:
-            self.paned.sashpos(0, 356)
-            self._sash_done = self.paned.sashpos(0) >= 220
+            self.paned.sashpos(0, self._sash_px())
+            self._sash_done = self.paned.sashpos(0) >= 240
         except Exception:
             self._sash_done = False
         if self._sash_done:
@@ -1393,21 +1501,20 @@ class App:
             self._sash_after = self._timed(60, self._set_sash)
 
     def _update_wraplengths(self):
-        """左侧栏宽度变化时重新算换行宽度，避免文字被截断。"""
+        """左侧栏宽度变化时重算换行宽度（只剩页信息一处长文本）。"""
         try:
             w = self._scroll.inner.winfo_width()
         except Exception:
             w = 0
         if w < 180:
             return
-        wrap = max(160, int(w) - 34)
-        for attr in ("page_info", "para_hint"):
-            lbl = getattr(self, attr, None)
-            if lbl is not None:
-                try:
-                    lbl.configure(wraplength=wrap)
-                except Exception:
-                    pass
+        wrap = max(140, int(w) - 40)
+        lbl = getattr(self, "page_info", None)
+        if lbl is not None:
+            try:
+                lbl.configure(wraplength=wrap)
+            except Exception:
+                pass
 
     def _bind_sidebar_wheel(self, widget):
         """左侧卡片区滚轮：不用 bind_all（避免和画布缩放撞车），逐个控件绑。"""
@@ -1421,210 +1528,172 @@ class App:
         except Exception:
             pass
 
-    TOOLBAR_FULL_MIN = 1240      # 低于这个宽度：顶栏切成两行（按钮文案保持完整）
-
+    # ------------------------------------------------------------ 顶栏
     def _build_toolbar(self, parent):
-        """响应式顶栏：宽屏单行；窄屏自动两行（第一行背景/页码/渲染/导出，
-        第二行项目/主题/AI），切换在 <Configure> 里 debounce 150ms。"""
+        """顶栏：品牌 + 三个页面 + 渲染 / ⋯。"""
+
         tk, ttk = self.tk, self.ttk
-        outer = ttk.Frame(parent, style="Toolbar.TFrame", padding=(4, 2))
+        pal = self.pal
+        fam = getattr(self, "_ui_family", "TkDefaultFont")
+        outer = ttk.Frame(parent, style="Toolbar.TFrame")
         outer.pack(side="top", fill="x")
         self.toolbar = outer
-        self._tb_full = ttk.Frame(outer, style="Toolbar.TFrame")
-        self._tb_a = ttk.Frame(outer, style="Toolbar.TFrame")
-        self._tb_b = ttk.Frame(outer, style="Toolbar.TFrame")
-        self._toolbar_mode = None
-        self._toolbar_compact = False
-        self._toolbar_full_req = 0
-        self._toolbar_compact_req = 0
-        self._tb_debounce = None
         self._page_count_labels = []
         self._bg_labels = []
         self._page_entries = []
         self._ai_status_labels = []
         self._ai_dots = []
         self.var_bg_page = tk.IntVar(value=1)
-        fam = getattr(self, "_ui_family", "TkDefaultFont")
-        pad = (8, 4)
 
-        def button(row, text, cmd, style="Ghost.TButton"):
-            b = ttk.Button(row, text=text, command=cmd, style=style,
-                           padding=pad, width=0)
-            b.pack(side="left", padx=1)
-            return b
+        brand = ttk.Frame(outer, style="Toolbar.TFrame")
+        brand.pack(side="left", padx=(16, 2), pady=(7, 6))
+        self.brand_mark = tk.Label(brand, text="≈", bd=0, padx=0, pady=0,
+                                   fg=pal["accent"], bg=pal["toolbar"],
+                                   font=(fam, 18, "bold"))
+        self.brand_mark.pack(side="left", padx=(0, 5))
+        self.brand_text = ttk.Label(brand, text="手写体生成器",
+                                    style="Brand.TLabel")
+        self.brand_text.pack(side="left")
 
-        def sep(row):
-            ttk.Separator(row, orient="vertical").pack(side="left", fill="y",
-                                                       padx=5, pady=3)
+        nav = ttk.Frame(outer, style="Toolbar.TFrame")
+        nav.pack(side="left", padx=(20, 0), pady=9)
+        self._nav = nav
+        self._nav_buttons = {}
+        for key, label in self.PAGES:
+            b = tk.Button(nav, text=label, bd=0, highlightthickness=0,
+                          relief="flat", cursor="hand2", padx=15, pady=4,
+                          font=(fam, 10), bg=pal["toolbar"], fg=pal["muted"],
+                          activebackground=pal["accent_soft"],
+                          activeforeground=pal["accent"],
+                          command=lambda k=key: self.show_page(k))
+            b.pack(side="left", padx=(0, 3))
+            b.bind("<Enter>", lambda e, k=key: self._nav_hover(k, True))
+            b.bind("<Leave>", lambda e, k=key: self._nav_hover(k, False))
+            self._nav_buttons[key] = b
 
-        def nav(row):
-            box = ttk.Frame(row, style="Toolbar.TFrame")
-            box.pack(side="left", padx=2)
-            ttk.Button(box, text="◀", command=self.bg_prev_page,
-                       style="Ghost.TButton", padding=(6, 4),
-                       width=2).pack(side="left", padx=(0, 2))
-            ent = ttk.Entry(box, textvariable=self.var_bg_page, width=4,
-                            justify="center")
-            ent.pack(side="left")
-            ent.bind("<Return>", lambda e: self._on_bg_page_spin())
-            ent.bind("<FocusOut>", lambda e: self._on_bg_page_spin())
-            self._page_entries.append(ent)
-            ttk.Button(box, text="▶", command=self.bg_next_page,
-                       style="Ghost.TButton", padding=(6, 4),
-                       width=2).pack(side="left", padx=(2, 4))
-            cnt = ttk.Label(box, text="1/1 页", style="Toolbar.Muted.TLabel")
-            cnt.pack(side="left", padx=(0, 4))
-            self._page_count_labels.append(cnt)
-            bg = ttk.Label(box, text="空白 A4", style="Toolbar.Muted.TLabel")
-            bg.pack(side="left", padx=(2, 0))
-            self._bg_labels.append(bg)
+        right = ttk.Frame(outer, style="Toolbar.TFrame")
+        right.pack(side="right", padx=(0, 14))
+        self.render_btn = ttk.Button(right, text="渲染",
+                                     command=self.render_async,
+                                     style="Accent.TButton", width=0)
+        self.render_btn.pack(side="left")
+        self.more_btn = tk.Button(right, text="⋯", bd=0, highlightthickness=0,
+                                  relief="flat", cursor="hand2", padx=9, pady=0,
+                                  font=(fam, 15), bg=pal["toolbar"],
+                                  fg=pal["muted"],
+                                  activebackground=pal["hover"],
+                                  activeforeground=pal["text"],
+                                  command=self._show_more_menu)
+        self.more_btn.pack(side="left", padx=(6, 0))
+        self.theme_btn = None          # 深浅色在「⋯」菜单里，旧属性保留
 
-        def ai_group(row):
-            ttk.Button(row, text="AI 接口", command=self.launch_ai,
-                       style="Ghost.TButton", padding=pad,
-                       width=0).pack(side="right", padx=(2, 0))
-            lbl = ttk.Label(row, text=self._ai_status_display,
-                            style="Toolbar.Muted.TLabel")
-            lbl.pack(side="right", padx=(4, 2))
-            self._ai_status_labels.append(lbl)
-            dot = tk.Label(row, text="●", bd=0,
-                           fg=self.pal.get("muted", "#6b7280"),
-                           bg=self.pal.get("panel", "#ffffff"),
-                           font=(fam, 9))
-            dot.pack(side="right", padx=(4, 0))
-            self._ai_dots.append(dot)
+    def _build_wave(self, parent):
+        """顶栏下沿的一道浪（沙滩主题的识别点）。"""
+        tk = self.tk
+        self._wave = tk.Canvas(parent, height=11, bd=0, highlightthickness=0,
+                               bg=self.pal["accent_soft"])
+        self._wave.pack(side="top", fill="x")
+        self._wave.bind("<Configure>", lambda e: self._draw_wave())
+        self._timed(40, self._draw_wave)
 
-        # ---- 宽屏：单行完整文案
-        r = self._tb_full
-        button(r, "导入图片", self._dlg_open_image)
-        button(r, "导入PDF", self._dlg_import_pdf)
-        button(r, "清空背景", self.clear_background,
-               style="DangerOutline.TButton")
-        sep(r)
-        nav(r)
-        sep(r)
-        button(r, "渲染", self.render_async, style="Accent.TButton")
-        button(r, "导出PNG", self.save_png)
-        button(r, "导出PDF", self.save_pdf)
-        sep(r)
-        button(r, "存项目", self._dlg_save_project)
-        button(r, "打开项目", self._dlg_open_project)
-        sep(r)
-        self.theme_btn = ttk.Button(r, text="深浅色", command=self.toggle_dark,
-                                    style="Ghost.TButton", padding=pad,
-                                    width=0)
-        self.theme_btn.pack(side="left", padx=1)
-        ai_group(r)
-
-        # ---- 窄屏第一行：背景/页码/渲染/导出
-        r = self._tb_a
-        button(r, "导入图片", self._dlg_open_image)
-        button(r, "导入PDF", self._dlg_import_pdf)
-        button(r, "空白页", self.set_blank_background)
-        button(r, "清空背景", self.clear_background,
-               style="DangerOutline.TButton")
-        sep(r)
-        nav(r)
-        sep(r)
-        button(r, "渲染", self.render_async, style="Accent.TButton")
-        button(r, "导出PNG", self.save_png)
-        button(r, "导出PDF", self.save_pdf)
-
-        # ---- 窄屏第二行：项目/主题/AI
-        r = self._tb_b
-        button(r, "存项目", self._dlg_save_project)
-        button(r, "打开项目", self._dlg_open_project)
-        sep(r)
-        ttk.Button(r, text="深浅色", command=self.toggle_dark,
-                   style="Ghost.TButton", padding=pad,
-                   width=0).pack(side="left", padx=1)
-        ai_group(r)
-
-        outer.bind("<Configure>", self._on_toolbar_configure, add="+")
-        self._timed(80, self._init_toolbar_state)
-
-    # ---- 响应式：宽屏单行 / 窄屏两行
-    def _init_toolbar_state(self):
-        if self.closing:
+    def _draw_wave(self):
+        c = getattr(self, "_wave", None)
+        if c is None:
             return
         try:
-            w = self.toolbar.winfo_width()
+            w = max(240, int(c.winfo_width()))
         except Exception:
-            w = 0
-        self._set_toolbar_mode(bool(w and w < self.TOOLBAR_FULL_MIN))
+            w = 240
+        pal = self.pal
         try:
-            self._set_toolbar_mode(False)
-            self.root.update_idletasks()
-            self._toolbar_full_req = self.toolbar.winfo_reqwidth()
-            self._set_toolbar_mode(True)
-            self.root.update_idletasks()
-            self._toolbar_compact_req = self.toolbar.winfo_reqwidth()
+            c.delete("all")
+            c.configure(bg=pal["accent_soft"], bd=0, highlightthickness=0)
+            top = pal["toolbar"]
+            pts = []
+            x = -8
+            while x <= w + 12:
+                pts += [x, 5.0 + 2.6 * math.sin(x / 82.0 * 2 * math.pi + 0.9)]
+                x += 7
+            c.create_polygon(pts + [w + 12, -2, -8, -2], fill=top, outline="")
+            c.create_line(pts, fill=pal["accent"], width=1, smooth=True)
+            pts2 = []
+            x = -8
+            while x <= w + 12:
+                pts2 += [x, 8.2 + 1.5 * math.sin(x / 61.0 * 2 * math.pi + 2.6)]
+                x += 7
+            c.create_line(pts2, fill=_mix(pal["accent_soft"], pal["accent"], 0.45),
+                          width=1, smooth=True)
         except Exception:
             pass
-        self._apply_toolbar_fit()
 
-    def _on_toolbar_configure(self, event=None):
-        self._cancel("_tb_debounce")
-        self._tb_debounce = self._timed(150, self._apply_toolbar_fit)
-
-    def _apply_toolbar_fit(self):
-        self._tb_debounce = None
-        if self.closing:
+    # ---- 页面切换
+    def _nav_hover(self, key, inside):
+        b = getattr(self, "_nav_buttons", {}).get(key)
+        if b is None or key == getattr(self, "page_key", None):
             return
         try:
-            w = self.toolbar.winfo_width()
+            b.configure(bg=self.pal["hover"] if inside else self.pal["toolbar"])
         except Exception:
-            return
-        if w <= 1:
-            return
-        # 1240 是设计阈值；当前 DPI/字体下完整文案实际更宽时，自动抬高阈值，
-        # 保证「宽屏用完整文案」时不会把按钮挤到截断。
-        threshold = self.TOOLBAR_FULL_MIN
-        if self._toolbar_full_req:
-            threshold = max(threshold, int(self._toolbar_full_req) + 6)
-        self._set_toolbar_mode(w < threshold)
+            pass
 
-    def _set_toolbar_mode(self, compact):
-        mode = "compact" if compact else "full"
-        self._toolbar_compact = bool(compact)
-        if mode == self._toolbar_mode:
-            return
-        self._toolbar_mode = mode
-        for row in (self._tb_full, self._tb_a, self._tb_b):
+    def _update_nav(self):
+        fam = getattr(self, "_ui_family", "TkDefaultFont")
+        for key, b in getattr(self, "_nav_buttons", {}).items():
+            active = (key == self.page_key)
             try:
-                row.pack_forget()
+                b.configure(
+                    bg=self.pal["accent_soft"] if active else self.pal["toolbar"],
+                    fg=self.pal["accent"] if active else self.pal["muted"],
+                    font=(fam, 10, "bold") if active else (fam, 10))
             except Exception:
                 pass
-        if compact:
-            self._tb_a.pack(fill="x")
-            self._tb_b.pack(fill="x", pady=(2, 0))
-        else:
-            self._tb_full.pack(fill="x")
-        self._update_toolbar_dynamic_labels()
+
+    def show_page(self, key):
+        """切换左侧工作台（画布不动，避免重建与缩放丢失）。"""
+        if key not in getattr(self, "_panels", {}):
+            key = "write"
+        self.page_key = key
+        for frame in self._panels.values():
+            try:
+                frame.pack_forget()
+            except Exception:
+                pass
+        try:
+            self._panels[key].pack(fill="both", expand=True, pady=(10, 0))
+        except Exception:
+            return
+        self._update_nav()
+        try:
+            self._scroll._canvas.yview_moveto(0.0)
+        except Exception:
+            pass
+
+    def _init_toolbar_state(self):
+        """兼容旧接口：顶栏固定单行，只在窄窗时收起品牌文字。"""
+        if self.closing:
+            return
+        self._set_toolbar_compact(False)
 
     def _set_toolbar_compact(self, compact):
-        """兼容测试 / 手工调用：直接切到单行或两行。"""
-        self._set_toolbar_mode(bool(compact))
+        self._toolbar_compact = bool(compact)
         try:
+            if compact:
+                self.brand_text.pack_forget()
+            elif not self.brand_text.winfo_ismapped():
+                self.brand_text.pack(side="left")
             self.root.update_idletasks()
         except Exception:
             pass
 
     def _update_toolbar_dynamic_labels(self):
-        compact = self._toolbar_compact
-        page_txt = self._page_count_text()
-        for lbl in list(self._page_count_labels):
+        bg_txt = self._bg_label_text(self._toolbar_compact)
+        for lbl in list(getattr(self, "_bg_labels", [])):
             try:
-                lbl.configure(text=("%s" % page_txt))
-            except Exception:
-                pass
-        for lbl in list(self._bg_labels):
-            try:
-                lbl.configure(text=self._bg_label_text(compact))
+                lbl.configure(text=bg_txt)
             except Exception:
                 pass
         disp = getattr(self, "_ai_status_display", "未启动")
-        for lbl in list(self._ai_status_labels):
+        for lbl in list(getattr(self, "_ai_status_labels", [])):
             try:
                 lbl.configure(text=disp)
             except Exception:
@@ -1637,43 +1706,119 @@ class App:
 
     def _bg_label_text(self, compact=False):
         if self.page.bg_kind == "pdf":
-            return "PDF 背景"
+            return "PDF 背景  ▾"
         if self.page.bg_kind == "image":
-            return "图片背景"
-        return "空白 A4"
+            return "图片背景  ▾"
+        return "空白 A4  ▾"
 
+    # ------------------------------------------------------------ 菜单
+    def _menu(self):
+        """统一配色的弹出菜单（沙滩配色，不跟随 Windows 原生灰）。"""
+        tk = self.tk
+        fam = getattr(self, "_ui_family", "TkDefaultFont")
+        return tk.Menu(self.root, tearoff=0, bd=0, relief="flat",
+                       bg=self.pal["card"], fg=self.pal["text"],
+                       activebackground=self.pal["accent_soft"],
+                       activeforeground=self.pal["accent"],
+                       disabledforeground=self.pal["faint"],
+                       selectcolor=self.pal["accent"],
+                       font=(fam, 10))
+
+    def _popup_menu(self, menu, widget):
+        try:
+            x = widget.winfo_rootx()
+            y = widget.winfo_rooty() + widget.winfo_height() + 2
+            menu.tk_popup(x, y)
+        except Exception:
+            pass
+        finally:
+            try:
+                menu.grab_release()
+            except Exception:
+                pass
+
+    def _show_more_menu(self):
+        m = self._menu()
+        m.add_command(label="保存项目…", command=self._dlg_save_project)
+        m.add_command(label="打开项目…", command=self._dlg_open_project)
+        m.add_separator()
+        m.add_command(label="导入图片背景…", command=self._dlg_open_image)
+        m.add_command(label="导入 PDF 背景…", command=self._dlg_import_pdf)
+        if self.page.bg_kind == "pdf":
+            m.add_command(label="上一页", command=self.bg_prev_page)
+            m.add_command(label="下一页", command=self.bg_next_page)
+        m.add_separator()
+        m.add_command(label="切换深 / 浅色",
+                      command=self.toggle_dark)
+        m.add_command(label="日志 / 控制台", command=self.toggle_console)
+        m.add_command(label="启动 AI 接口", command=self.launch_ai)
+        m.add_separator()
+        m.add_command(label="快捷键与手势", command=self._show_about)
+        self._popup_menu(m, self.more_btn)
+
+    def _show_bg_menu(self):
+        m = self._menu()
+        m.add_command(label="导入图片…", command=self._dlg_open_image)
+        m.add_command(label="导入 PDF…", command=self._dlg_import_pdf)
+        m.add_separator()
+        m.add_command(label="空白 A4", command=self.set_blank_background)
+        m.add_command(label="清除背景", command=self.clear_background)
+        if self.page.bg_kind == "pdf":
+            m.add_separator()
+            m.add_command(label="上一页", command=self.bg_prev_page)
+            m.add_command(label="下一页", command=self.bg_next_page)
+        self._popup_menu(m, self.bg_btn)
+
+    def _show_about(self):
+        from tkinter import messagebox
+        messagebox.showinfo(
+            "快捷键与手势",
+            "滚轮　　　　　以光标为中心缩放\n"
+            "中键 / 空格拖动　平移画布\n"
+            "双击　　　　　适应窗口\n"
+            "纸面空白处拖框　重设当前段区域\n"
+            "Ctrl+Enter / F5　渲染\n"
+            "Ctrl+D　　　　切深浅色\n"
+            "Ctrl+1/2/3　　书写 / 样式 / 输出\n"
+            "Esc　　　　　取消选中",
+            parent=self.root)
+
+    # ------------------------------------------------------------ 状态栏 / 日志
     def _build_statusbar(self, parent):
         ttk = self.ttk
-        bar = ttk.Frame(parent, style="Toolbar.TFrame", padding=(10, 3))
+        bar = ttk.Frame(parent, style="Toolbar.TFrame", padding=(16, 4))
         bar.pack(side="bottom", fill="x")
         self.status = ttk.Label(bar, text="就绪", anchor="w",
                                 style="Toolbar.Muted.TLabel")
         self.status.pack(side="left", fill="x", expand=True)
-        self.status_right = ttk.Label(
-            bar, text="滚轮缩放 · 中键/空格拖动 · 双击适应",
-            style="Toolbar.Muted.TLabel")
+        self.status_right = ttk.Label(bar, text="", style="Toolbar.Muted.TLabel")
         self.status_right.pack(side="right")
 
     def _build_console(self, parent):
+        """日志抽屉：平时完全收起，从「⋯」菜单或「输出」页打开。"""
         tk, ttk = self.tk, self.ttk
-        wrap = ttk.Frame(parent, style="TFrame")
-        wrap.pack(side="bottom", fill="x", padx=8, pady=(4, 2))
+        wrap = ttk.Frame(parent, style="Toolbar.TFrame", padding=(14, 6, 14, 8))
         self._console_wrap = wrap
-        head = ttk.Frame(wrap, style="Toolbar.TFrame", padding=(6, 0))
-        head.pack(fill="x")
-        self.console_btn = ttk.Button(head, text="▸ 日志 / 控制台",
-                                      command=self.toggle_console,
-                                      style="Ghost.TButton", padding=(6, 2))
-        self.console_btn.pack(side="left")
-        ttk.Label(head, text="输入 help 查看命令；其他文字记入 feedback.md",
-                  style="Toolbar.Muted.TLabel").pack(side="left", padx=8)
+        self._console_open = False
 
-        self.console_body = ttk.Frame(wrap, style="Card.TFrame", padding=(8, 5))
-        self.console_body.configure(height=160)
-        self.console_body.pack_propagate(False)
-        logrow = ttk.Frame(self.console_body, style="Card.TFrame")
+        head = ttk.Frame(wrap, style="Toolbar.TFrame")
+        head.pack(fill="x")
+        ttk.Label(head, text="日志", style="Toolbar.Muted.TLabel").pack(side="left")
+        self.console_btn = ttk.Button(head, text="收起",
+                                      command=self.toggle_console,
+                                      style="Ghost.TButton", width=0)
+        self.console_btn.pack(side="right")
+        ttk.Button(head, text="清空", command=self._clear_log,
+                   style="Ghost.TButton", width=0).pack(side="right", padx=(0, 4))
+
+        body = ttk.Frame(wrap, style="Card.TFrame", padding=(10, 6))
+        body.pack(fill="x", pady=(4, 0))
+        body.configure(height=int(150 * getattr(self, "_dpi_scale", 1.0)))
+        body.pack_propagate(False)
+        self.console_body = body
+        logrow = ttk.Frame(body, style="Card.TFrame")
         logrow.pack(fill="both", expand=True)
-        self.log_text = tk.Text(logrow, height=4, wrap="word", state="disabled",
+        self.log_text = tk.Text(logrow, height=3, wrap="word", state="disabled",
                                 relief="flat", bd=0)
         self.log_text.pack(side="left", fill="both", expand=True)
         sb = ttk.Scrollbar(logrow, orient="vertical",
@@ -1681,195 +1826,288 @@ class App:
         sb.pack(side="left", fill="y")
         self.log_text.configure(yscrollcommand=sb.set)
 
-        row = ttk.Frame(self.console_body, style="Card.TFrame")
+        row = ttk.Frame(body, style="Card.TFrame")
         row.pack(fill="x", pady=(4, 0))
         ttk.Label(row, text=">", style="Card.Muted.TLabel").pack(side="left")
         self.entry = ttk.Entry(row)
         self.entry.pack(side="left", fill="x", expand=True, padx=4)
         self.entry.bind("<Return>", lambda e: self._on_command())
         ttk.Button(row, text="执行", command=self._on_command,
-                   style="Ghost.TButton").pack(side="left", padx=1)
+                   style="Ghost.TButton", width=0).pack(side="left", padx=1)
         ttk.Button(row, text="记录意见", command=self._record_note,
-                   style="Ghost.TButton").pack(side="left", padx=1)
-        ttk.Button(row, text="feedback.md", command=self._open_feedback,
-                   style="Ghost.TButton").pack(side="left", padx=1)
-        self._console_open = False       # 默认折叠：只留 30px 高的头部
+                   style="Ghost.TButton", width=0).pack(side="left", padx=1)
 
     def toggle_console(self):
+        """日志抽屉：pack 在 paned 之前，收起时整块让位给画布。"""
         if self._console_open:
-            self.console_body.pack_forget()
-            self.console_btn.configure(text="▸ 日志 / 控制台")
-        else:
-            self.console_body.pack(fill="x", pady=(2, 0))
-            self.console_btn.configure(text="▾ 日志 / 控制台")
-        self._console_open = not self._console_open
-
-    # ------------------------------------------------------------ 卡片
-    def _card(self, parent, title):
-        """theme.py 的 Card.TLabelframe 卡片：白底 + 1px 边框 + (12,10) 内边距。"""
-        ttk = self.ttk
-        card = ttk.Labelframe(parent, text=title, style="Card.TLabelframe",
-                              padding=(12, 10))
-        card.pack(fill="x", padx=8, pady=(8, 0))
-        return card, card
-
-    def _build_page_card(self, parent):
-        ttk = self.ttk
-        _card, body = self._card(parent, "页面与背景")
-        self.page_info = ttk.Label(body, text="空白 A4 · 595 × 842 pt",
-                                   style="Card.Muted.TLabel", justify="left",
-                                   wraplength=290)
-        self.page_info.pack(fill="x", pady=(0, 8))
-        grid = ttk.Frame(body, style="Card.TFrame")
-        grid.pack(fill="x")
-        for i, (text, cmd) in enumerate((
-                ("导入图片", self._dlg_open_image),
-                ("导入 PDF", self._dlg_import_pdf),
-                ("空白页", self.set_blank_background),
-                ("清空背景", self.clear_background))):
-            style = ("DangerOutline.TButton" if text == "清空背景"
-                     else "Soft.TButton")
-            b = ttk.Button(grid, text=text, command=cmd, style=style,
-                           padding=(6, 6), width=0)
-            b.grid(row=i // 2, column=i % 2, sticky="ew", padx=2, pady=2)
-        grid.columnconfigure(0, weight=1)
-        grid.columnconfigure(1, weight=1)
-
-    def _build_list_card(self, parent):
-        tk, ttk = self.tk, self.ttk
-        _card, body = self._card(parent, "段落列表")
-        self.para_list = _ParagraphList(body, on_select=self._on_para_selected,
-                                        rows=3,
-                                        dpi_scale=getattr(self, "_dpi_scale", 1.0))
-        self.para_list.pack(fill="x", pady=(0, 6))
-
-        row = ttk.Frame(body, style="Card.TFrame")
-        row.pack(fill="x")
-        self.draw_btn = None
-        small_font = (getattr(self, "_ui_family", "TkDefaultFont"), 9)
-        for i, (text, cmd) in enumerate((
-                ("+ 段落", self.add_paragraph),
-                ("删除", self.delete_paragraph),
-                ("↑", lambda: self.move_paragraph(-1)),
-                ("↓", lambda: self.move_paragraph(1)),
-                ("框选", self.toggle_draw_mode))):
-            b = ttk.Button(row, text=text, command=cmd, style="Ghost.TButton",
-                           padding=(3, 4))
             try:
-                b.configure(font=small_font)
+                self._console_wrap.pack_forget()
             except Exception:
                 pass
-            b.grid(row=0, column=i, sticky="ew", padx=1)
-            if text == "框选":
-                self.draw_btn = b
-        for col in range(5):
-            row.columnconfigure(col, weight=1)
+            self._console_open = False
+        else:
+            try:
+                self._console_wrap.pack(side="bottom", fill="x",
+                                        before=self.paned)
+            except Exception:
+                try:
+                    self._console_wrap.pack(side="bottom", fill="x")
+                except Exception:
+                    pass
+            self._console_open = True
+        try:
+            self.root.update_idletasks()
+        except Exception:
+            pass
 
-    def _build_param_card(self, parent):
+    def _clear_log(self):
+        try:
+            self.log_text.configure(state="normal")
+            self.log_text.delete("1.0", "end")
+            self.log_text.configure(state="disabled")
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------ 卡片 / 分区
+    def _section(self, parent, title, open=True):
+        """泡沫白卡片 + 可折叠标题；返回内容容器。"""
+        ttk = self.ttk
+        card = ttk.Frame(parent, style="Card.TFrame", padding=(13, 9))
+        card.pack(fill="x", padx=10, pady=(0, 8))
+        body = ttk.Frame(card, style="Card.TFrame")
+        state = {"open": bool(open)}
+
+        def paint():
+            try:
+                btn.configure(text=("▾  " if state["open"] else "▸  ") + title)
+            except Exception:
+                pass
+
+        def toggle():
+            state["open"] = not state["open"]
+            if state["open"]:
+                body.pack(fill="x", pady=(7, 0))
+            else:
+                body.pack_forget()
+            paint()
+
+        btn = ttk.Button(card, text=title, style="Section.TButton", width=0,
+                         command=toggle)
+        btn.pack(fill="x")
+        if state["open"]:
+            body.pack(fill="x", pady=(7, 0))
+        paint()
+        return body
+
+    def _toggle_frames(self):
+        self.show_frames = bool(self.var_frames.get())
+        self._draw_overlay()
+
+    # ------------------------------------------------------------ 页 1：书写
+    def _build_write_panel(self, parent):
         tk, ttk = self.tk, self.ttk
-        _card, body = self._card(parent, "段落参数")
-        self.para_title = ttk.Label(body, text="文本 · 第 1 段",
-                                    style="Card.Muted.TLabel")
-        self.para_title.pack(fill="x")
-        self.text_widget = tk.Text(body, height=5, wrap="word", relief="flat",
-                                   bd=0, highlightthickness=1, undo=True)
-        self.text_widget.pack(fill="x", pady=(3, 6))
+        fam = getattr(self, "_ui_family", "TkDefaultFont")
+
+        body = self._section(parent, "段落")
+        self.para_list = _ParagraphList(body, on_select=self._on_para_selected,
+                                        rows=4,
+                                        dpi_scale=getattr(self, "_dpi_scale", 1.0))
+        self.para_list.pack(fill="x")
+        row = ttk.Frame(body, style="Card.TFrame")
+        row.pack(fill="x", pady=(8, 0))
+        self.draw_btn = None       # 新版：纸面空白处直接拖框，「框选」按钮已去掉
+        ttk.Button(row, text="＋ 段落", command=self.add_paragraph,
+                   style="Soft.TButton", width=0).pack(side="left")
+        ttk.Button(row, text="删除", command=self.delete_paragraph,
+                   style="DangerOutline.TButton").pack(side="left", padx=(5, 0))
+        ttk.Button(row, text="↓", command=lambda: self.move_paragraph(1),
+                   style="Ghost.TButton", width=2).pack(side="right", padx=(1, 0))
+        ttk.Button(row, text="↑", command=lambda: self.move_paragraph(-1),
+                   style="Ghost.TButton", width=2).pack(side="right")
+
+        body = self._section(parent, "正文")
+        self.para_title = ttk.Label(body, text="第 1 段", style="Card.Muted.TLabel")
+        self.para_title.pack(anchor="w")
+        self.text_widget = tk.Text(body, height=7, wrap="word", relief="flat",
+                                   bd=0, highlightthickness=1, undo=True,
+                                   font=(fam, 10), padx=8, pady=6)
+        self.text_widget.pack(fill="x", pady=(4, 9))
         self.text_widget.bind("<KeyRelease>", self._on_text_key)
-        self.text_widget.bind("<FocusOut>", lambda e: self._pull_params(render=True))
+        self.text_widget.bind("<FocusOut>",
+                              lambda e: self._pull_params(render=True))
+
+        self.var_size = tk.StringVar(value="%.1f" % self.cfg["size"])
+        self.var_line = tk.StringVar(value="%.1f" % self.cfg["line"])
+        self.var_align = tk.StringVar(value="左对齐")
 
         grid = ttk.Frame(body, style="Card.TFrame")
         grid.pack(fill="x")
         grid.columnconfigure(1, weight=1)
         grid.columnconfigure(3, weight=1)
 
-        self.var_size = tk.StringVar(value="%.1f" % self.cfg["size"])
-        self.var_line = tk.StringVar(value="%.1f" % self.cfg["line"])
-        self.var_jitter = tk.StringVar(value="1.0")
-        self.var_seed = tk.StringVar(value="20261118")
-        self.var_align = tk.StringVar(value="左对齐")
-        self.var_rect = [tk.StringVar(value="56"), tk.StringVar(value="90"),
-                         tk.StringVar(value="539"), tk.StringVar(value="640")]
-
-        def row_label(text, r):
-            ttk.Label(grid, text=text, style="Card.Muted.TLabel").grid(
-                row=r, column=0, sticky="w", pady=2)
-
-        def spin(var, lo, hi, step, col, r, width=7):
+        def spin(var, lo, hi, step, col, r, width=6):
             sp = ttk.Spinbox(grid, textvariable=var, from_=lo, to=hi,
                              increment=step, width=width,
                              command=lambda: self._pull_params(render=True))
-            sp.grid(row=r, column=col, sticky="ew", padx=(2, 4), pady=2)
+            sp.grid(row=r, column=col, sticky="ew", padx=(4, 6), pady=2)
             sp.bind("<Return>", lambda e: self._pull_params(render=True))
             sp.bind("<FocusOut>", lambda e: self._pull_params(render=False))
             return sp
 
-        row_label("字号 pt", 0)
+        ttk.Label(grid, text="字号", style="Card.Muted.TLabel").grid(
+            row=0, column=0, sticky="w")
         spin(self.var_size, 6, 40, 0.2, 1, 0)
-        ttk.Label(grid, text="行距 pt", style="Card.Muted.TLabel").grid(
-            row=0, column=2, sticky="w", padx=(6, 0), pady=2)
+        ttk.Label(grid, text="行距", style="Card.Muted.TLabel").grid(
+            row=0, column=2, sticky="w", padx=(6, 0))
         spin(self.var_line, 8, 80, 0.5, 3, 0)
-        row_label("抖动", 1)
-        spin(self.var_jitter, 0, 2, 0.05, 1, 1)
-        row_label("种子", 2)
-        seed_spin = ttk.Spinbox(grid, textvariable=self.var_seed, from_=0,
-                                to=99999999, increment=1, width=12,
-                                command=lambda: self._pull_params(render=True))
-        seed_spin.grid(row=2, column=1, columnspan=3, sticky="ew",
-                       padx=(2, 4), pady=2)
-        seed_spin.bind("<Return>", lambda e: self._pull_params(render=True))
-        seed_spin.bind("<FocusOut>", lambda e: self._pull_params(render=False))
-        row_label("对齐", 3)
+        ttk.Label(grid, text="对齐", style="Card.Muted.TLabel").grid(
+            row=1, column=0, sticky="w", pady=(4, 0))
         self.align_box = ttk.Combobox(grid, textvariable=self.var_align,
                                       values=["左对齐", "居中", "右对齐"],
                                       state="readonly", width=8)
-        self.align_box.grid(row=3, column=1, columnspan=3, sticky="ew",
-                            padx=(2, 4), pady=2)
+        self.align_box.grid(row=1, column=1, columnspan=3, sticky="ew",
+                            padx=(4, 6), pady=(4, 0))
         self.align_box.bind("<<ComboboxSelected>>",
                             lambda e: self._pull_params(render=True))
-        ttk.Label(grid, text="区域 l,t,r,b", style="Card.Muted.TLabel").grid(
-            row=4, column=0, columnspan=4, sticky="w", pady=(8, 0))
-        rect_row = ttk.Frame(body, style="Card.TFrame")
-        rect_row.pack(fill="x", pady=(2, 0))
-        for i in range(4):
-            e = ttk.Entry(rect_row, textvariable=self.var_rect[i], width=7)
-            e.pack(side="left", padx=1, expand=True, fill="x")
-            e.bind("<Return>", lambda ev: self._pull_params(render=True))
-            e.bind("<FocusOut>", lambda ev: self._pull_params(render=False))
-        self.para_hint = ttk.Label(
-            body, text="画布上可拖动矩形 / 拖 8 个手柄缩放；「框选」后拉新框。",
-            style="Card.Muted.TLabel", wraplength=280)
-        self.para_hint.pack(fill="x", pady=(5, 0))
 
-    def _build_font_card(self, parent):
+        body = self._section(parent, "背景")
+        row = ttk.Frame(body, style="Card.TFrame")
+        row.pack(fill="x")
+        self.bg_btn = ttk.Button(row, text="空白 A4  ▾",
+                                 command=self._show_bg_menu,
+                                 style="Soft.TButton", width=0)
+        self.bg_btn.pack(side="left")
+        self.page_info = ttk.Label(row, text="1/1 页", style="Chip.TLabel")
+        self.page_info.pack(side="right")
+        self._bg_labels.append(self.bg_btn)
+
+    # ------------------------------------------------------------ 页 2：样式
+    def _build_style_panel(self, parent):
         tk, ttk = self.tk, self.ttk
-        _card, body = self._card(parent, "字体与墨色")
-        ttk.Label(body, text="字体", style="Card.Muted.TLabel").pack(anchor="w")
+
+        body = self._section(parent, "字体")
         self.font_var = tk.StringVar(value=_label_for(self.cfg["font"]))
         self.font_box = ttk.Combobox(body, textvariable=self.font_var,
                                      values=[lab for lab, _ in FONT_LABELS],
                                      state="readonly")
-        self.font_box.pack(fill="x", pady=(2, 5))
+        self.font_box.pack(fill="x")
         self.font_box.bind("<<ComboboxSelected>>", lambda e: self._on_font())
-
+        row = ttk.Frame(body, style="Card.TFrame")
+        row.pack(fill="x", pady=(7, 8))
+        ttk.Button(row, text="字库工作台…", command=self.open_fontlab,
+                   style="Soft.TButton", width=0).pack(side="left")
+        ttk.Button(row, text="补缺字…", command=self.open_fontlab_missing,
+                   style="TButton", width=0).pack(side="left", padx=(5, 0))
+        ttk.Button(row, text="刷新字库", command=self.reload_fonts,
+                   style="TButton", width=0).pack(side="left", padx=(5, 0))
         self.var_variants = tk.BooleanVar(value=bool(self.cfg["variants"]))
         self.var_newsym = tk.BooleanVar(value=bool(self.cfg["newsym"]))
-        ttk.Checkbutton(body, text="启用 ZTi 多套字库（同字多形）",
-                        variable=self.var_variants, style="Card.TCheckbutton",
+        ttk.Checkbutton(body, text="多套字形轮换", variable=self.var_variants,
+                        style="Card.TCheckbutton",
                         command=self._on_render_cfg_change).pack(anchor="w")
-        ttk.Checkbutton(body, text="符号用 ZTi-Sym（4 套加权）",
-                        variable=self.var_newsym, style="Card.TCheckbutton",
+        ttk.Checkbutton(body, text="符号用手写库", variable=self.var_newsym,
+                        style="Card.TCheckbutton",
                         command=self._on_render_cfg_change).pack(anchor="w")
 
-        ink_row = ttk.Frame(body, style="Card.TFrame")
-        ink_row.pack(fill="x", pady=(5, 0))
-        ttk.Label(ink_row, text="墨色 R,G,B", style="Card.Muted.TLabel").pack(side="left")
+        body = self._section(parent, "墨色与笔迹")
+        row = ttk.Frame(body, style="Card.TFrame")
+        row.pack(fill="x")
+        ttk.Label(row, text="墨色", style="Card.Muted.TLabel").pack(side="left")
         self.var_ink = tk.StringVar(value=",".join(str(c) for c in self.cfg["ink"]))
-        ent = ttk.Entry(ink_row, textvariable=self.var_ink, width=12)
-        ent.pack(side="left", padx=5, fill="x", expand=True)
+        ent = ttk.Entry(row, textvariable=self.var_ink, width=10)
+        ent.pack(side="left", padx=(6, 4))
         ent.bind("<Return>", lambda e: self._on_ink_change())
         ent.bind("<FocusOut>", lambda e: self._on_ink_change())
-        ttk.Button(ink_row, text="应用到全部", command=self._ink_all,
-                   style="Ghost.TButton").pack(side="left")
+        ttk.Button(row, text="应用到全部", command=self._ink_all,
+                   style="TButton", width=0).pack(side="left")
+
+        grid = ttk.Frame(body, style="Card.TFrame")
+        grid.pack(fill="x", pady=(8, 0))
+        grid.columnconfigure(1, weight=1)
+        grid.columnconfigure(3, weight=1)
+        self.var_jitter = tk.StringVar(value="%.2f" % float(self.cfg["jitter"]))
+        self.var_seed = tk.StringVar(value=str(int(self.cfg["seed"])))
+
+        def spin2(var, lo, hi, step, col):
+            sp = ttk.Spinbox(grid, textvariable=var, from_=lo, to=hi,
+                             increment=step, width=7,
+                             command=lambda: self._pull_params(render=True))
+            sp.grid(row=0, column=col, sticky="ew", padx=(4, 6), pady=2)
+            sp.bind("<Return>", lambda e: self._pull_params(render=True))
+            sp.bind("<FocusOut>", lambda e: self._pull_params(render=False))
+            return sp
+
+        ttk.Label(grid, text="抖动", style="Card.Muted.TLabel").grid(
+            row=0, column=0, sticky="w")
+        spin2(self.var_jitter, 0, 2, 0.05, 1)
+        ttk.Label(grid, text="种子", style="Card.Muted.TLabel").grid(
+            row=0, column=2, sticky="w", padx=(6, 0))
+        spin2(self.var_seed, 0, 99999999, 1, 3)
+
+        body = self._section(parent, "高级", open=False)
+        self.var_rect = [tk.StringVar(value=v)
+                         for v in ("56", "90", "539", "640")]
+        ttk.Label(body, text="区域（左 上 右 下）",
+                  style="Card.Muted.TLabel").pack(anchor="w")
+        row = ttk.Frame(body, style="Card.TFrame")
+        row.pack(fill="x", pady=(4, 8))
+        for i in range(4):
+            e = ttk.Entry(row, textvariable=self.var_rect[i], width=6)
+            e.pack(side="left", padx=(0 if i == 0 else 3, 0), expand=True,
+                   fill="x")
+            e.bind("<Return>", lambda ev: self._pull_params(render=True))
+            e.bind("<FocusOut>", lambda ev: self._pull_params(render=False))
+        self.var_frames = tk.BooleanVar(value=bool(self.show_frames))
+        ttk.Checkbutton(body, text="显示段框", variable=self.var_frames,
+                        style="Card.TCheckbutton",
+                        command=self._toggle_frames).pack(anchor="w")
+
+    # ------------------------------------------------------------ 页 3：输出
+    def _build_out_panel(self, parent):
+        tk, ttk = self.tk, self.ttk
+        fam = getattr(self, "_ui_family", "TkDefaultFont")
+
+        body = self._section(parent, "导出")
+        row = ttk.Frame(body, style="Card.TFrame")
+        row.pack(fill="x")
+        ttk.Button(row, text="导出 PDF", command=self.save_pdf,
+                   style="Accent.TButton", width=0).pack(
+            side="left", expand=True, fill="x")
+        ttk.Button(row, text="导出 PNG", command=self.save_png,
+                   style="Soft.TButton", width=0).pack(
+            side="left", expand=True, fill="x", padx=(6, 0))
+
+        body = self._section(parent, "项目")
+        row = ttk.Frame(body, style="Card.TFrame")
+        row.pack(fill="x")
+        ttk.Button(row, text="保存项目…", command=self._dlg_save_project,
+                   style="Soft.TButton", width=0).pack(
+            side="left", expand=True, fill="x")
+        ttk.Button(row, text="打开项目…", command=self._dlg_open_project,
+                   style="Soft.TButton", width=0).pack(
+            side="left", expand=True, fill="x", padx=(6, 0))
+
+        body = self._section(parent, "AI 接口")
+        row = ttk.Frame(body, style="Card.TFrame")
+        row.pack(fill="x")
+        dot = tk.Label(row, text="●", bd=0, bg=self.pal["card"],
+                       fg=self.pal["muted"], font=(fam, 9))
+        dot.pack(side="left", padx=(0, 6))
+        lbl = ttk.Label(row, text=self._ai_status_display,
+                        style="Card.Muted.TLabel")
+        lbl.pack(side="left")
+        self._ai_dots.append(dot)
+        self._ai_status_labels.append(lbl)
+        ttk.Button(row, text="启动", command=self.launch_ai,
+                   style="TButton", width=0).pack(side="right")
+
+        body = self._section(parent, "日志")
+        row = ttk.Frame(body, style="Card.TFrame")
+        row.pack(fill="x")
+        ttk.Button(row, text="查看日志", command=self.toggle_console,
+                   style="Soft.TButton", width=0).pack(side="left")
+        ttk.Button(row, text="反馈意见", command=self._open_feedback,
+                   style="TButton", width=0).pack(side="left", padx=(5, 0))
 
     # ------------------------------------------------------------ 画布
     def _build_canvas(self, parent):
@@ -1923,6 +2161,9 @@ class App:
         self.root.bind("<KeyPress-space>", self._on_space_down)
         self.root.bind("<KeyRelease-space>", self._on_space_up)
         self.root.bind("<Escape>", lambda e: self._escape())
+        for idx, (key, _label) in enumerate(self.PAGES, start=1):
+            self.root.bind("<Control-Key-%d>" % idx,
+                           lambda e, k=key: self.show_page(k))
         try:
             self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         except Exception:
@@ -1985,9 +2226,9 @@ class App:
         n = len(self.page.paragraphs)
         zoom = "%d%%" % int(round((self.view_zoom or 0) * 100))
         sel = "段 %d/%d" % (self.selected + 1, n) if n else "无段落"
-        msg = "%s · %.0f×%.0f pt · %s · 缩放 %s" % (
+        msg = "%s · %.0f×%.0f · %s · %s" % (
             bg_txt, self.page.width_pt, self.page.height_pt, sel, zoom)
-        if self._coverage:
+        if self._coverage and "缺" in self._coverage:
             msg += " · " + self._coverage
         if msg != self._last_status:
             self._last_status = msg
@@ -2002,19 +2243,10 @@ class App:
 
     def _update_page_info(self):
         bg = self.page.bg_kind
-        size_txt = "%.0f × %.0f pt" % (self.page.width_pt, self.page.height_pt)
         if bg == "pdf":
-            info = "PDF 第 %d/%s 页 · %s" % (
-                self.page.bg_page + 1, self.bg_pdf_pages or "?",
-                size_txt)
-            if self.page.bg_path:
-                info += "\n" + os.path.basename(self.page.bg_path)
-        elif bg == "image":
-            info = "图片背景 · %s" % size_txt
-            if self.page.bg_path:
-                info += "\n" + os.path.basename(self.page.bg_path)
+            info = "%d/%s 页" % (self.page.bg_page + 1, self.bg_pdf_pages or "?")
         else:
-            info = "空白 A4 · %s" % size_txt
+            info = "1/1 页"
         try:
             self.page_info.configure(text=info)
             self._update_toolbar_dynamic_labels()
@@ -2032,15 +2264,10 @@ class App:
     def _refresh_paragraph_list(self):
         try:
             items = []
-            align_txt = {"left": "左对齐", "center": "居中",
-                         "right": "右对齐"}
             for i, p in enumerate(self.page.paragraphs):
                 raw = re.sub(r"\s+", " ", (p.text or "").strip())
                 title = "%d. %s" % (i + 1, raw or "（空段落）")
-                sub = "字号 %s · 行距 %s · %s" % (
-                    _fmt_pt(float(p.size_pt)), _fmt_pt(float(p.line_pt)),
-                    align_txt.get(p.align, "左对齐"))
-                items.append((title, sub))
+                items.append((title, ""))
             self.para_list.set_items(items, selected=self.selected)
         except Exception:
             pass
@@ -2078,13 +2305,14 @@ class App:
         self._syncing = True
         try:
             if p is None:
-                self.para_title.configure(text="文本 · 未选中段落")
+                self.para_title.configure(text="未选中段落")
                 self.text_widget.delete("1.0", "end")
                 return
             self.para_title.configure(
-                text="文本 · 第 %d 段（%s）" % (self.selected + 1,
-                                               "空" if not (p.text or "").strip()
-                                               else "%d 字" % len(p.text)))
+                text="第 %d 段 · %s" % (
+                    self.selected + 1,
+                    "空" if not (p.text or "").strip()
+                    else "%d 字" % len(p.text)))
             self.text_widget.delete("1.0", "end")
             self.text_widget.insert("1.0", p.text or "")
             self.var_size.set("%.1f" % float(p.size_pt))
@@ -2201,12 +2429,64 @@ class App:
             if lab == label:
                 self.cfg["font"] = fn
                 break
-        if self.cfg["font"] == HAN_OWN and symbols.available():
+        if (self.cfg["font"] == HAN_OWN or str(self.cfg["font"]).startswith("lib:")) \
+                and symbols.available():
             self.var_newsym.set(True)
-        if "ZTi/" in self.cfg["font"]:
+        if "ZTi/" in str(self.cfg["font"]):
             self.var_variants.set(True)
         self._pull_render_cfg()
         self.log("字体：%s" % self.font_var.get())
+        self.schedule_render(80)
+
+    # ------------------------------------------------------------ 字库工作台
+    def open_fontlab(self):
+        """打开「字库工作台」：自建库 / 识别 / 微调 / 效果示例。"""
+        try:
+            import fontlab_gui
+        except Exception as e:
+            self._warn("字库工作台打不开：%r" % (e,))
+            return None
+        try:
+            win = fontlab_gui.open_window(self.root, on_close=self.reload_fonts)
+            self.log("已打开字库工作台")
+            return win
+        except Exception as e:
+            self._warn("字库工作台启动失败：%r" % (e,))
+            return None
+
+    def open_fontlab_missing(self):
+        """把当前正文里缺的字带到字库工作台，直接出补字模板。"""
+        text = "\n".join((p.text or "") for p in self.page.paragraphs)
+        missing = symbols.missing_han_chars(text)
+        if not missing:
+            self._warn("当前正文没有缺字（汉字都在字库里）。")
+            return None
+        self.log("缺字 %d 个：%s" % (len(missing), "".join(missing[:40])))
+        try:
+            import fontlab_gui
+            return fontlab_gui.open_window(
+                self.root, on_close=self.reload_fonts,
+                prefill_text="".join(missing))
+        except Exception as e:
+            self._warn("字库工作台启动失败：%r" % (e,))
+            return None
+
+    def reload_fonts(self):
+        """字库索引变了（新建/启用/删除）后刷新下拉框。"""
+        global FONT_LABELS, DEFAULT_FONT_LABEL
+        try:
+            from fontlib import registry
+            registry.load(force=True)
+        except Exception:
+            pass
+        FONT_LABELS = font_labels()
+        DEFAULT_FONT_LABEL = _label_for(DEFAULT_FONT)
+        try:
+            self.font_box["values"] = [lab for lab, _ in FONT_LABELS]
+            self.font_var.set(_label_for(self.cfg.get("font")))
+        except Exception:
+            pass
+        self.log("字库列表已刷新（%d 项）" % len(FONT_LABELS))
         self.schedule_render(80)
 
     def _on_render_cfg_change(self):
@@ -2692,6 +2972,8 @@ class App:
         self.page_image = img
         if note:
             self._coverage = note
+            if "缺" in note or "缺失" in note:
+                self.log(note)
         for w in warns or []:
             self.log("⚠ " + w)
         self._refresh_paragraph_list()
@@ -2965,14 +3247,14 @@ class App:
                                width=1, tags="ov")
 
     def _draw_hint(self, cw, ch):
+        """只在拉框时给一行提示；平时画布上不放说明文字。"""
+        if self.mode != "draw":
+            return
         pal = self.pal
-        if self.mode == "draw":
-            text = "拉框模式：在页面上拖出矩形（Esc 取消）"
-        else:
-            text = "滚轮缩放 · 中键/空格拖动 · 双击适应"
         try:
-            self.canvas.create_text(14, ch - 10, anchor="sw", text=text,
-                                    fill=pal["muted"],
+            self.canvas.create_text(16, ch - 12, anchor="sw",
+                                    text="拖出矩形 · Esc 取消",
+                                    fill=pal["accent"],
                                     font=(self._ui_family, 9), tags="hint")
         except Exception:
             pass
@@ -3044,7 +3326,11 @@ class App:
             return
         hit = self._hit_test(event.x, event.y)
         if not hit:
-            self._set_cursor("")
+            # 纸面空白 = 可拖框；纸外 = 可平移
+            px, py = self._screen_to_pt(event.x, event.y)
+            on_paper = (0 <= px <= self.page.width_pt
+                        and 0 <= py <= self.page.height_pt)
+            self._set_cursor("crosshair" if on_paper else "fleur")
             return
         kind = hit[0]
         if kind == "handle":
@@ -3075,6 +3361,11 @@ class App:
                     self.select_paragraph(hit[1])
                 self._begin_move(hit[1], event.x, event.y)
                 return
+        # 纸面空白处按住拖动 = 重设当前段区域（不再需要单独的「框选」按钮）
+        px, py = self._screen_to_pt(event.x, event.y)
+        if 0 <= px <= self.page.width_pt and 0 <= py <= self.page.height_pt:
+            self._begin_draw(event.x, event.y)
+            return
         self._begin_pan(event.x, event.y)
 
     def _on_motion(self, event):
@@ -3107,13 +3398,16 @@ class App:
 
     def _on_release(self, event):
         it = self._interact
-        self._interact = None
         if not it:
+            self._interact = None
             return
         kind = it.get("kind")
         if kind == "draw":
+            # 注意：先别清 _interact，_end_draw 还要用它取起点
             self._end_draw(event.x, event.y)
-        elif kind in ("move", "resize"):
+            return
+        self._interact = None
+        if kind in ("move", "resize"):
             self._refresh_paragraph_list()
             self._draw_overlay()
             self._update_status()
@@ -3159,10 +3453,6 @@ class App:
     # ---- 拉框
     def set_draw_mode(self, on):
         self.mode = "draw" if on else "select"
-        try:
-            self.draw_btn.configure(text="框选中…" if on else "框选区域")
-        except Exception:
-            pass
         self._set_cursor("crosshair" if on else "")
         self._redraw_view()
         if on:
@@ -3189,6 +3479,7 @@ class App:
 
     def _end_draw(self, x, y):
         it = self._interact or {}
+        self._interact = None
         x0, y0 = it.get("x0"), it.get("y0")
         try:
             self.canvas.delete("ov_draw")
@@ -3201,7 +3492,7 @@ class App:
         left, right = sorted((a[0], b[0]))
         top, bottom = sorted((a[1], b[1]))
         if right - left < 20 or bottom - top < 14:
-            self.log("区域太小（%.0f×%.0f pt），已忽略" % (right - left, bottom - top))
+            # 单击空白处（没拖开）不当作拉框，静默忽略
             self.set_draw_mode(False)
             return
         p = self._current_paragraph()
@@ -3293,7 +3584,7 @@ class App:
             dot = self.pal.get("muted", "#6b7280")
         for w in list(getattr(self, "_ai_dots", [])):
             try:
-                w.configure(fg=dot, bg=self.pal.get("panel", "#ffffff"))
+                w.configure(fg=dot, bg=self.pal.get("card", "#FFFCF4"))
             except Exception:
                 pass
         for w in list(getattr(self, "_ai_status_labels", [])):
