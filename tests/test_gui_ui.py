@@ -267,6 +267,109 @@ def test_shortcuts_bound():
         assert a.root.bind(seq), seq
 
 
+# ---------------------------------------------------------------- 纸张 / 字体颜色
+def test_paper_sizes_and_materials():
+    pm = gui.PM
+    assert pm.paper_size_pt("A4") == (595.0, 842.0)
+    assert pm.paper_size_pt("A4", True) == (842.0, 595.0)
+    w, h = pm.paper_size_pt("B5")
+    assert abs(w - 176.0 * pm.MM) < 0.01
+    assert abs(h - 250.0 * pm.MM) < 0.01
+    assert pm.paper_size_label("A4") == "A4  210×297"
+    assert set(pm.PAPER_SIZE_ORDER) == set(pm.PAPER_SIZES)
+    assert set(pm.PAPER_MATERIAL_ORDER) == set(pm.PAPER_MATERIALS)
+    for key in pm.PAPER_MATERIAL_ORDER:
+        im = pm.make_paper_image(60, 80, key)
+        assert im.size == (60 * pm.SCALE, 80 * pm.SCALE), (key, im.size)
+    # 牛皮纸不是白的（材质真的进了像素）
+    kraft = pm.make_paper_image(60, 80, "kraft").convert("RGB")
+    assert kraft.resize((1, 1)).getpixel((0, 0))[0] < 240
+
+
+def test_paper_spec_roundtrip():
+    pm = gui.PM
+    pg = pm.Page()
+    pg.set_paper(size="A5", landscape=True, material="ivory")
+    pg.add_paragraph(pm.Paragraph(text="纸张", rect=[20, 30, 200, 120]))
+    spec = pm.page_to_spec(pg)
+    assert spec["paper"] == {"size": "A5", "landscape": True,
+                             "material": "ivory"}
+    pg2 = pm.page_from_spec(spec)
+    assert (pg2.paper_size, pg2.paper_landscape, pg2.paper_kind) == (
+        "A5", True, "ivory")
+    assert abs(pg2.width_pt - pg.width_pt) < 0.01
+    assert abs(pg2.height_pt - pg.height_pt) < 0.01
+    # 老项目（没有 paper 字段）按尺寸反查
+    old = {"width_pt": 595.0, "height_pt": 842.0, "paragraphs": []}
+    pg3 = pm.page_from_spec(old)
+    assert pg3.paper_size == "A4" and pg3.paper_kind == "clean"
+
+
+def test_paper_and_ink_controls():
+    a = app()
+    p0 = a.page.paragraphs[0]
+    try:
+        a.set_blank_background()
+        a._apply_paper(size="B5")
+        assert a.page.paper_size == "B5"
+        assert abs(a.page.width_pt - 498.9) < 0.5
+        assert p0.right <= a.page.width_pt + 0.01
+        a._apply_paper(material="kraft")
+        assert a.page.paper_kind == "kraft"
+        assert "牛皮" in a._paper_chips["kraft"].cget("text")
+        assert "✓" in a._paper_chips["kraft"].cget("text")
+        a._apply_paper(landscape=True)
+        assert a.page.paper_landscape is True
+        assert a.page.width_pt > a.page.height_pt
+        a.select_paragraph(0)
+        a._set_ink((24, 64, 160))
+        assert p0.ink == (24, 64, 160)
+        assert a.cfg["ink"] == (24, 64, 160)
+        assert "✓" in a._ink_chips[(24, 64, 160)].cget("text")
+        a._set_ink((170, 42, 46), apply_all=True)
+        assert all(p.ink == (170, 42, 46) for p in a.page.paragraphs)
+        # 控制台命令仍可用
+        assert a._try_command("paper=A3")
+        assert a.page.paper_size == "A3"
+        assert a._try_command("material=宣纸")
+        assert a.page.paper_kind == "rice"
+        assert a._try_command("landscape=on")
+        assert a.page.paper_landscape is True
+        # 空白页清背景后仍保留纸张偏好
+        a.set_blank_background()
+        assert a.page.paper_size == "A3" and a.page.paper_landscape is True
+        assert a.page.paper_kind == "rice"
+    finally:
+        a._apply_paper(size="A4", landscape=False, material="clean")
+        a._set_ink((16, 16, 18), apply_all=True)
+        a.set_blank_background()
+
+
+def test_paper_and_ink_persisted():
+    a = app()
+    cfg = os.path.join(CFG_DIR, "paper.json")
+    try:
+        a._apply_paper(size="A5", landscape=False, material="ivory")
+        a._set_ink((92, 64, 40), apply_all=True)
+        a.save_config(cfg)
+        import tkinter as tk
+        top = tk.Toplevel(a.root)
+        top.withdraw()
+        b = gui.App(top, auto_render=False, config_path=cfg)
+        top.update()
+        try:
+            assert b.page.paper_size == "A5", b.page.paper_size
+            assert b.page.paper_kind == "ivory", b.page.paper_kind
+            assert b.cfg["ink"] == (92, 64, 40), b.cfg["ink"]
+            assert b.page.paragraphs[0].ink == (92, 64, 40)
+        finally:
+            b.close()
+    finally:
+        a._apply_paper(size="A4", landscape=False, material="clean")
+        a._set_ink((16, 16, 18), apply_all=True)
+        a.set_blank_background()
+
+
 # ---------------------------------------------------------------- 入口
 def main():
     if not theme.available():

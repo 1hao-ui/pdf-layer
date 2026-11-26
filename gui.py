@@ -22,9 +22,9 @@
 ├───────────────┬────────────────────────────────────────────────────┤
 │ 书写：段落     │  整页画布（浅海）：暖白纸 + 多段落手写层            │
 │   列表 / 正文  │  矩形可拖动 / 缩放；纸面空白处拖框 = 重设当前段区域  │
-│   + 背景按钮   │  滚轮以光标为中心缩放，中键 / 空格拖动，双击适应    │
+│   纸张 / 背景  │  滚轮以光标为中心缩放，中键 / 空格拖动，双击适应    │
 │ 样式：字体 /   │                                                    │
-│   墨色 / 高级  │                                                    │
+│   笔色 / 高级  │                                                    │
 │ 输出：导出 /   │                                                    │
 │   项目 / AI    │                                                    │
 ├───────────────┴────────────────────────────────────────────────────┤
@@ -89,6 +89,30 @@ CONFIG_PATH = os.path.join(OUT_DIR, "gui_config.json")
 PROJECT_DIR = os.path.normpath(os.path.join(HERE, "..", ".."))
 
 AI_DEFAULT_PORT = int(os.environ.get("AI_API_PORT") or 8765)
+
+# 常用笔色（字体颜色）：黑 / 蓝黑 / 纯蓝 / 朱红 / 墨绿 / 棕褐。
+# 只是快捷入口；自定义颜色仍可用右边的 R,G,B 输入框或「取色…」。
+INK_PRESETS = (
+    ("墨黑", (16, 16, 18)),
+    ("蓝黑", (30, 45, 78)),
+    ("纯蓝", (24, 64, 160)),
+    ("朱红", (170, 42, 46)),
+    ("墨绿", (32, 96, 66)),
+    ("棕褐", (92, 64, 40)),
+)
+
+
+def _hex(rgb):
+    """(r,g,b) → '#rrggbb'（Tk 控件用）。"""
+    r, g, b = (max(0, min(255, int(v))) for v in tuple(rgb)[:3])
+    return "#%02x%02x%02x" % (r, g, b)
+
+
+def _contrast_fg(rgb):
+    """按亮度选黑/白字，保证色块上的标签看得清。"""
+    r, g, b = (max(0, min(255, int(v))) for v in tuple(rgb)[:3])
+    return "#1b1712" if (0.299 * r + 0.587 * g + 0.114 * b) > 150 else "#ffffff"
+
 
 # ---------------------------------------------------------------- 字体
 HAN_OWN = "__HAN_OWN__"      # 「我的手写体」别名：当前启用的汉字库 + 符号库
@@ -681,7 +705,7 @@ def export_pdf_with_factory(page, path, hand_factory=None):
     doc = fitz.open()
     rect = fitz.Rect(0, 0, page.width_pt, page.height_pt)
     pg = doc.new_page(width=page.width_pt, height=page.height_pt)
-    if page.bg_kind != "blank":
+    if not page.paper_is_plain():
         bg = io.BytesIO()
         page.background().convert("RGB").save(bg, format="PNG")
         pg.insert_image(rect, stream=bg.getvalue(), overlay=False,
@@ -945,10 +969,19 @@ class App:
         self._last_geometry = ""
         self._default_geom = ""
 
+        # ---- 配置（先读，纸张 / 墨色偏好要在建页面之前生效）----
+        self._config = self._read_config()
+
         # ---- 页面模型（唯一真相源：背景 + 多段落）----
         self.page = PM.Page()
+        paper_cfg = self._config.get("paper")
+        if not isinstance(paper_cfg, dict):
+            paper_cfg = {}
+        self.page.set_paper(size=paper_cfg.get("size") or "A4",
+                            landscape=paper_cfg.get("landscape") or False,
+                            material=paper_cfg.get("material") or "clean")
         self.page.add_paragraph(PM.Paragraph(
-            text=SAMPLE_TEXT, rect=[56.0, 90.0, 539.0, 640.0]))
+            text=SAMPLE_TEXT, rect=self._sample_rect()))
         self.page_image = None
         self._coverage = ""
         self.render_token = 0
@@ -990,6 +1023,13 @@ class App:
             "variants": False,
             "newsym": symbols.available(),
         }
+        saved_ink = self._config.get("ink")
+        if isinstance(saved_ink, (list, tuple)) and len(saved_ink) == 3:
+            try:
+                self.cfg["ink"] = tuple(max(0, min(255, int(v)))
+                                        for v in saved_ink)
+            except Exception:
+                pass
 
         # ---- AI 接口 ----
         self.ai_proc = None
@@ -998,12 +1038,14 @@ class App:
         self._ai_status_text = "AI：未启动"
         self._ai_status_display = "未启动"
 
-        # ---- 配置 / 主题 ----
-        self._config = self._read_config()
+        # ---- 主题 ----
         self.dark = bool(self._config.get("dark") if dark is None else dark)
         font_cfg = self._config.get("font")
         if font_cfg and any(f == font_cfg for _lab, f in FONT_LABELS):
             self.cfg["font"] = font_cfg
+        # 记住的字体颜色也应用到示例段，否则重开程序看起来「颜色没存住」。
+        if self.page.paragraphs:
+            self.page.paragraphs[0].ink = tuple(self.cfg["ink"])
 
         root.title("手写体生成器")
         self._apply_window_geometry()
@@ -1095,6 +1137,10 @@ class App:
             "geometry": self.get_geometry_string(),
             "dark": bool(self.dark),
             "font": self.cfg.get("font") or DEFAULT_FONT,
+            "ink": list(self.cfg.get("ink") or H.INK),
+            "paper": {"size": self.page.paper_size,
+                      "landscape": bool(self.page.paper_landscape),
+                      "material": self.page.paper_kind},
             "page": getattr(self, "page_key", None) or "write",
             "updated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
@@ -1931,7 +1977,7 @@ class App:
             return "PDF 背景  ▾"
         if self.page.bg_kind == "image":
             return "图片背景  ▾"
-        return "空白 A4  ▾"
+        return "空白 %s  ▾" % self.page.paper_size
 
     # ------------------------------------------------------------ 菜单
     def _menu(self):
@@ -1983,7 +2029,8 @@ class App:
         m.add_command(label="导入图片…", command=self._dlg_open_image)
         m.add_command(label="导入 PDF…", command=self._dlg_import_pdf)
         m.add_separator()
-        m.add_command(label="空白 A4", command=self.set_blank_background)
+        m.add_command(label="空白 %s" % self.page.paper_size,
+                      command=self.set_blank_background)
         m.add_command(label="清除背景", command=self.clear_background)
         if self.page.bg_kind == "pdf":
             m.add_separator()
@@ -2196,10 +2243,50 @@ class App:
         self.align_box.bind("<<ComboboxSelected>>",
                             lambda e: self._pull_params(render=True))
 
+        body = self._section(parent, "纸张")
+        self.var_paper_size = tk.StringVar(
+            value=PM.paper_size_label(self.page.paper_size,
+                                      self.page.paper_landscape))
+        self.paper_size_box = ttk.Combobox(
+            body, textvariable=self.var_paper_size,
+            values=[PM.paper_size_label(k) for k in PM.PAPER_SIZE_ORDER],
+            state="readonly")
+        self.paper_size_box.pack(fill="x")
+        self.paper_size_box.bind("<<ComboboxSelected>>",
+                                 lambda e: self._on_paper_size())
+        self.var_paper_landscape = tk.BooleanVar(
+            value=bool(self.page.paper_landscape))
+        self.paper_land_cb = ttk.Checkbutton(
+            body, text="横向", variable=self.var_paper_landscape,
+            style="Card.TCheckbutton", command=self._on_paper_landscape)
+        self.paper_land_cb.pack(anchor="w", pady=(6, 2))
+        ttk.Label(body, text="材质", style="Card.Muted.TLabel").pack(
+            anchor="w", pady=(2, 3))
+        chips = ttk.Frame(body, style="Card.TFrame")
+        chips.pack(fill="x")
+        self._paper_chips = {}
+        for i, key in enumerate(PM.PAPER_MATERIAL_ORDER):
+            spec = PM.PAPER_MATERIALS[key]
+            b = tk.Button(chips, text=spec["label"], bd=0, relief="flat",
+                          cursor="hand2", padx=2, pady=4, width=4,
+                          font=(fam, 9), bg=_hex(spec["base"]),
+                          fg=_contrast_fg(spec["base"]),
+                          activebackground=_hex(spec["base"]),
+                          activeforeground=_contrast_fg(spec["base"]),
+                          highlightthickness=1,
+                          highlightbackground=self.pal.get("border", "#e7d9c2"),
+                          command=lambda k=key: self._on_paper_material(k))
+            b.grid(row=i // 3, column=i % 3, sticky="ew",
+                   padx=(0 if i % 3 == 2 else 4, 0), pady=(0, 4))
+            self._paper_chips[key] = b
+        for c in range(3):
+            chips.columnconfigure(c, weight=1)
+
         body = self._section(parent, "背景")
         row = ttk.Frame(body, style="Card.TFrame")
         row.pack(fill="x")
-        self.bg_btn = self._button(row, "空白 A4  ▾", self._show_bg_menu,
+        self.bg_btn = self._button(row, self._bg_label_text(),
+                                   self._show_bg_menu,
                                    "Soft.TButton", icon="image")
         self.bg_btn.pack(side="left")
         self.page_info = ttk.Label(row, text="1/1 页", style="Chip.TLabel")
@@ -2209,6 +2296,7 @@ class App:
     # ------------------------------------------------------------ 页 2：样式
     def _build_style_panel(self, parent):
         tk, ttk = self.tk, self.ttk
+        fam = getattr(self, "_ui_family", "TkDefaultFont")
 
         body = self._section(parent, "字体")
         self.font_var = tk.StringVar(value=_label_for(self.cfg["font"]))
@@ -2235,17 +2323,37 @@ class App:
                         style="Card.TCheckbutton",
                         command=self._on_render_cfg_change).pack(anchor="w")
 
-        body = self._section(parent, "墨色与笔迹")
+        body = self._section(parent, "字体颜色与笔迹")
+        chips = ttk.Frame(body, style="Card.TFrame")
+        chips.pack(fill="x")
+        self._ink_chips = {}
+        for i, (label, rgb) in enumerate(INK_PRESETS):
+            b = tk.Button(chips, text=label, bd=0, relief="flat",
+                          cursor="hand2", padx=2, pady=4, width=5,
+                          font=(fam, 9), bg=_hex(rgb), fg=_contrast_fg(rgb),
+                          activebackground=_hex(rgb),
+                          activeforeground=_contrast_fg(rgb),
+                          highlightthickness=1,
+                          highlightbackground=self.pal.get("border", "#e7d9c2"),
+                          command=lambda v=rgb: self._set_ink(v))
+            b.grid(row=i // 3, column=i % 3, sticky="ew",
+                   padx=(0 if i % 3 == 2 else 4, 0), pady=(0, 4))
+            self._ink_chips[tuple(rgb)] = b
+        for c in range(3):
+            chips.columnconfigure(c, weight=1)
+
         row = ttk.Frame(body, style="Card.TFrame")
-        row.pack(fill="x")
-        ttk.Label(row, text="墨色", style="Card.Muted.TLabel").pack(side="left")
+        row.pack(fill="x", pady=(2, 0))
+        ttk.Label(row, text="自定义", style="Card.Muted.TLabel").pack(side="left")
         self.var_ink = tk.StringVar(value=",".join(str(c) for c in self.cfg["ink"]))
-        ent = ttk.Entry(row, textvariable=self.var_ink, width=10)
-        ent.pack(side="left", padx=(6, 4))
+        ent = ttk.Entry(row, textvariable=self.var_ink, width=8)
+        ent.pack(side="left", padx=(5, 4))
         ent.bind("<Return>", lambda e: self._on_ink_change())
         ent.bind("<FocusOut>", lambda e: self._on_ink_change())
-        self._button(row, "应用到全部", self._ink_all, "TButton",
-                     icon="check").pack(side="left")
+        self._button(row, "取色…", self._pick_ink, "Ghost.TButton",
+                     tone="muted", padding=(6, 4)).pack(side="left")
+        self._button(row, "应用到全部", self._ink_all, "TButton").pack(
+            side="right")
 
         grid = ttk.Frame(body, style="Card.TFrame")
         grid.pack(fill="x", pady=(8, 0))
@@ -2451,7 +2559,9 @@ class App:
         elif bg == "image":
             bg_txt = "图片"
         else:
-            bg_txt = "空白"
+            bg_txt = "空白 %s" % self.page.paper_size
+            if self.page.paper_kind != "clean":
+                bg_txt += "·" + self.page.paper_material
         n = len(self.page.paragraphs)
         zoom = "%d%%" % int(round((self.view_zoom or 0) * 100))
         sel = "段 %d/%d" % (self.selected + 1, n) if n else "无段落"
@@ -2487,6 +2597,7 @@ class App:
             self.var_bg_page.set(self.page.bg_page + 1 if bg == "pdf" else 1)
         except Exception:
             pass
+        self._sync_paper_controls()
         self._update_status()
 
     # ============================================================ 段落状态同步
@@ -2553,6 +2664,7 @@ class App:
             for i, v in enumerate(p.rect):
                 self.var_rect[i].set(_fmt_pt(float(v)))
             self.var_ink.set(",".join(str(c) for c in p.ink))
+            self._update_ink_chips(p.ink)
         except Exception:
             pass
         finally:
@@ -2612,6 +2724,7 @@ class App:
         self.cfg["line"] = float(p.line_pt)
         self.cfg["jitter"] = float(p.jitter)
         self.cfg["seed"] = int(p.seed)
+        self._update_ink_chips(p.ink)
         p.normalize()
         self._refresh_paragraph_list()
         self._sync_rect_vars()
@@ -2648,6 +2761,8 @@ class App:
             self.var_variants.set(bool(self.cfg["variants"]))
             self.var_newsym.set(bool(self.cfg["newsym"]))
             self.var_ink.set(",".join(str(c) for c in self.cfg["ink"]))
+            self._update_ink_chips(self.cfg["ink"])
+            self._sync_paper_controls()
         except Exception:
             pass
         self._sync_params_from_selected()
@@ -2731,17 +2846,12 @@ class App:
         try:
             parts = [int(x) for x in raw.split(",") if x.strip()]
             if len(parts) != 3:
-                self.log("墨色要写成 R,G,B（如 16,16,18）")
+                self.log("字体颜色要写成 R,G,B（如 16,16,18）")
                 return
         except Exception:
-            self.log("墨色要写成 R,G,B（如 16,16,18）")
+            self.log("字体颜色要写成 R,G,B（如 16,16,18）")
             return
-        ink = tuple(max(0, min(255, v)) for v in parts)
-        self.cfg["ink"] = ink
-        p = self._current_paragraph()
-        if p is not None:
-            p.ink = ink
-        self._pull_params(render=True)
+        self._set_ink(tuple(parts))
 
     def _ink_all(self):
         raw = self.var_ink.get().replace("，", ",")
@@ -2749,17 +2859,160 @@ class App:
             parts = [int(x) for x in raw.split(",") if x.strip()]
             if len(parts) != 3:
                 raise ValueError
-            ink = tuple(max(0, min(255, v)) for v in parts)
         except Exception:
-            self.log("墨色要写 R,G,B")
+            self.log("字体颜色要写 R,G,B")
             return
+        self._set_ink(tuple(parts), apply_all=True)
+
+    def _set_ink(self, ink, apply_all=False):
+        """设置字体颜色：默认只改当前段，apply_all 改全部段落。"""
+        try:
+            ink = tuple(max(0, min(255, int(round(float(v)))))
+                        for v in tuple(ink)[:3])
+            if len(ink) != 3:
+                raise ValueError
+        except Exception:
+            self.log("字体颜色要写成 R,G,B（如 16,16,18）")
+            return False
         self.cfg["ink"] = ink
-        for p in self.page.paragraphs:
-            p.ink = ink
-        self.log("墨色已应用到全部 %d 段" % len(self.page.paragraphs))
+        p = self._current_paragraph()
+        targets = (list(self.page.paragraphs) if apply_all
+                   else ([p] if p is not None else []))
+        for q in targets:
+            q.ink = ink
+        self._syncing = True
+        try:
+            self.var_ink.set(",".join(str(c) for c in ink))
+        finally:
+            self._syncing = False
+        self._update_ink_chips(ink)
+        self.log("字体颜色：%s（%s）" % (
+            ",".join(str(c) for c in ink),
+            "全部 %d 段" % len(targets) if apply_all else "当前段"))
+        if apply_all:
+            self.schedule_render(80)
+        else:
+            self._pull_params(render=True)
+        return True
+
+    def _pick_ink(self):
+        try:
+            from tkinter import colorchooser
+            rgb, _hexv = colorchooser.askcolor(
+                color=_hex(self.cfg.get("ink") or H.INK),
+                parent=self.root, title="选择字体颜色")
+        except Exception:
+            return None
+        if rgb:
+            self._set_ink(tuple(int(round(v)) for v in rgb))
+        return rgb
+
+    def _update_ink_chips(self, ink=None):
+        """选中的色块打勾——深色块上的 2px 描边不够显眼。"""
+        try:
+            ink = tuple(int(v) for v in
+                        (ink if ink is not None else self.cfg.get("ink")))
+        except Exception:
+            ink = tuple(H.INK)
+        labels = {tuple(rgb): lab for lab, rgb in INK_PRESETS}
+        for rgb, btn in getattr(self, "_ink_chips", {}).items():
+            sel = tuple(rgb) == ink
+            try:
+                btn.configure(
+                    text=("✓ " + labels.get(tuple(rgb), "")) if sel
+                    else labels.get(tuple(rgb), ""),
+                    highlightthickness=2 if sel else 1,
+                    highlightbackground=(self.pal.get("accent")
+                                         if sel else self.pal.get("border")))
+            except Exception:
+                pass
+
+    # ============================================================ 纸张
+    def _on_paper_size(self):
+        key = str(self.var_paper_size.get()).split(" ")[0]
+        self._apply_paper(size=key)
+
+    def _on_paper_landscape(self):
+        self._apply_paper(landscape=bool(self.var_paper_landscape.get()))
+
+    def _on_paper_material(self, key):
+        self._apply_paper(material=key)
+
+    def _apply_paper(self, size=None, landscape=None, material=None):
+        """纸张尺寸 / 方向 / 材质：空白页立即生效，图片/PDF 背景只记偏好。"""
+        old_w, old_h = float(self.page.width_pt), float(self.page.height_pt)
+        was_blank = self.page.bg_kind == "blank"
+        resize = (size is not None or landscape is not None)
+        self.page.set_paper(size=size, landscape=landscape, material=material,
+                            resize=resize)
+        new_w, new_h = self.page.width_pt, self.page.height_pt
+        changed = (abs(new_w - old_w) > 0.01 or abs(new_h - old_h) > 0.01)
+        if changed and was_blank and old_w > 0 and old_h > 0:
+            sx, sy = new_w / old_w, new_h / old_h
+            for p in self.page.paragraphs:
+                p.rect = [p.left * sx, p.top * sy,
+                          p.right * sx, p.bottom * sy]
+            self._clamp_paragraphs_to_page()
+            self._sync_rect_vars()
+        self._sync_paper_controls()
+        self._update_page_info()
+        self._draw_overlay()
+        self._redraw_view()
+        bits = []
+        if size:
+            bits.append("尺寸 " + PM.paper_size_label(
+                self.page.paper_size, self.page.paper_landscape))
+        if landscape is not None:
+            bits.append("横向" if self.page.paper_landscape else "纵向")
+        if material:
+            bits.append("材质 " + self.page.paper_material)
+        note = "" if was_blank else "（当前背景不是空白纸，只记录偏好）"
+        self.log("纸张：%s%s" % ("，".join(bits) or "未变", note))
         self.schedule_render(80)
+        return changed
+
+    def _sync_paper_controls(self):
+        """控件跟随页面：非空白背景时纸张设置不可用。"""
+        try:
+            self.var_paper_size.set(PM.paper_size_label(
+                self.page.paper_size, self.page.paper_landscape))
+            self.var_paper_landscape.set(bool(self.page.paper_landscape))
+        except Exception:
+            pass
+        blank = self.page.bg_kind == "blank"
+        try:
+            self.paper_size_box.configure(state="readonly" if blank
+                                          else "disabled")
+        except Exception:
+            pass
+        try:
+            self.paper_land_cb.configure(state="normal" if blank
+                                         else "disabled")
+        except Exception:
+            pass
+        for key, btn in getattr(self, "_paper_chips", {}).items():
+            sel = (key == self.page.paper_kind)
+            label = PM.PAPER_MATERIALS.get(key, {}).get("label", key)
+            try:
+                btn.configure(
+                    text=("✓ " + label) if sel else label,
+                    state="normal" if blank else "disabled",
+                    highlightthickness=2 if sel else 1,
+                    highlightbackground=(self.pal.get("accent")
+                                         if sel else self.pal.get("border")))
+            except Exception:
+                pass
 
     # ============================================================ 段落增删移
+    def _sample_rect(self):
+        """示例文字的书写框：A4 沿用老坐标，其它纸按比例收。"""
+        w, h = self.page.width_pt, self.page.height_pt
+        if abs(w - PM.A4_W) < 1.0 and abs(h - PM.A4_H) < 1.0:
+            return [56.0, 90.0, 539.0, 640.0]
+        k = h / PM.A4_H
+        return [56.0, 90.0, round(w - 56.0, 1),
+                round(min(h - 60.0, max(240.0, 640.0 * k)), 1)]
+
     def _default_new_rect(self):
         page = self.page
         if page.paragraphs:
@@ -2831,14 +3084,17 @@ class App:
         self.page.bg_path = ""
         self.page.source_pdf = ""
         self.page.bg_page = 0
-        self.page.width_pt, self.page.height_pt = PM.A4_W, PM.A4_H
-        self.page.invalidate()
+        # 空白页恢复成上次选的纸张尺寸 / 材质，而不是硬写 A4。
+        self.page.set_paper()
         self.bg_pdf_pages = 0
         self.fit_mode = True
+        self._clamp_paragraphs_to_page()
         self._update_page_info()
         self._draw_overlay()
         self._redraw_view()
-        self.log("背景已清空：空白 A4")
+        self.log("背景已清空：空白 %s · %s" % (
+            PM.paper_size_label(self.page.paper_size, self.page.paper_landscape),
+            self.page.paper_material))
         self.schedule_render(80)
 
     def load_image_background(self, path):
@@ -3071,6 +3327,8 @@ class App:
             self.cfg["font"] = rcfg["font"]
         self.cfg["variants"] = bool(rcfg.get("variants"))
         self.cfg["newsym"] = bool(rcfg.get("newsym", self.cfg["newsym"]))
+        if self.page.paragraphs:
+            self.cfg["ink"] = tuple(self.page.paragraphs[0].ink)
         if data.get("dark") is not None:
             self.dark = bool(data.get("dark"))
         self.selected = 0 if self.page.paragraphs else None
@@ -3318,7 +3576,14 @@ class App:
             c.create_rectangle(x0 + off, y0 + off, x1 + off, y1 + off,
                                fill=_mix(canvas_bg, shadow, 0.32),
                                outline="", tags="pagebg")
-            c.create_rectangle(x0, y0, x1, y1, fill=pal["white"], outline="",
+            # 纸面底色：空白页跟随纸张材质，先给个近似的底，渲染结果回来后
+            # 再盖上带纹理的整页图（避免切换材质时闪一下纯白）。
+            paper_fill = pal["white"]
+            if self.page.bg_kind == "blank":
+                spec = PM.PAPER_MATERIALS.get(self.page.paper_kind)
+                if spec:
+                    paper_fill = _hex(spec["base"])
+            c.create_rectangle(x0, y0, x1, y1, fill=paper_fill, outline="",
                                tags="pagebg")
             if self.page_image is not None:
                 px, py, photo = self._view_photo(cx, cy, cw, ch, z, iw, ih)
@@ -4010,6 +4275,8 @@ class App:
                 "命令：\n"
                 "  参数  size=13.2  line=24  jitter=0.8  seed=1  align=left|center|right\n"
                 "        ink=16,16,18  rect=56,120,539,400  width=404\n"
+                "        paper=A4|A3|B5|A5|Letter|16K  landscape=on|off\n"
+                "        material=clean|warm|ivory|kraft|recycled|rice\n"
                 "        font=名字  variants=on|off  newsym=on|off  page=on|off\n"
                 "  动作  render | save png [路径] | save pdf [路径] | fit | zoom=0.5|fit\n"
                 "        new | del | up | down | next | prev\n"
@@ -4147,11 +4414,29 @@ class App:
                     parts = [int(x) for x in val.replace("，", ",").split(",")
                              if x.strip()]
                     if len(parts) != 3:
-                        raise ValueError("墨色要写成 R,G,B")
+                        raise ValueError("字体颜色要写成 R,G,B")
                     self.cfg["ink"] = tuple(max(0, min(255, v)) for v in parts)
                     p = self._current_paragraph()
                     if p is not None:
                         p.ink = self.cfg["ink"]
+                elif key == "paper":
+                    if val not in PM.PAPER_SIZES:
+                        raise ValueError("纸张尺寸可选：%s"
+                                         % "、".join(PM.PAPER_SIZE_ORDER))
+                    self._apply_paper(size=val)
+                elif key == "landscape":
+                    self._apply_paper(
+                        landscape=val.lower() in ("on", "1", "true", "yes",
+                                                  "开", "横向"))
+                elif key == "material":
+                    hit = [k for k, spec in PM.PAPER_MATERIALS.items()
+                           if val in (k, spec["label"])]
+                    if not hit:
+                        raise ValueError("材质可选：%s"
+                                         % "、".join(
+                                             s["label"] for s in
+                                             PM.PAPER_MATERIALS.values()))
+                    self._apply_paper(material=hit[0])
                 elif key == "rect":
                     parts = [float(x) for x in val.replace("，", ",").split(",")
                              if x.strip()]
