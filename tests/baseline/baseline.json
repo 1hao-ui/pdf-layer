@@ -1,39 +1,39 @@
 {
-  "style_note": "汉字 ZTi-Han 2 套 + 符号 ZTi-Sym 4 套加权",
+  "style_note": "汉字 ZTi-Han 2 套 + 符号 ZTi-Sym 固定 pass2",
   "main_font": "pass2.ttf",
   "math_font": "pass2.ttf",
   "han_dir": "ZTi-Han",
   "sym_dir": "ZTi-Sym",
   "cal_han": {
-    "size_scale": 1.4902,
+    "size_scale": 1.5168,
     "dy": 0.0,
     "dx": 0.0,
-    "adv_scale": 0.7192
+    "adv_scale": 0.7028
   },
   "cal_sym": {
-    "size_scale": 1.2827,
+    "size_scale": 1.4441,
     "dy": 0.0,
     "dx": 0.25,
     "adv_scale": 1.0
   },
   "text": {
-    "w": 278.75,
-    "h": 46.0,
+    "w": 272.75,
+    "h": 54.5,
     "size": [
-      1115,
-      184
+      1091,
+      218
     ],
     "mode": "RGBA",
-    "sha": "7e6c922f3a66ed9d3b1252cfc2e0f2bb7a6f69e333795c76de921a75d30e90f2"
+    "sha": "60b6ad1e9e51991af398f47cfc5b8e822db7f71879cd03a2d68bc473c8d42bce"
   },
   "formula": {
-    "w": 354.5,
-    "h": 29.25,
+    "w": 333.25,
+    "h": 25.5,
     "size": [
-      1418,
-      117
+      1333,
+      102
     ],
     "mode": "RGBA",
-    "sha": "dfaf3d9b6ba65a469788ee4f5426e336112fb03c40c85bd32cc35ba83b201733"
+    "sha": "3ee641375a9afe98c1d2c5c8e15b6b1aba4facf7d2d62393b5bbbeab9d3184fb"
   }
 }

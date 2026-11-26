@@ -143,7 +143,7 @@ Python；WorkBuddy 沙箱自带的 Python 没有 tkinter，直接双击 `gui.py`
 （如「多套循环（覆盖率 96%）」或「覆盖率仅 56%，已退回单套」——退回单套时
 仍是你的笔迹，只是同字不再变形）。
 
-**默认字体**：下拉框第一项「★ 我的手写体（汉字+符号，全手写）」= 汉字 `ZTi-Han`（500 字，pass2 主 / pass1 变体）+ 数字/拉丁/希腊/符号 `ZTi-Sym` 4 套加权；`symbols.make_han_hand()` 即此组合。
+**默认字体**：下拉框第一项「★ 我的手写体（汉字+符号，全手写）」= 汉字 `ZTi-Han`（500 字，pass2 主 / pass1 变体）+ 数字/拉丁/希腊/符号 `ZTi-Sym`（默认固定 pass2；`ZTISYM_ROTATE=1` 可恢复 4 套轮换）；`symbols.make_han_hand()` 即此组合。
 
 ### 缺字与边界
 
@@ -187,7 +187,7 @@ Z体 是作者本人手写笔迹的数字化成果，**版权归作者所有，�
 
 启用方式：
 
-- GUI 字体下拉框选「★ 我的手写体」（汉字库 + ZTi-Sym 4 套加权）；
+- GUI 字体下拉框选「★ 我的手写体」（汉字库 + ZTi-Sym 固定 pass2；要 4 套轮换设 `ZTISYM_ROTATE=1`）；
 - 代码里用 `from symbols import make_han_hand`，汉字与符号各走各的字库。
 
 4 套按权重随机轮换：`pass1 : pass2 : pass3 : pass4 = 1 : 3 : 2 : 2`
@@ -213,10 +213,13 @@ Z体 是作者本人手写笔迹的数字化成果，**版权归作者所有，�
 | `字体输出/_资料/ZTi-Han/` | 建库报告、对比图、旧备份 | 只读留档，不参与渲染 |
 
 - GUI 默认字体「★ 我的手写体（汉字+符号，全手写）」= 汉字 `ZTi-Han` +
-  数字/拉丁/希腊/符号 `ZTi-Sym` 4 套加权；代码入口
+  数字/拉丁/希腊/符号 `ZTi-Sym`（默认固定 pass2：4 套之间同一个数字高度差可达
+  40%，轮换会让同一段里的数字忽大忽小）；代码入口
   `symbols.make_han_hand(size_pt=...)`。
-- 汉字字号按「汉字墨迹高 ≈ 数字墨迹高」校准：`size_scale=1.4902`、
-  `adv_scale=0.7192`，参数在 `fonts/fontcal.json`。
+- 字号统一走「基础参数」：汉字墨迹高 = 0.948 × 渲染字号，数字/拉丁 = 汉字 × 0.86；
+  校准就做在真实渲染字号 49.6px（12.4pt × 4）上，参数在 `fonts/fontcal.json`
+  （`ref_px=49.6`、`han_ink_em=0.948`、`ZTi-Han size_scale≈1.52`）。公式层乘同一份
+  `size_scale`，不再用写死的 1.65。
 - 缺字：`ZTi-Han → 注册表里其它已启用汉字库 → 老 ZTi 亲笔库`；都没有就留空，
   GUI 提示缺哪些字。第三方字体不再参与回退（见文首重构说明）。
   2123 字题解语料按频次覆盖 **95.5%**（去重 80.8%），4.3.5 样文 100%。
@@ -257,7 +260,7 @@ py -3 ai_api.py --self-test     # 28 项自测
 | 端点 | 作用 |
 |---|---|
 | `GET /health` | 存活探测 |
-| `GET /capabilities` | 字体/字表（500 汉字 + 204 符号）/字号范围/段落 schema |
+| `GET /capabilities` | 字体/字表（字数随当前字库，默认 500 汉字 + 204 符号）/字号范围/段落 schema |
 | `GET /llm/status` | 自动做题模型配置（脱敏）：是否已配置/模型名/端点 |
 | `POST /worksheet/solve` | 自动做题：划题 → 模型作答 → 手写写回 PDF（也可只传 answers） |
 | `POST /render` | 多段文本 → 手写 PNG/PDF（可带背景、返回 base64） |
@@ -265,7 +268,8 @@ py -3 ai_api.py --self-test     # 28 项自测
 | `POST /prompt` | 内置答题提示词（注入真实字表）+ tool schema |
 | `POST /answer` | 答案文本 → 自动切段 + 可渲染 spec |
 
-`ai_prompt.py` 的内置提示词约束 AI：**只用字库内 500 汉字 + 204 符号**（字表外改写）、
+`ai_prompt.py` 的内置提示词约束 AI：**只用字表内的字**（字表按当前字库动态注入，
+补字/换库后自动跟着变；表外字会回退渲染，提示词里如实说明）、
 **考试答题风格**（先结论后步骤、精炼、不客套/不复述题干）、公式用支持子集、
 输出 JSON `{"answer_text", "segments"}`；`tool_schema()` / `tool_schema_anthropic()`
 可直接用于 function calling。示例见 `ai_client_example.py`，完整文档 `docs/AI接口说明.md`。
@@ -303,8 +307,8 @@ py -3 做题.py solve 作业.pdf --out 手写作答.pdf
   （可选 `HANDWRITE_LLM_BASE_URL` / `_MODEL` / `_VISION` / `_TIMEOUT` / `_MAX_TOKENS`）
   或 `llm.json`；默认等待 300 秒、最多 8192 tokens（题多/难题时可在「AI 设置」里调大，
   避免答到一半被掐断/截断）。
-- **AI 接口**：`POST /worksheet/analyze`、`/worksheet/prompt`（做题提示词：只用字库内
-  500 汉字+204 符号、考试精炼、只输出 `{"answers":{...}}`、每题可写字数约束）、
+- **AI 接口**：`POST /worksheet/analyze`、`/worksheet/prompt`（做题提示词：字表按当前字库
+  动态注入、公式写 `$...$`、只输出 `{"answers":{...}}`、每题可写字数约束）、
   `/worksheet/answer`。详见 `docs/做题接口.md`。
 
 不想用命令行时打开**做题窗口**（独立 Tk 窗口，不唤起生成器 GUI）：划区 → 手动改答案 →
