@@ -12,16 +12,19 @@ Segoe UI Symbol（印刷体），和毛笔体汉字在墨量、笔画粗细上�
   · 加粗（MaxFilter 膨胀）会把笔锋糊掉，丢掉手写的起收笔
   · alpha 增益会改变墨色深浅，同一支笔的字深浅不一反而更假
 
-所以现在只保留一件事：**把不同字库的「字高」统一到同一标准**。
-ZTi-Sym 的符号实测只有汉字字高的 0.57–0.86 倍，不放大就会明显偏小。
+所以现在只保留一件事：**把不同字库的「字高」统一到同一标准**，而且这个
+标准是**绝对目标**（见下面的 BASE_SIZE_PT / HAN_INK_EM），不依赖任何一款
+基准字体——旧基准马善政已于 2026-11-25 移出字库，再按它标定会让新写的
+字库整体偏大或偏小（同一段里汉字和数字差 20%~50% 就是这么来的）。
 
-    cal = {"size_scale": 1.22, "dy": 0.0, "dx": 0.25}
+    cal = {"size_scale": 1.49, "adv_scale": 0.72, "dy": 0.0, "dx": 0.0}
 
 对外接口保持不变（`params_for` / `finish_tile` / `coverage` /
 `style_compatible`），只是 `finish_tile` 不再改像素，只调偏移。
 """
 import json
 import os
+import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -36,13 +39,33 @@ GLYPH_CAL_PATH = os.path.join(_BASE, "fonts", "fontcal_glyph.json")
 PROJECT_ROOT = _BASE if _FROZEN else os.path.normpath(
     os.path.join(HERE, "..", ".."))
 
-REF_PX = 54
+# ---- 基础参数（唯一口径：所有字库、所有层都对到这几个数上）----
+# 以前这些数散在三处且各按各的基准标定：fontcal.REF_PX=54、
+# hwrender.DEFAULT_SIZE_PT=12.4、formula.MATH_SIZE_COMP=1.65。基准字体
+# （马善政）2026-11-25 移出字库后，旧表的相对关系就失效了：同一段里
+# 汉字、数字、公式各差 10%~50%。现在统一成：
+#     汉字墨迹高 = HAN_INK_EM × 渲染字号
+#     数字/拉丁 = 汉字墨迹高 × ASCII_HEIGHT_RATIO
+# 并且校准就在真实渲染字号 REF_PX 上做（54 是旧字号，比实际大 9%）。
+BASE_SIZE_PT = 12.4             # 与 hwrender.DEFAULT_SIZE_PT 一致
+SCALE = 4                       # 与 hwrender.SCALE 一致（1pt = 4px）
+REF_PX = BASE_SIZE_PT * SCALE   # 49.6：校准/量墨迹都在这个字号上
+HAN_INK_EM = 0.948              # 正文汉字墨迹高 = 渲染字号 × 0.948（≈满格）
+ASCII_HEIGHT_RATIO = 0.86       # 中文手写里数字通常比汉字略小
+ADV_GAP_EM = 0.118              # 相邻汉字墨迹留白（em），决定 adv_scale
+
 SAMPLE = "相电压功率流生电的"          # CJK 样本
 SAMPLE_ASCII = "0123456789"            # 数字样本（只含符号的字库用）
 
-# 数字/符号的目标高度 = 汉字高度 × 该比例。
-# 中文手写里阿拉伯数字通常比汉字略小，0.86 是目视协调的值。
-ASCII_HEIGHT_RATIO = 0.86
+
+def target_han_h(px=None):
+    """正文汉字的目标墨迹高（px）；px 默认取真实渲染字号 REF_PX。"""
+    return HAN_INK_EM * float(REF_PX if px is None else px)
+
+
+def target_ascii_h(px=None):
+    """数字/拉丁/符号的目标墨迹高（px）。"""
+    return target_han_h(px) * ASCII_HEIGHT_RATIO
 
 # 只渲染 ASCII/符号的字体：必须用 ASCII 样本测，且不做垂直位移补偿
 # （数字要严格坐在基线上）。这张表只用于「读不到 cmap 时」的兜底判断，
@@ -78,6 +101,24 @@ def cal_key(path):
     return os.path.basename(p)
 
 
+def table_key(path):
+    """**写表**时用的键：与 `_lookup_keys` 的查找顺序保持一致。
+
+    · 仓库内的 fonts/… → 写成 `fonts/ZTi-01.otf`（历史键，查找时最先命中）
+    · 项目内的 字体输出/… → 写成 `字体输出/ZTi-Han/pass2.ttf`
+    · 项目外的字体（临时目录里的预览库）→ 返回空串，调用方跳过不写：
+      这种路径只能退化成 basename，会和正式字库的 passN.ttf 串值。
+    """
+    if not path:
+        return ""
+    p = os.path.normpath(os.path.abspath(path)).replace(os.sep, "/")
+    i = p.find("/fonts/")
+    if i >= 0:
+        return p[i + 1:]
+    k = cal_key(path)
+    return "" if "/" not in k else k
+
+
 def _lookup_keys(path):
     """查表时要依次尝试的键：仓库布局 fonts/… → 项目相对路径 → basename。"""
     keys = []
@@ -108,18 +149,67 @@ def _looks_ascii(path):
         return os.path.basename(path) in ASCII_FONTS
 
 
-def _specs(fonts):
-    """把字体列表规范成 (路径, 样本, 目标高度比例)。"""
-    out = []
-    for item in fonts:
-        if isinstance(item, tuple):
-            out.append(item)
-        else:
-            is_ascii = _looks_ascii(item)
-            out.append((item,
-                        SAMPLE_ASCII if is_ascii else SAMPLE,
-                        ASCII_HEIGHT_RATIO if is_ascii else 1.0))
-    return out
+_cmap_cache = {}
+
+
+def _cmap(path):
+    """字体 cmap（读不到返回 None）。"""
+    key = os.path.abspath(path)
+    if key not in _cmap_cache:
+        try:
+            from fontTools.ttLib import TTFont
+            _cmap_cache[key] = set(TTFont(path).getBestCmap() or {})
+        except Exception:
+            _cmap_cache[key] = None
+    return _cmap_cache[key]
+
+
+def _sample_for(path):
+    """这套字体该用哪些样本字量高度。
+
+    自建字库往往只有一两百个字，未必包含默认的 9 字样本；缺样本会导致
+    量不到字高、size_scale 回落 1.0（汉字只有数字的 2/3 大）。所以样本
+    先用「参考样本 ∩ 字库」，不够就用字库自己的字。
+    """
+    cm = _cmap(path)
+    if cm is None:
+        return SAMPLE
+    if not any(0x4E00 <= cp <= 0x9FFF for cp in cm):
+        got = "".join(c for c in SAMPLE_ASCII if ord(c) in cm)
+        return got or SAMPLE_ASCII
+    got = "".join(c for c in SAMPLE if ord(c) in cm)
+    if len(got) >= 5:
+        return got
+    own = [chr(cp) for cp in sorted(cm) if 0x4E00 <= cp <= 0x9FFF]
+    return "".join(own[:12]) or SAMPLE
+
+
+def _glyph_em(path):
+    """字体汉字墨迹高的 em 中位数（font units / upm），用来算字距。"""
+    import statistics
+
+    try:
+        from fontTools.pens.boundsPen import BoundsPen
+        from fontTools.ttLib import TTFont
+        f = TTFont(path)
+        upm = float(f["head"].unitsPerEm) or 1000.0
+        gs = f.getGlyphSet()
+        vals = []
+        for cp, name in (f.getBestCmap() or {}).items():
+            ch = chr(cp)
+            if not (0x4E00 <= cp <= 0x9FFF) and ch not in SAMPLE_ASCII:
+                continue
+            bp = BoundsPen(gs)
+            try:
+                gs[name].draw(bp)
+            except Exception:
+                continue
+            if bp.bounds:
+                vals.append((bp.bounds[3] - bp.bounds[1]) / upm)
+        f.close()
+        return statistics.median(vals) if vals else 0.0
+    except Exception:
+        return 0.0
 
 
 def _measure(path, sample, size_scale=1.0):
@@ -178,56 +268,201 @@ def _measure(path, sample, size_scale=1.0):
             "dy": med(dys), "dx": med(dxs)}
 
 
-def calibrate(fonts, base_font, save=True, rounds=3):
-    """以 base_font 为基准，算出每套字体的**字号缩放**（闭环迭代到字高一致）。
+def _fit_scale(path, sample, target_h, rounds=3):
+    """闭环求 size_scale：让样本墨迹高（中位）= target_h。
 
-    只算 size_scale / dy / dx，不算墨色与加粗——见模块开头的说明。
+    为什么要闭环：放大后抗锯齿像素数会变，字高并不严格按字号线性增长。
+    返回 (scale, 最后一次测量结果)；量不到字高时返回 (None, m)。
     """
-    base = _measure(base_font, SAMPLE)
+    m = _measure(path, sample, 1.0)
+    if not m["height"] or not target_h:
+        return None, m
+    scale = target_h / m["height"]
+    for _ in range(rounds + 2):
+        mm = _measure(path, sample, scale)
+        if not mm["height"]:
+            break
+        k = target_h / mm["height"]
+        m = mm
+        if abs(k - 1.0) <= 0.01:
+            break
+        scale *= k
+    return scale, m
+
+
+def measure_params(path, sample=None, target_h=None, rounds=3):
+    """单套字体的校准值（不读表、不写表），返回 DEFAULTS 形状的 dict。
+
+    汉字库 → 汉字墨迹高 = target_han_h()；符号库 → 数字墨迹高 = target_ascii_h()。
+    这是「同一段里所有字符一样大」的唯一算法：所有字库（内置/自建/老 ZTi）
+    都走这里，不再各自按某个基准字体标定。
+    """
+    is_ascii = _looks_ascii(path)
+    sample = sample or _sample_for(path)
+    target = float(target_h or (target_ascii_h() if is_ascii else target_han_h()))
+    scale, _m = _fit_scale(path, sample, target, rounds=rounds)
+    c = dict(DEFAULTS)
+    if not scale:
+        return c
+    c["size_scale"] = round(scale, 4)
+    if not is_ascii:
+        # 字距 = 墨迹高 + 固定留白。墨迹 em 用**刚测出来的样本**（target/scale/REF_PX），
+        # 不用全字表 em：自建库里个别大字会把 em 拉高，不同字库的留白就会忽紧忽松。
+        ink_em = target / (c["size_scale"] * REF_PX)
+        if ink_em > 0:
+            c["adv_scale"] = round(ink_em + ADV_GAP_EM / c["size_scale"], 4)
+    return c
+
+
+def _active_han_font():
+    """注册表里启用的汉字库主字体；没有就退到项目里的 ZTi-Han。"""
+    try:
+        from fontlib import registry
+        p = registry.active_font("han")
+        if p and os.path.exists(p):
+            return p
+    except Exception:
+        pass
+    for p in (os.path.join(PROJECT_ROOT, "字体输出", "ZTi-Han", "pass2.ttf"),
+              os.path.join(HERE, "fonts", "ZTi-Han", "pass2.ttf")):
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def known_fonts():
+    """当前所有会被渲染用到的字体：注册表里的字库 + 老 ZTi 回退库。"""
+    out = []
+    try:
+        from fontlib import registry
+        for lib in registry.libraries():
+            out.extend(registry.pass_paths(lib))
+    except Exception:
+        pass
+    zti = os.path.join(HERE, "fonts", "ZTi")
+    if os.path.isdir(zti):
+        out += [os.path.join(zti, n) for n in sorted(os.listdir(zti))
+                if n.lower().endswith((".ttf", ".otf"))]
+    seen, uniq = set(), []
+    for p in out:
+        a = os.path.abspath(p)
+        if a not in seen and os.path.exists(p):
+            seen.add(a)
+            uniq.append(p)
+    return uniq
+
+
+def calibrate(fonts, base_font=None, save=True, rounds=3, note=None):
+    """把所有字体对齐到同一套基础参数，返回 {键: 参数}。
+
+    · 汉字库：size_scale 让汉字墨迹高 = target_han_h()
+    · 符号库：size_scale 让数字墨迹高 = target_ascii_h()
+    · adv_scale：汉字库按「墨迹高 + ADV_GAP_EM」重算；符号库不动
+    · dy/dx：手上调过的沿用旧值，其余按基准字体的墨迹中心补
+
+    base_font 只用来对齐 dy/dx（默认取注册表启用的汉字库）。字号是
+    **绝对目标**，不再依赖某个基准字体——旧基准马善政已移出字库，
+    再按它标定会让新字库整体偏大/偏小。
+    """
+    old = load()
+    base_font = base_font or _active_han_font()
+    paths = [p for p in (fonts or []) if p and os.path.exists(p)]
+    if base_font and os.path.abspath(base_font) not in [
+            os.path.abspath(p) for p in paths] and os.path.exists(base_font):
+        paths.insert(0, base_font)
+    if not paths:
+        return {}
+    if not base_font:
+        base_font = paths[0]
+
+    base_prev = old.get(cal_key(base_font)) or {}
+    base_cal = dict(DEFAULTS)
+    base_cal.update(base_prev)
+    if not base_prev:
+        base_cal = measure_params(base_font)
+    base_m = _measure(base_font, _sample_for(base_font),
+                      base_cal.get("size_scale", 1.0) or 1.0)
+
     table = {}
-    for path, sample, h_ratio in _specs(fonts):
-        if not os.path.exists(path):
+    for path in paths:
+        is_ascii = _looks_ascii(path)
+        c = measure_params(path, rounds=rounds)
+        key = table_key(path)
+        if not key:
+            # 项目外的字体（预览/临时库）：写 basename 会和正式字库串值，
+            # 交给 params_for 的自动兜底即可，不落盘。
             continue
-        key = cal_key(path)
-        target_h = base["height"] * h_ratio
+        prev = old.get(key) or old.get(os.path.basename(path)) or {}
         if os.path.abspath(path) == os.path.abspath(base_font):
-            table[key] = dict(DEFAULTS)
-            continue
-        c = dict(DEFAULTS)
-        m = _measure(path, sample)
-        if m["height"] > 0:
-            c["size_scale"] = target_h / m["height"]
-
-        # 闭环：放大后抗锯齿像素变多、字高会略变，迭代到稳定
-        for _ in range(rounds + 2):
-            mm = _measure(path, sample, c["size_scale"])
-            if not mm or mm["height"] <= 0:
-                break
-            c["size_scale"] *= target_h / mm["height"]
-
-        # 位置：ASCII 字库不做垂直补偿（数字严格坐基线）；
-        # 其他字库按墨迹中心偏差补，让基线与主字体一致。
-        if sample is SAMPLE_ASCII or _looks_ascii(path):
             c["dy"] = 0.0
+            c["dx"] = float(prev.get("dx", 0.0))
         else:
-            c["dy"] = round(base["dy"] - m["dy"], 3)
-        c["dx"] = round(base["dx"] - m["dx"], 3)
-        c["size_scale"] = round(c["size_scale"], 4)
+            m = _measure(path, _sample_for(path), c["size_scale"])
+            if is_ascii:
+                c["dy"] = 0.0          # 数字要严格坐在基线上
+            else:
+                # _measure 的 dy 混进了字体的下伸空白（不同字体差别可达十几 px），
+                # 不能当基线偏移用：渲染时 hwrender 已按 ascent 对齐基线。
+                # 这里只保留旧表里小幅手调值（±3px），其余归零。
+                prev_dy = float(prev["dy"]) if "dy" in prev else 0.0
+                c["dy"] = round(prev_dy if abs(prev_dy) <= 3.0 else 0.0, 3)
+            prev_dx = float(prev["dx"]) if "dx" in prev else None
+            dx_calc = base_m["dx"] - m["dx"]
+            c["dx"] = round(prev_dx if (prev_dx is not None and abs(prev_dx) <= 20.0)
+                            else max(-4.0, min(4.0, dx_calc)), 3)
+        if is_ascii and "adv_scale" in prev:
+            c["adv_scale"] = prev["adv_scale"]
         table[key] = c
-
     if save:
-        try:
-            os.makedirs(os.path.dirname(CAL_PATH), exist_ok=True)
-            with open(CAL_PATH, "w", encoding="utf-8") as fp:
-                json.dump({"ref_px": REF_PX, "sample": SAMPLE,
-                           "ascii_sample": SAMPLE_ASCII,
-                           "ascii_height_ratio": ASCII_HEIGHT_RATIO,
-                           "base": os.path.basename(base_font),
-                           "note": "只做字号对齐；墨色/粗细/清晰度不校准",
-                           "fonts": table}, fp, ensure_ascii=False, indent=2)
-        except Exception:
-            pass
+        _save_table(table, note=note)
     return table
+
+
+_BAD_KEYS = re.compile(r"^(?:pass\d+\.ttf|(?:.*/)?工作区/.*)$")
+
+
+def _save_table(table, note=None):
+    """把校准值合并进 fonts/fontcal.json（保留没参与本次校准的条目）。"""
+    data = {}
+    try:
+        with open(CAL_PATH, encoding="utf-8") as fp:
+            data = json.load(fp)
+    except Exception:
+        data = {}
+    fonts = data.setdefault("fonts", {})
+    fonts.update(table or {})
+    # 清掉历史坏键：裸 passN.ttf（ZTi-Han/ZTi-Sym 会串值）、施工目录里的路径
+    for k in list(fonts):
+        if _BAD_KEYS.match(k.replace(os.sep, "/")):
+            del fonts[k]
+    # 同一套字体只留一个键：有路径键就删掉裸 basename 键（旧表遗留）
+    basenames = {k.rsplit("/", 1)[-1] for k in fonts if "/" in k}
+    for k in list(fonts):
+        if "/" not in k and k in basenames:
+            del fonts[k]
+    # 旧布局遗留：ZTi-Han / ZTi-Sym 现在只在 字体输出/ 下，仓库内 fonts/ 那份已不存在
+    for k in list(fonts):
+        if k.startswith(("fonts/ZTi-Han/", "fonts/ZTi-Sym/")):
+            del fonts[k]
+    data.pop("base", None)
+    data.update({
+        "ref_px": REF_PX, "base_size_pt": BASE_SIZE_PT, "scale": SCALE,
+        "han_ink_em": HAN_INK_EM, "ascii_height_ratio": ASCII_HEIGHT_RATIO,
+        "sample": SAMPLE, "ascii_sample": SAMPLE_ASCII,
+        "note": note or ("统一基础参数：汉字墨迹高 = 字号 × %.3f，"
+                         "数字 = 汉字 × %.2f；只做字号/基线对齐。"
+                         % (HAN_INK_EM, ASCII_HEIGHT_RATIO)),
+    })
+    os.makedirs(os.path.dirname(CAL_PATH), exist_ok=True)
+    with open(CAL_PATH, "w", encoding="utf-8") as fp:
+        json.dump(data, fp, ensure_ascii=False, indent=2)
+    _cache_reset()
+    return CAL_PATH
+
+
+def recalibrate_all(save=True, note=None):
+    """注册表里的字库 + 老 ZTi 回退库，全部按统一基础参数重标一遍。"""
+    return calibrate(known_fonts(), _active_han_font(), save=save, note=note)
 
 
 _cache = None
@@ -258,6 +493,9 @@ def _cache_reset():
     global _cache, _glyph_cache
     _cache = None
     _glyph_cache = None
+    _cmap_cache.clear()
+    _auto_cache.clear()
+    _ink_h_cache.clear()
 
 
 def load():
@@ -349,11 +587,37 @@ def glyph_scale_at(path, ch, px, target_h):
     return max(0.5, min(2.0, k))
 
 
-def params_for(path):
-    """取某套字体的校准参数（缺失则用默认值 = 不校准）。
+_auto_cache = {}
 
-    先按「项目相对路径」查（区分 ZTi-Han/pass2 与 ZTi-Sym/pass2），
-    查不到再按 basename 查（兼容旧表）。
+
+def _auto_params(path):
+    """表里没登记时的兜底：按统一目标现场量一个 size_scale（不落盘）。
+
+    历史 bug：自建字库建库时把校准键写成了工程目录路径（basename 撞车），
+    注册后的正式路径查不到，params_for 回落 1.0 —— 汉字只有数字的 2/3 大。
+    这里保证任何字体都按同一目标对齐，代价是一次测量（按文件 mtime 缓存）。
+    """
+    try:
+        st = os.stat(path)
+        key = (os.path.abspath(path), st.st_mtime_ns, st.st_size)
+    except OSError:
+        return dict(DEFAULTS)
+    hit = _auto_cache.get(key)
+    if hit is not None:
+        return dict(hit)
+    try:
+        c = measure_params(path)
+    except Exception:
+        c = dict(DEFAULTS)
+    _auto_cache[key] = dict(c)
+    return dict(c)
+
+
+def params_for(path):
+    """取某套字体的校准参数。
+
+    顺序：预览临时值 → 「项目相对路径」查表 → basename 查表（兼容旧表）
+    → 表里没有就按统一目标现场估（_auto_params），不会静默回落 1.0。
     """
     if not path:
         return dict(DEFAULTS)
@@ -370,7 +634,7 @@ def params_for(path):
             got = tab[k]
             break
     if not got:
-        return dict(DEFAULTS)
+        return _auto_params(path)
     p = dict(DEFAULTS)
     p.update({k: v for k, v in got.items() if k in DEFAULTS})
     return p
@@ -478,38 +742,28 @@ def style_compatible(path_a, path_b, tol=0.35):
 
 if __name__ == "__main__":
     import sys
-    repo = HERE
-    base = os.path.join(repo, "fonts", "MaShanZheng-Regular-merged.ttf")
-    fonts = []
-    for name in ("MaShanZheng-Regular-merged.ttf", "LongCang-Regular-merged.ttf",
-                 "ZhiMangXing-Regular-merged.ttf", "LiuJianMaoCao-Regular-merged.ttf"):
-        p = os.path.join(repo, "fonts", name)
-        if os.path.exists(p):
-            fonts.append(p)
-    zti = os.path.join(repo, "fonts", "ZTi")
-    if os.path.isdir(zti):
-        fonts += [os.path.join(zti, n) for n in sorted(os.listdir(zti))
-                  if n.endswith((".otf", ".ttf"))]
-    # 人手写符号字库：仓库内 fonts/ZTi-Sym/ 优先，其次项目外的「字体输出/ZTi-Sym」
-    for sym in (os.environ.get("ZTISYM_DIR", ""),
-                os.path.join(repo, "fonts", "ZTi-Sym"),
-                os.path.normpath(os.path.join(repo, "..", "..", "字体输出", "ZTi-Sym"))):
-        if sym and os.path.isdir(sym):
-            fonts += [os.path.join(sym, n) for n in sorted(os.listdir(sym))
-                      if n.endswith((".otf", ".ttf")) and not n.startswith("ZTi-Sym-推荐")]
-            break
-    if os.path.exists(base):
-        fonts = [base] + [p for p in fonts if os.path.abspath(p) != os.path.abspath(base)]
 
     if len(sys.argv) > 1 and sys.argv[1] == "measure":
-        for path, sample, ratio in _specs(fonts):
-            if os.path.exists(path):
-                print("%-34s %s" % (os.path.basename(path), _measure(path, sample)))
+        for path in known_fonts():
+            cal = params_for(path)
+            m = _measure(path, _sample_for(path), cal.get("size_scale", 1.0))
+            print("%-52s size=%.4f 墨迹高=%.1f（目标 %.1f）"
+                  % (path, cal.get("size_scale", 1.0), m["height"],
+                     target_ascii_h() if _looks_ascii(path) else target_han_h()))
         sys.exit(0)
 
-    table = calibrate(fonts, base)
-    print("%-34s %10s %8s %8s" % ("字体", "字号倍", "dy", "dx"))
-    for k, v in table.items():
-        print("%-34s %10.3f %+8.2f %+8.2f"
-              % (k, v["size_scale"], v["dy"], v["dx"]))
-    print("\n已写入", CAL_PATH)
+    if len(sys.argv) > 1 and sys.argv[1] == "recalibrate":
+        dry = "--dry-run" in sys.argv
+        table = recalibrate_all(save=not dry)
+        print("%-52s %8s %8s" % ("字库（项目相对路径）", "字号倍", "字距倍"))
+        for k, v in sorted(table.items()):
+            print("%-52s %8.4f %8.4f"
+                  % (k, v.get("size_scale", 1.0), v.get("adv_scale", 1.0)))
+        print("目标：汉字 %.1fpx @ %.1fpx 字号；数字 %.1fpx"
+              % (target_han_h(), REF_PX, target_ascii_h()))
+        print("已写入", CAL_PATH if not dry else "（--dry-run，未写盘）")
+        sys.exit(0)
+
+    print(__doc__)
+    print("用法：py -3 fontcal.py recalibrate [--dry-run]")
+

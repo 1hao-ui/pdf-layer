@@ -47,6 +47,10 @@ def render_block(font_paths, text, size_pt=12.4, width_pt=404,
     if cal:
         import fontcal
         for p, params in cal.items():
+            if not params:
+                # 没有校准值时不要注入空 override：params_for 会回落 1.0，
+                # 预览就比实测小一圈（历史「预览正常、实测差太多」的另一半原因）。
+                continue
             overrides[p] = params
             fontcal.set_override(p, params)
     try:

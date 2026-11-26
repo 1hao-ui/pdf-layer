@@ -329,7 +329,10 @@ class Session:
                     else:
                         shutil.copy2(src, dst)
             if write_calibration and meta.get("calibration"):
-                cal_path = autotune.write_calibration(meta["calibration"])
+                path_map = {os.path.abspath(p): os.path.join(
+                    target, os.path.basename(p)) for p in meta["passes_abs"]}
+                cal_path = autotune.write_calibration(
+                    meta["calibration"], path_map=path_map)
                 meta["calibration_path"] = cal_path
             lib = registry.register({
                 "id": lib_id,

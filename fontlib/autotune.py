@@ -21,7 +21,11 @@ import statistics
 
 import numpy as np
 
-REF_PX = 54               # 与 fontcal.REF_PX 一致
+try:
+    import fontcal as _fontcal
+    REF_PX = _fontcal.REF_PX          # 统一基础参数：真实渲染字号（49.6）
+except Exception:                     # 独立 import autotune 时兜底
+    REF_PX = 49.6
 TARGET_H = 700            # 归一化后汉字墨迹高（font units / 1000）
 BASELINE = 100            # 墨迹底边距基线（font units）
 GAP_EM = 0.118            # 相邻汉字墨迹留白（em），沿用汉字校准.py 的口径
@@ -139,45 +143,17 @@ def auto_tweaks(cells, warn_only=True):
 
 # ---------------------------------------------------------------- 渲染校准
 def digit_target_px(ref_sym=None):
-    """公式层实际渲染出的数字墨迹高（中位，px @ REF_PX）。"""
-    vals = []
+    """数字的目标墨迹高（px @ 统一参考字号）。
+
+    旧版量的是「公式层当时渲染出来的数字高」，而公式层用的是写死的 1.65
+    倍率——于是自建库按偏大的目标标定，建出来比现有字库大一截。现在直接
+    用 fontcal 的统一目标，不再绕公式层。
+    """
     try:
-        import formula
-        import hwrender as H
-        sym = ref_sym or _default_sym_font()
-        if sym:
-            han = _default_han_font() or sym
-            host = H.Hand(han, size_pt=REF_PX / H.SCALE,
-                          math_font_path=sym, symbol_font_path=sym)
-            for d in "0123456789":
-                b = formula._box(d, REF_PX, host.font_path, host.ink,
-                                 host.math_font_path)
-                bb = b.image.getbbox()
-                if bb:
-                    vals.append(bb[3] - bb[1])
-    except Exception:
-        vals = []
-    if vals:
-        return statistics.median(vals)
-    # 兜底：直接量符号字体在公式字号下的数字高
-    try:
-        from PIL import Image, ImageDraw, ImageFont
-        import formula
-        sym = ref_sym or _default_sym_font()
-        if not sym:
-            return 0.0
-        px = max(4, int(round(REF_PX * getattr(formula, "MATH_SIZE_COMP", 1.65))))
-        for d in "0123456789":
-            f = ImageFont.truetype(sym, px)
-            bb = f.getbbox(d)
-            im = Image.new("L", (bb[2] - bb[0] + 4, bb[3] - bb[1] + 4), 0)
-            ImageDraw.Draw(im).text((2 - bb[0], 2 - bb[1]), d, fill=255, font=f)
-            ib = im.getbbox()
-            if ib:
-                vals.append(ib[3] - ib[1])
+        import fontcal
+        return fontcal.target_ascii_h()
     except Exception:
         return 0.0
-    return statistics.median(vals) if vals else 0.0
 
 
 def _fontlib_root():
@@ -235,28 +211,28 @@ def ttf_glyph_stats(path, chars=None):
 
 
 def calibration_for(paths, ref_sym=None, gap_em=GAP_EM):
-    """按老口径算 size_scale / adv_scale。
+    """按统一基础参数算 size_scale / adv_scale（与 fontcal.calibrate 同一口径）。
 
-    汉字墨迹高 = 公式层数字墨迹高；字距 = 墨迹高 + GAP_EM 间隙。
+    汉字库对到「汉字墨迹高 = HAN_INK_EM × 字号」，符号库对到「数字 = 汉字 ×
+    0.86」。返回 {绝对路径: {size_scale, adv_scale, dy, dx}}，写盘时由
+    write_calibration 换成项目相对路径。
     """
-    target_px = digit_target_px(ref_sym)
+    import fontcal
     table = {}
     for p in paths or []:
-        st = ttf_glyph_stats(p)
-        if not st or not target_px:
+        if not p or not os.path.exists(p):
             continue
-        h = statistics.median([s[0] for s in st])
-        glyph_em = h / 1000.0
-        if glyph_em <= 0:
+        try:
+            c = fontcal.measure_params(p)
+        except Exception:
             continue
-        size_scale = target_px / (glyph_em * REF_PX)
-        adv_scale = glyph_em + gap_em / size_scale
+        if not c.get("size_scale"):
+            continue
         table[os.path.abspath(p)] = {
-            "size_scale": round(size_scale, 4),
-            "adv_scale": round(adv_scale, 4),
-            "dy": 0.0, "dx": 0.0,
-            "identical_glyph_em": round(glyph_em, 4),
-            "target_px": round(target_px, 2),
+            "size_scale": c["size_scale"],
+            "adv_scale": c.get("adv_scale", 1.0),
+            "dy": 0.0,
+            "dx": 0.0,
         }
     return table
 
@@ -301,11 +277,15 @@ class CalibrationError(RuntimeError):
     pass
 
 
-def write_calibration(table, cal_path=None, note=None):
+def write_calibration(table, cal_path=None, note=None, path_map=None):
     """把校准值合并进 fonts/fontcal.json。
 
-    键用「项目相对路径」（fontcal.cal_key），与现有表一致；写完清缓存，
-    渲染立刻生效。
+    键用 ``fontcal.table_key()``（与查找顺序一致），**不再退化成 basename**：
+    以前建库时把工程目录里的 font/pass1.ttf 写成 "pass1.ttf"，注册后的
+    字体输出/<id>/pass1.ttf 查不到，params_for 回落 1.0 —— 汉字只有数字的
+    2/3 大，而工作台预览走的是临时 override，所以「预览正常、实测不对」。
+
+    path_map : {源路径: 实际发布路径}，建库时把工程目录映射到 字体输出/<id>。
     """
     import json
     try:
@@ -319,17 +299,21 @@ def write_calibration(table, cal_path=None, note=None):
         with open(cal_path, encoding="utf-8") as fp:
             data = json.load(fp)
     fonts = data.setdefault("fonts", {})
-    try:
-        import fontcal
-        for p, params in table.items():
-            fonts[fontcal.cal_key(p)] = {k: params[k] for k in
-                                         ("size_scale", "adv_scale", "dy", "dx")
-                                         if k in params}
-    except Exception:
-        for p, params in table.items():
-            fonts[os.path.basename(p)] = {k: params[k] for k in
-                                          ("size_scale", "adv_scale", "dy", "dx")
-                                          if k in params}
+    skipped = []
+    for p, params in (table or {}).items():
+        final = p
+        if path_map:
+            final = path_map.get(os.path.abspath(p), path_map.get(p, p))
+        try:
+            import fontcal
+            key = fontcal.table_key(final)
+        except Exception:
+            key = os.path.basename(final)
+        if not key:
+            skipped.append(p)       # 项目外的预览库：写 basename 会串值
+            continue
+        fonts[key] = {k: params[k] for k in
+                      ("size_scale", "adv_scale", "dy", "dx") if k in params}
     if note:
         data["note"] = note
     with open(cal_path, "w", encoding="utf-8") as fp:
@@ -341,3 +325,5 @@ def write_calibration(table, cal_path=None, note=None):
     except Exception:
         pass
     return cal_path
+
+

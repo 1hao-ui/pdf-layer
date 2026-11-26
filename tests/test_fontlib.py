@@ -183,6 +183,37 @@ def test_build_library_and_calibration():
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_new_library_calibration_keys():
+    """自建库的校准键必须是**注册后的路径**，不能退化成 basename。
+
+    历史 bug：建库时按工程目录 font/pass1.ttf 算键 → 写成 "pass1.ttf"，
+    注册后的 字体输出/<id>/pass1.ttf 查不到 → 渲染回落 1.0，
+    汉字只有数字的 2/3 大（用户截图「预览正常、实测差太多」）。
+    """
+    import fontcal
+    tmp = tempfile.mkdtemp(prefix="calkey_")
+    old_path, old_cache = fontcal.CAL_PATH, fontcal._cache
+    try:
+        cal_file = os.path.join(tmp, "fontcal.json")
+        src = os.path.join(tmp, "proj", "font", "pass1.ttf")
+        dst = os.path.normpath(os.path.join(
+            REPO, "..", "..", "字体输出", "demo-lib", "pass1.ttf"))
+        fontcal.CAL_PATH = cal_file
+        fontcal._cache = None
+        autotune.write_calibration(
+            {src: {"size_scale": 1.3, "adv_scale": 0.8, "dy": 0, "dx": 0}},
+            cal_path=cal_file,
+            path_map={os.path.abspath(src): dst})
+        import json
+        with open(cal_file, encoding="utf-8") as fp:
+            fonts = json.load(fp)["fonts"]
+        assert "字体输出/demo-lib/pass1.ttf" in fonts, fonts
+        assert "pass1.ttf" not in fonts, "又写成了会串值的 basename 键"
+    finally:
+        fontcal.CAL_PATH, fontcal._cache = old_path, old_cache
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 # ---------------------------------------------------------------- 端到端
 def test_end_to_end_selftest():
     from fontlib import selftest
@@ -194,6 +225,55 @@ def test_end_to_end_selftest():
         assert not rep["missing"]
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+# ---------------------------------------------------------------- 统一字号
+def test_unified_size_parameters():
+    """所有字库都对齐到同一套基础参数（用户实测：字符比汉字大一圈）。
+
+    · REF_PX 必须等于默认字号 × 超采样倍率（旧表 54 vs 49.6 差 9%）
+    · 每套已注册字库：汉字墨迹高 ≈ 47px（0.948×49.6），数字 ≈ 40.4px（×0.86）
+    · 公式层 4 套符号轮换：同一个数字的高度差 < 12%（旧版差 17%）
+    """
+    import statistics
+
+    import fontcal
+    import formula
+    import hwrender as H
+    import symbols
+
+    assert abs(fontcal.REF_PX - H.DEFAULT_SIZE_PT * H.SCALE) < 1e-6
+    assert abs(fontcal.SCALE - H.SCALE) < 1e-9
+
+    checked = 0
+    for lib in registry.libraries(enabled_only=True):
+        for p in registry.pass_paths(lib):
+            cal = fontcal.params_for(p)
+            m = fontcal._measure(p, fontcal._sample_for(p), cal["size_scale"])
+            target = (fontcal.target_ascii_h() if fontcal._looks_ascii(p)
+                      else fontcal.target_han_h())
+            assert abs(m["height"] - target) <= target * 0.10, (
+                "%s 墨迹高 %.1f，目标 %.1f" % (p, m["height"], target))
+            checked += 1
+    assert checked >= 4, "没有量到任何字库（checked=%d）" % checked
+
+    # 公式层：4 套符号轮换时数字的**中位高**要一致（旧版各套差 17%，
+    # 同一段数字忽大忽小）。不要求同一个字跨套等高——那会抹掉真实笔迹里
+    # 「2 写得小、8 写得大」的自然差异，只校整套的中位高度。
+    hand = symbols.make_han_hand(size_pt=H.DEFAULT_SIZE_PT)
+    medians = []
+    for p in symbols._passes().values():
+        vals = []
+        for d in "0123456789":
+            b = formula._box(d, fontcal.REF_PX, hand.font_path, hand.ink, p)
+            bb = b.image.getbbox()
+            if bb:
+                vals.append(bb[3] - bb[1])
+        if vals:
+            medians.append(statistics.median(vals))
+    assert len(medians) >= 2, medians
+    assert max(medians) - min(medians) <= statistics.median(medians) * 0.12, (
+        "4 套符号的数字中位高差太大：%r" % (medians,))
 
 
 # ---------------------------------------------------------------- 清理口径

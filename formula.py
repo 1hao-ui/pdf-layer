@@ -34,9 +34,24 @@ _engine = None
 _renderer = None
 _engine_key = None
 
-# 公式字号补偿系数：内核按 size_px 排出的主字符只有汉字的约 62% 高，
-# 乘 1.65 后与正文汉字齐平（实测 45px vs 45px @ 54px 字号）。
+# 公式字号补偿：内核按「声明字号」画出的字形与 PIL 是 1:1 的，所以直接
+# 乘 fontcal 给这套符号字库算出的 size_scale 即可（统一基础参数）。
+# 以前这里写死 1.65（按已移出的马善政体标定），而且 4 套符号轮换共用同一个
+# 倍率——同一段里数字会随轮换在 45~52px 之间跳，比汉字大一截。
+# MATH_SIZE_COMP 只作为 fontcal 不可用时的兜底。
 MATH_SIZE_COMP = 1.65
+
+
+def size_comp(math_font_path):
+    """这套公式字体该用的字号倍率（= fontcal 的 size_scale）。"""
+    try:
+        import fontcal
+        s = float(fontcal.params_for(math_font_path).get("size_scale", 1.0) or 1.0)
+        if s > 0:
+            return s
+    except Exception:
+        pass
+    return MATH_SIZE_COMP
 
 # 公式层字形调细：数字/拉丁/希腊与分式横线都走公式层，ZTi-Sym 的笔画比汉字略粗，
 # 整段里数字显得发黑。这里把位图 alpha 的低值端压掉（柔和收边，不产生锯齿），
@@ -99,13 +114,14 @@ def _ensure_engine(font_path, size_px, ink, math_font_path=None):
         mr.COMMAND_SYMBOLS.update(_GREEK)
         mr.COMMAND_SYMBOLS.update(_SYMBOLS)
 
+        import fontcal
         cfg = mconfig.HandwritingConfig(
             font_path=font_path,
             math_font_path=math_font_path,
             fallback_font_path=font_path,
             ink_color="#%02x%02x%02x" % tuple(ink),
-            body_font_pt=size_px / 4.0,
-            math_font_pt=size_px / 4.0,
+            body_font_pt=size_px / float(fontcal.SCALE),
+            math_font_pt=size_px / float(fontcal.SCALE),
             sdt_trajectory_enabled=False,     # 不依赖 SDT 轨迹包
             prefer_handright=False,           # 不依赖 handright
             # 字号补偿后公式字形变大，字重倍率回调到 1.15：
@@ -184,10 +200,12 @@ def _box(latex, size_px, font_path, ink, math_font_path=None, display=False):
     为什么不做闭环：闭环按「墨迹高 vs 目标高」迭代求缩放，但结果依赖
     缓存状态（lru_cache 命中时直接返回旧盒、未命中时重算），
     同一个公式因此会在两个尺寸之间跳变（实测 ∑ 在 76px / 42px 间跳）。
-    公式字号统一，才是可预期的行为。
+    公式字号统一，才是可预期的行为。倍率来自 fontcal（每套字库一个值），
+    4 套符号轮换出来的字高因此一致。
     """
+    math_font_path = math_font_path or font_path
     r = _ensure_engine(font_path, size_px, ink, math_font_path)
-    box = _render_at(r, latex, size_px, MATH_SIZE_COMP, display)
+    box = _render_at(r, latex, size_px, size_comp(math_font_path), display)
     if FORMULA_THIN_LEVEL > 0 and int(size_px) >= 44:
         try:
             box.image = _thin_formula_image(box.image, FORMULA_THIN_LEVEL)

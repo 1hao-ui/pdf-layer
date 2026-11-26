@@ -14,6 +14,7 @@
 import math
 import os
 import random
+import re
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -24,10 +25,12 @@ import handstroke
 HERE = os.path.dirname(os.path.abspath(__file__))
 FONT_DIR = os.path.join(HERE, "fonts")
 
-SCALE = 4                      # 1pt = 4px
+# 基础参数只留一份：字号与超采样倍率在 fontcal 里定义（校准、公式层都用它）。
+# 以前 fontcal.REF_PX=54、这里 12.4pt×4=49.6，两套数差 9%，字库一换就露馅。
+SCALE = fontcal.SCALE          # 1pt = 4px
 # 手写字要比印刷正文大一号：真人很难把字写得跟印刷体一样小、一样匀。
-# 13.5pt 偏大（整段占页太多、符号也跟着变大），12.4pt 是「明显大于印刷体」又不夸张的值。
-DEFAULT_SIZE_PT = 12.4
+# 12.4pt 是「明显大于印刷体」又不夸张的值。
+DEFAULT_SIZE_PT = fontcal.BASE_SIZE_PT
 
 # 数字/拉丁/希腊字形（来自 ZTi-Sym 手写符号库）比汉字笔画略粗：
 # 实测同字号下笔宽 4.5px vs 汉字 4.0px（4x 画布），整段看起来「数字发黑」。
@@ -802,6 +805,9 @@ class Hand:
         """返回 (RGBA Image, 宽pt, 高pt)。line_pt 不传时按字号自动算（1.85 倍）。"""
         if size_pt:
             self.size_pt = size_pt
+        # 手写里不写「计算机斜杠」：a/b → 公式分式，其它除号 → ÷。
+        # 放在这里，而不是让每个调用方自己处理：GUI、做题、预览都走本函数。
+        text = humanize_division(text)
         width_pt = width_pt or (PAGE_RIGHT_PT - PAGE_LEFT_PT)
         # 风格一致性护栏：多套字库覆盖不到正文时关掉循环，避免毛笔/硬笔混排
         # （硬换行标记只是排版控制符，不参与覆盖率统计，否则会误判成缺字）
@@ -881,11 +887,13 @@ class Hand:
         for k, (kind, val) in enumerate(atoms):
             if kind in ("f", "d"):
                 # 公式整体当一个原子：不可拆、不与前后字重叠。
-                # 公式里的单字符也参与 4 套轮换（用首字符决定，整条公式同一套，
-                # 否则一条式子里字体会跳来跳去）。
+                # 公式层**固定用主符号字体**（pass2），不参与 4 套轮换：
+                #   · 轮换会让同一条公式每次渲染换一套笔迹、字号跟着 size_scale 跳；
+                #   · 排版宽度（_line_box / _token_width）本来就是按主动 math_font
+                #     量的，绘制换一套会出现「量一套画另一套」的宽度误差。
+                # 正文里的单字（数字/字母）仍照旧轮换，保留同字异形。
                 disp = (kind == "d")
-                first = next((c for c in val if not c.isspace()), "")
-                used_f = (self._variant_for(first) if first else None) or self.math_font_path
+                used_f = self.math_font_path
                 fw, _fa, _fd = formula.measure(val, px, self.font_path, self.ink,
                                                used_f, display=disp)
                 if x < right:
@@ -975,6 +983,102 @@ class Hand:
 
 
 # ---------------------------------------------------------------- 工具函数
+# ---------------------------------------------------------------- 除法写法
+# 手写里没有「计算机斜杠」：除以要么写成 ÷，要么写成分数（上下结构）。
+# AI 输出的 "220/5"、"P1/(Ucosφ)" 直接画出来是一根又长又直的印刷斜杠，
+# 既不像手写、又比汉字高一大截。这里在排版前就换掉：
+#   · 两侧像算式（数字/字母/√/括号里的式子）→ $\frac{分子}{分母}$
+#   · 已经在 $...$ 里 → \frac{分子}{分母}
+#   · 其它夹在算式字符之间的斜杠 → ÷
+#   · 中文之间的斜杠（"和/或"）保持原样，避免把叙述文字改坏
+_DIV_OPERAND = (r"(?:[-+]?(?:\([^()]{1,40}\)|\{[^{}]{1,40}\}|"
+                 r"\\[A-Za-z]+(?:\{[^{}]{0,30}\})?|"
+                 r"[A-Za-z0-9.√φωΩθΔ][A-Za-z0-9.√°%φωΩθΔ]*))")
+_DIV_RE = re.compile(r"(?P<l>" + _DIV_OPERAND + r")\s*/\s*(?P<r>" + _DIV_OPERAND + r")")
+_MATH_NEI = set("0123456789abcdefghijklmnopqrstuvwxyz"
+                "ABCDEFGHIJKLMNOPQRSTUVWXYZ()[]{}|√%°+-×÷=<>")
+
+
+def _strip_outer_parens(s):
+    """去掉把整个操作数包起来的一层括号（分式线本身就有分组作用）。"""
+    s = (s or "").strip()
+    if len(s) >= 3 and s[0] == "(" and s[-1] == ")":
+        depth = 0
+        for i, c in enumerate(s):
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+                if depth == 0 and i != len(s) - 1:
+                    return s          # 外层没包住整个操作数
+        return s[1:-1]
+    return s
+
+
+def _frac_tex(left, right):
+    return r"\frac{%s}{%s}" % (_strip_outer_parens(left),
+                               _strip_outer_parens(right))
+
+
+def _conv_math_segment(seg):
+    return _DIV_RE.sub(lambda m: _frac_tex(m.group("l"), m.group("r")), seg)
+
+
+def _conv_text_segment(seg):
+    t = _DIV_RE.sub(lambda m: "$" + _frac_tex(m.group("l"), m.group("r")) + "$",
+                    seg)
+    if "/" not in t:
+        return t
+    out = []
+    for i, ch in enumerate(t):
+        if ch == "/":
+            prev = t[i - 1] if i > 0 else ""
+            nxt = t[i + 1] if i + 1 < len(t) else ""
+            out.append("÷" if (prev in _MATH_NEI and nxt in _MATH_NEI) else ch)
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def humanize_division(text):
+    """把正文里的 ASCII 斜杠改成手写写法（分式或 ÷）。
+
+    「做题」链路在 worksheet.humanize_answer 里已有一份完整实现（分式折叠、
+    链式除法、单位比值保留、裸根号包进 \\sqrt）。这里直接复用，保证
+    「手写生成器」和「做题」两条入口的写法完全一致；导入失败时退回本文件的
+    简化实现（只在 worksheet 不可用的极端情况下生效）。
+    """
+    s = str(text or "")
+    if "/" not in s and "√" not in s:
+        return s
+    try:
+        from worksheet import humanize_answer
+        return humanize_answer(s)
+    except Exception:
+        return _fallback_humanize_division(s)
+
+
+def _fallback_humanize_division(text):
+    """简化版：a/b → 分式，其余算式间的斜杠 → ÷（worksheet 不可用时用）。"""
+    s = str(text or "")
+    if "/" not in s:
+        return s
+    out, i = [], 0
+    while i < len(s):
+        j = s.find("$", i)
+        if j < 0:
+            out.append(_conv_text_segment(s[i:]))
+            break
+        out.append(_conv_text_segment(s[i:j]))
+        k = s.find("$", j + 1)
+        if k < 0:                       # 不配对的 $：原样保留
+            out.append(s[j:])
+            break
+        out.append("$" + _conv_math_segment(s[j + 1:k]) + "$")
+        i = k + 1
+    return "".join(out)
+
+
 def _is_formula(tk):
     """$...$ 或 $$...$$ 形式的 token 视为公式。"""
     return len(tk) >= 3 and tk[0] == "$" and tk[-1] == "$"

@@ -63,6 +63,11 @@ SYM_DIR_CANDIDATES = ((
 ))
 # 4 套权重（pass1 较潦草，降频；pass2 最清楚，主字体）
 WEIGHTS = {1: 1, 2: 3, 3: 2, 4: 2}
+# 数字/拉丁/符号是否按出现次数在 4 套之间轮换。默认关闭：4 套里同一个数字
+# 的高度差可达 40%，轮换会让同一段里的数字忽大忽小（见 _variant_for 注释）。
+# 设环境变量 ZTISYM_ROTATE=1 可恢复旧行为（同字异形）。
+SYMBOL_ROTATES = os.environ.get("ZTISYM_ROTATE", "").strip().lower() in (
+    "1", "true", "yes", "on")
 
 
 def sym_dir():
@@ -267,6 +272,8 @@ def make_hand(han_font, size_pt=None, seed=20261118, weights=None,
                 return None
             if "\u4e00" <= ch <= "\u9fff":      # 汉字交给 han_font
                 return None
+            if not SYMBOL_ROTATES:
+                return None                     # 默认固定 pass2，理由见 _HanHand
             # 按权重**随机**挑一套，而不是 n % len 的确定性循环。
             # 循环的问题：pass2,pass2,pass2,pass3,pass3,pass4,pass4,pass1 严格重复，
             # 同一个字连续出现时字形变化是周期性的，看起来像「没随机」。
@@ -385,8 +392,9 @@ def make_han_hand(size_pt=None, seed=20261118, jitter=1.0, ink=None,
             self._sym_pool = list(pool)
             self._variants_active = True
             if n_sym:
-                self.style_note = ("汉字 %s %d 套 + 符号 ZTi-Sym %d 套加权"
-                                   % (lib_name, n_han, n_sym))
+                tail = ("符号 ZTi-Sym %d 套加权" % n_sym if SYMBOL_ROTATES
+                        else "符号 ZTi-Sym 固定 pass2")
+                self.style_note = "汉字 %s %d 套 + %s" % (lib_name, n_han, tail)
             else:
                 self.style_note = "汉字 %s %d 套（符号库缺失，已回退）" % (
                     lib_name, n_han)
@@ -419,6 +427,19 @@ def make_han_hand(size_pt=None, seed=20261118, jitter=1.0, ink=None,
                 if not usable:
                     return None
                 return usable[n % len(usable)]
+            if not SYMBOL_ROTATES:
+                # 数字/拉丁/希腊/符号固定用主符号字体（pass2）。
+                # 4 套是同一批字写了 4 遍，同一个数字各遍高度差可达 40%
+                #（实测 2：pass1 30px / pass2 44px / pass3 30px / pass4 34px），
+                # 轮换会让「2222」看起来大小不一，公式和正文也各用一套。
+                # 用户明确要求「同一段里所有字符一样大」，默认关闭。
+                # 需要同字异形时设环境变量 ZTISYM_ROTATE=1。
+                # 注意：主汉字库没有的字（，。、；：（）等）必须显式给符号库，
+                # 否则 _font_for 会拿汉字库画，结果是空白。
+                main_cmap = self._cmap(self.font_path)
+                if main_cmap is not None and cp in main_cmap:
+                    return None
+                return self.math_font_path
             # 数字/拉丁/希腊/符号：按权重随机挑一套（不是 n % len 的周期性循环）
             usable = [p for p in self._sym_pool
                       if (c := self._cmap(p)) is None or cp in c]

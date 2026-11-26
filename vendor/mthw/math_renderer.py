@@ -193,6 +193,14 @@ INTEGRAL_SYMBOLS = {"∫", "∬", "∭", "∮"}
 LIMIT_OPERATOR_SYMBOLS = INTEGRAL_SYMBOLS | {"∑", "∏"}
 LIMIT_OPERATOR_NAMES = {"lim", "max", "min", "sup", "inf"}
 
+# 本地改动（2026-11-26）：分式的上下字号与间距。原值 0.78 / 0.12 / 0.12。
+# 项目要求「同一段里所有字符看起来一样大」——公式层的主字符已经和正文对齐，
+# 分式的分子/分母原先被压到 0.62，明显比正文小一圈，所以按「和正文数字同高」
+# 重新标定（见 FRACTION_CHILD_RATIO）。间距收小，避免整式占两倍行高。
+FRACTION_CHILD_RATIO = 0.88
+FRACTION_GAP_RATIO = 0.06
+FRACTION_OVERHANG_RATIO = 0.10
+
 
 class LatexRenderError(ValueError):
     pass
@@ -861,12 +869,14 @@ class FormulaRenderer:
         return MathBox(image, baseline)
 
     def _fraction_box(self, node: FractionNode, size_px: int, seed_extra: str) -> MathBox:
-        child_size = max(10, round(size_px * 0.78))
+        # 本地改动（2026-11-26，M2）：分式上下字号/间距改成模块级常量，
+        # 方便按「分子分母与正文数字同高」重新标定。
+        child_size = max(10, round(size_px * FRACTION_CHILD_RATIO))
         numerator = self._layout(node.numerator, child_size, f"{seed_extra}:num")
         denominator = self._layout(node.denominator, child_size, f"{seed_extra}:den")
-        rule_overhang = max(3, round(size_px * 0.12))
+        rule_overhang = max(3, round(size_px * FRACTION_OVERHANG_RATIO))
         side_pad = rule_overhang + max(2, round(size_px * 0.05))
-        gap = max(3, round(size_px * 0.12))
+        gap = max(3, round(size_px * FRACTION_GAP_RATIO))
         stroke = self._stroke_width(size_px)
         stroke_extent = max(1, math.ceil(stroke))
         tilt, bend, jitter = self._rule_variation(size_px)
