@@ -216,7 +216,15 @@ def test_charset_cache_invalidation(tmp):
 
 
 def test_answer_height_estimate():
-    """公式高度估算要和渲染器实测对齐（分数 31.3pt / 纯文字 22.9pt）。"""
+    """高度估算要和渲染器实测对齐（纯文字 1 行距 / 分数按墨迹加高）。
+
+    2026-11-26 起估算不再用「行数 × 行距 + 补偿」，而是直接走
+    hwrender.Hand.measure_block（真实换行 + 真实公式盒），所以：
+      · 单行纯文字 = 1 个行距（22.9pt）；
+      · 含分式的一行 = 墨迹高（约 31–33pt，分子分母各占一段）；
+      · 根号行比纯文字略高（radical 的上横与下勾）——旧断言的「根号不增高」
+        是按字数估的时代的结论，现在按墨迹算，允许 3pt 内的增加。
+    """
     size = 12.4
     lp = round(size * worksheet.LINE_RATIO, 1)
     plain = "解：电流为22安。"
@@ -226,8 +234,9 @@ def test_answer_height_estimate():
     h_frac = worksheet.estimate_answer_height(frac, 400, size, lp)
     h_sqrt = worksheet.estimate_answer_height(sqrt_t, 400, size, lp)
     assert abs(h_plain - 22.9) < 0.5, "纯文字一行应≈22.9pt，实际 %.1f" % h_plain
-    assert 29.0 <= h_frac <= 33.0, "分数一行应≈31.3pt，实际 %.1f" % h_frac
-    assert abs(h_sqrt - h_plain) < 1.0, "根号不应额外增高：%.1f" % h_sqrt
+    assert 29.0 <= h_frac <= 34.0, "分数一行应≈31.3pt，实际 %.1f" % h_frac
+    assert 0.0 <= h_sqrt - h_plain <= 3.0, \
+        "根号只应比纯文字高一点（radical 上横/下勾）：%.1f vs %.1f" % (h_sqrt, h_plain)
     # 宽度：分数按排版算，不再按字符数（旧算法约 9.4 字宽）
     assert 1.5 < worksheet._em_units(r"$\frac{220}{10}$") < 2.6
 

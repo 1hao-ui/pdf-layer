@@ -1516,14 +1516,50 @@ def estimate_line_count(text, width_pt, size_pt):
     return max(1, total)
 
 
-def estimate_answer_height(text, width_pt, size_pt, line_pt=None):
-    """估算答案渲染后的总高度（pt）：行数 × 行距 + 分数行的额外高度。
+_MEASURE_HANDS = {}
 
-    只按字符宽度估行会漏掉分数的高度——分数是上下结构，一行顶一行半，
-    公式多的答案因此「字数没超但溢出」。带分数的行按 FRAC_EXTRA_EM 补高，
-    同一行里多个分数只补一次。
+
+def _measure_hand(size_pt):
+    """估高用的 Hand（按字号缓存）。
+
+    为什么不用字符数估：分式/根号会把行撑高，而且撑高量与字号成正比，
+    `字数 × 行距 + 固定补偿` 永远对不上——实测 20pt 时低估 50pt（一整行），
+    上一题的答案就会压到下一题上。直接用渲染器自己的排版算法算，误差只剩
+    几像素（并且偏高，正好当余量）。
+    """
+    key = round(float(size_pt), 2)
+    if key in _MEASURE_HANDS:
+        return _MEASURE_HANDS[key]
+    hand = None
+    try:
+        import symbols
+        # jitter 必须与真正渲染时一致（默认 1.0）：换行宽度按
+        # (1 + _JITTER_INFLATE*jitter) 预留，用 0 会排出更长的行、少一行，
+        # 估出来的高度反而偏小。
+        hand = symbols.make_han_hand(size_pt=key, seed=20261118, jitter=1.0)
+    except Exception:
+        hand = None
+    _MEASURE_HANDS[key] = hand
+    return hand
+
+
+def estimate_answer_height(text, width_pt, size_pt, line_pt=None):
+    """答案渲染后的高度（pt）：走渲染器同一套换行/行距，不再靠字数猜。
+
+    旧实现按 ``行数 × 行距 + 分数补偿`` 估算，误差随字号放大（20pt 时少算
+    50pt，正好一行），是「两段答案叠在一起」的根因。现在直接调
+    `hwrender.Hand.measure_block`；拿不到字库时退回旧算法。
     """
     size = max(1.0, float(size_pt))
+    hand = _measure_hand(size)
+    if hand is not None:
+        try:
+            _w, h_pt, _n = hand.measure_block(str(text or ""),
+                                              width_pt=width_pt,
+                                              size_pt=size, line_pt=line_pt)
+            return float(h_pt)
+        except Exception:
+            pass
     lp = float(line_pt) if line_pt else round(size * LINE_RATIO, 1)
     lines = estimate_line_count(text, width_pt, size)
     extra = min(_frac_lines(text), lines) * FRAC_EXTRA_EM * size

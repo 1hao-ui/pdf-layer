@@ -10,7 +10,8 @@
 做五件事：
     1. 打开作业页（PDF / 图片）；
     2. 自动划题：调用 worksheet.analyze()，只显示题目列表和答题区高亮，**不渲染、不写文件**；
-    3. 手动查看/修改答案（编辑框实时进内存，切题不丢），可改字号/对齐/答题区 4 个 pt 数值；
+    3. 手动查看/修改答案（编辑框实时进内存，切题不丢），可改字号/对齐；
+       **在预览页上按住左键拖框即可划定当前题答题区**（高级里仍保留 4 个 pt 数值做精确微调）；
        题目页没有留白时勾「答案写到新空白页」，生成时每页作业后插空白页写答案；
     4. **实时叠加预览**：AI 作答 / 编辑答案后自动把手写效果叠到作业页上（纯内存，
        防抖 + 后台线程 + 按答案签名缓存），不导出 PDF 也能看到最终效果；预览支持
@@ -82,6 +83,10 @@ LINE_RATIO = 1.85
 ZOOM_MIN = 0.25
 ZOOM_MAX = 4.0
 LIVE_DEBOUNCE_MS = 450
+
+# 鼠标框选答题区的最小尺寸（pt）；与 worksheet 的答题区下限保持一致
+MIN_RECT_W_PT = 20.0
+MIN_RECT_H_PT = 14.0
 
 ALIGN_LABELS = {"左对齐": "left", "居中": "center", "右对齐": "right"}
 
@@ -504,6 +509,8 @@ class WorksheetWindow:
         self._page_cache = {}
         self._preview_img = None
         self._preview_photo = None
+        self._thumb_hit = []              # [(x0,y0,x1,y1,page_idx)]
+        self._thumb_photos = {}           # (page_idx, 宽) -> PhotoImage
         self._syncing_editor = False
         self._log_open = False
         self._busy = False
@@ -511,6 +518,7 @@ class WorksheetWindow:
         self._icon_refs = []
         self._beach = None
         self._more_anchor = None
+        self._hint_after = None
 
         # ---- 实时叠加预览（纯内存，不落盘）----
         self.live_preview_on = True
@@ -525,6 +533,14 @@ class WorksheetWindow:
         self.pan_x = 0.0
         self.pan_y = 0.0
         self._pan_last = None
+        # ---- 鼠标框选答题区 ----
+        self.select_mode = True
+        self._sel_start = None       # (x, y) pt，按下时的页面坐标
+        self._sel_cur = None         # 拖动中的页面坐标
+        self._sel_px = None          # 按下时的画布像素坐标（判断是否只是单击）
+        self._sel_page = None        # 框选开始时所在页
+        self._sel_item = None        # 画布上的橡皮筋矩形
+        self._sel_label = None       # 尺寸标签
         # ---- 输出路径（会话内记忆；窗口启动不写任何配置文件）----
         self._outname_custom = False
 
@@ -596,21 +612,23 @@ class WorksheetWindow:
             pass
 
     def _set_right_sash(self):
-        """右侧「预览 / 答案编辑」初始各占约一半高度。"""
+        """右侧横向分栏：答案编辑固定约 380 逻辑 px，其余全给预览。"""
         self._right_sash_after = None
         if self._right_sash_done:
             return
         try:
-            h = self.right_paned.winfo_height()
-            if h > 400:
-                self.right_paned.sashpos(0, int(h * 0.52))
-                if 100 < self.right_paned.sashpos(0) < h - 100:
+            w = self.right_paned.winfo_width()
+            editor_w = int(380 * max(1.0, float(getattr(self, "_dpi", 1.0))))
+            if w > 760:
+                pos = max(380, w - editor_w)
+                self.right_paned.sashpos(0, pos)
+                if 300 < self.right_paned.sashpos(0) < w - 240:
                     self._right_sash_done = True
                     return
         except Exception:
             pass
         self._right_sash_tries += 1
-        if self._right_sash_tries < 30:
+        if self._right_sash_tries < 40:
             try:
                 self._right_sash_after = self.root.after(60, self._set_right_sash)
             except Exception:
@@ -620,7 +638,7 @@ class WorksheetWindow:
         if self._sash_done or event.width < 600:
             return
         try:
-            self.body_paned.sashpos(0, 356)
+            self.body_paned.sashpos(0, 330)
             if self.body_paned.sashpos(0) >= 220:
                 self._sash_done = True
         except Exception:
@@ -632,7 +650,7 @@ class WorksheetWindow:
         if self._sash_done:
             return
         try:
-            self.body_paned.sashpos(0, 356)
+            self.body_paned.sashpos(0, 330)
             if self.body_paned.sashpos(0) >= 220:
                 self._sash_done = True
                 return
@@ -810,8 +828,10 @@ class WorksheetWindow:
     def _show_help(self):
         messagebox.showinfo(
             "快捷键与手势",
+            "左键拖框　　　重设当前题答题区（勾选「框选答题区」时）\n"
+            "右键/中键拖动 平移预览\n"
+            "Esc　　　　　 取消正在拖的框\n"
             "滚轮　　　　　以光标为中心缩放\n"
-            "左键拖动　　　平移预览\n"
             "双击　　　　　适合窗口\n"
             "Ctrl+Enter　　生成手写作答\n"
             "Ctrl+O　　　　打开作业页",
@@ -985,7 +1005,8 @@ class WorksheetWindow:
         self.left_card = card
 
     def _build_right(self, parent):
-        paned = ttk.PanedWindow(parent, orient="vertical")
+        # 横着分：左边预览（占满高度），右边答案编辑（固定宽，可拖）
+        paned = ttk.PanedWindow(parent, orient="horizontal")
         paned.pack(fill="both", expand=True)
         self.right_paned = paned
 
@@ -993,7 +1014,7 @@ class WorksheetWindow:
             paned, text="预览 · 第 — 页",
             style=self._style("card_box", "Card.TLabelframe"),
             padding=(8, 6))
-        paned.add(preview_card, weight=3)
+        paned.add(preview_card, weight=1)
         self.preview_card = preview_card
         self._build_preview_toolbar(preview_card)
         self.canvas = tk.Canvas(preview_card, height=240,
@@ -1007,17 +1028,24 @@ class WorksheetWindow:
                          lambda e: self._zoom_at(e.x, e.y, 1.15))
         self.canvas.bind("<Button-5>",
                          lambda e: self._zoom_at(e.x, e.y, 1.0 / 1.15))
-        self.canvas.bind("<ButtonPress-1>", self._on_pan_start)
-        self.canvas.bind("<B1-Motion>", self._on_pan_move)
-        self.canvas.bind("<ButtonRelease-1>",
-                         lambda e: setattr(self, "_pan_last", None))
+        # 左键：勾选「框选答题区」时拖框，否则平移；右键/中键始终平移
+        self.canvas.bind("<ButtonPress-1>", self._on_canvas_press)
+        self.canvas.bind("<B1-Motion>", self._on_canvas_drag)
+        self.canvas.bind("<ButtonRelease-1>", self._on_canvas_release)
+        for _btn in (2, 3):
+            self.canvas.bind("<ButtonPress-%d>" % _btn, self._on_pan_start)
+            self.canvas.bind("<B%d-Motion>" % _btn, self._on_pan_move)
+            self.canvas.bind("<ButtonRelease-%d>" % _btn,
+                             lambda e: setattr(self, "_pan_last", None))
         self.canvas.bind("<Double-Button-1>", lambda e: self._zoom_fit())
+        self.canvas.bind("<Escape>", self._on_cancel_select)
+        self.canvas.configure(cursor="crosshair")
 
         editor_card = ttk.Labelframe(
             paned, text="答案编辑",
             style=self._style("card_box", "Card.TLabelframe"),
             padding=(10, 8))
-        paned.add(editor_card, weight=2)
+        paned.add(editor_card, weight=0)
         self.editor_card = editor_card
         self._build_editor(editor_card)
 
@@ -1027,6 +1055,11 @@ class WorksheetWindow:
         self.var_live = tk.BooleanVar(value=True)
         ttk.Checkbutton(bar, text="实时叠加", variable=self.var_live,
                         command=self._on_live_toggle).pack(side="left")
+        self.var_select = tk.BooleanVar(value=True)
+        self.select_check = ttk.Checkbutton(
+            bar, text="框选答题区", variable=self.var_select,
+            command=self._on_select_toggle)
+        self.select_check.pack(side="left", padx=(10, 0))
         self._button(bar, "刷新", self._refresh_live_preview,
                      self._style("ghost_button", "Ghost.TButton"),
                      icon="refresh", tone="muted", size=15,
@@ -1046,6 +1079,9 @@ class WorksheetWindow:
                      self._style("ghost_button", "Ghost.TButton"),
                      icon="fit", tone="muted", size=14,
                      padding=(7, 3)).pack(side="left", padx=(4, 0))
+        ttk.Label(bar, text="左键拖框 · 右键拖动 · 滚轮缩放",
+                  style=self._style("card_muted", "Card.Muted.TLabel")
+                  ).pack(side="right", padx=(8, 2))
         self._sync_zoom_label()
 
     def _build_editor(self, parent):
@@ -1091,7 +1127,7 @@ class WorksheetWindow:
         self.align_box.bind("<<ComboboxSelected>>",
                             lambda e: self._on_size_align_change())
 
-        # ---- 输出：目录 / 文件名（生成前用，常驻但只占两行）----
+        # ---- 输出：目录 / 文件名（窄栏里用图标按钮省地方）----
         out1 = ttk.Frame(parent, style=self._style("card", "Card.TFrame"))
         out1.pack(fill="x", pady=(6, 0))
         ttk.Label(out1, text="输出",
@@ -1100,10 +1136,10 @@ class WorksheetWindow:
         self.var_outdir = tk.StringVar(value=OUT_DIR)
         ttk.Entry(out1, textvariable=self.var_outdir).pack(
             side="left", fill="x", expand=True, padx=(4, 4))
-        self._button(out1, "浏览", self._dlg_choose_outdir,
+        self._button(out1, "", self._dlg_choose_outdir,
                      self._style("ghost_button", "Ghost.TButton"),
                      icon="open", tone="muted", size=15,
-                     padding=(6, 3)).pack(side="left")
+                     padding=(5, 4)).pack(side="left")
         out2 = ttk.Frame(parent, style=self._style("card", "Card.TFrame"))
         out2.pack(fill="x", pady=(4, 0))
         ttk.Label(out2, text="文件名",
@@ -1114,13 +1150,17 @@ class WorksheetWindow:
         name_entry.pack(side="left", fill="x", expand=True, padx=(4, 4))
         name_entry.bind("<KeyRelease>",
                         lambda e: setattr(self, "_outname_custom", True))
-        self._button(out2, "时间戳", self._reset_outname,
+        self._button(out2, "", self._reset_outname,
                      self._style("ghost_button", "Ghost.TButton"),
                      icon="refresh", tone="muted", size=14,
-                     padding=(6, 3)).pack(side="left")
+                     padding=(5, 4)).pack(side="left")
 
         # ---- 高级：答题区 / 空白页（收起来）----
         adv = self._collapsible(parent, "高级")
+        ttk.Label(adv, text="在预览页上按住左键拖框，即可划定当前题的答题区；"
+                            "下面 4 个数值用于精确微调",
+                  style=self._style("card_muted", "Card.Muted.TLabel"),
+                  wraplength=520).pack(anchor="w", pady=(0, 3))
         rect_row = ttk.Frame(adv, style=self._style("card", "Card.TFrame"))
         rect_row.pack(fill="x")
         ttk.Label(rect_row, text="答题区",
@@ -1131,7 +1171,7 @@ class WorksheetWindow:
             e = ttk.Entry(rect_row, textvariable=self.var_rect[i], width=6)
             e.pack(side="left", padx=(3, 0))
             e.bind("<Return>", lambda ev: self._apply_rect())
-        self._button(rect_row, "应用", self._apply_rect,
+        self._button(rect_row, "应用数值", self._apply_rect,
                      self._style("ghost_button", "Ghost.TButton"),
                      icon="check", tone="muted", size=14,
                      padding=(6, 3)).pack(side="left", padx=(6, 0))
@@ -1291,6 +1331,17 @@ class WorksheetWindow:
                 self.numbers_entry.configure(state="normal")
         except Exception:
             pass
+        self._sync_select_control()
+
+    def _sync_select_control(self):
+        """空白答题页 / 未打开作业时，框选开关置灰（原页答题区不参与排版）。"""
+        try:
+            disabled = (not self.spec
+                        or self._answer_mode() == worksheet.ANSWER_MODE_BLANK)
+            self.select_check.configure(
+                state="disabled" if disabled else "normal")
+        except Exception:
+            pass
 
     def _set_busy(self, busy, text=""):
         self._busy = bool(busy)
@@ -1315,6 +1366,25 @@ class WorksheetWindow:
                 messagebox.showwarning(title, msg, parent=self.root)
         except Exception:
             pass
+
+    def _hint(self, msg, log=False, ttl_ms=4500):
+        """轻提示：写状态栏，不弹窗（鼠标操作频繁，弹窗会打断）。"""
+        if log:
+            self.log(msg)
+        try:
+            self.status_label.configure(text=msg)
+        except Exception:
+            return
+        try:
+            if getattr(self, "_hint_after", None) is not None:
+                self.root.after_cancel(self._hint_after)
+        except Exception:
+            pass
+        try:
+            self._hint_after = self.root.after(int(ttl_ms),
+                                               self._update_status)
+        except Exception:
+            self._hint_after = None
 
     def _parse_numbers(self):
         raw = (self.var_numbers.get() or "")
@@ -1365,6 +1435,7 @@ class WorksheetWindow:
         self._generated_img = None
         self._generated_page = 0
         self._page_cache = {}
+        self._cancel_selection()
         self._invalidate_live()
         if not getattr(self, "_outname_custom", False):
             try:
@@ -1447,6 +1518,7 @@ class WorksheetWindow:
         if not pages:
             return
         idx = max(0, min(int(idx), len(pages) - 1))
+        self._cancel_selection()
         self.page = idx
         self.generated_mode = False
         self._generated_img = None
@@ -1494,6 +1566,7 @@ class WorksheetWindow:
         if not (0 <= int(idx) < len(self.questions)):
             return
         self._commit_editor()
+        self._cancel_selection()
         self.current = int(idx)
         q = self.questions[self.current]
         self.page = int(q.get("page") or 0)
@@ -1617,6 +1690,7 @@ class WorksheetWindow:
         self._schedule_live_preview()
 
     def _apply_rect(self):
+        """「应用数值」：从高级里的 4 个输入框取答题区。"""
         q = self._selected_question()
         if q is None:
             return False
@@ -1625,28 +1699,70 @@ class WorksheetWindow:
         except Exception:
             self._warn("答题区 4 个数值都要是数字（pt）")
             return False
-        left, top, right, bottom = rect
-        if not (right - left >= 20 and bottom - top >= 14):
-            self._warn("答题区太小：宽至少 20pt、高至少 14pt")
+        return self._set_answer_rect(rect, source="数值")
+
+    def _set_answer_rect(self, rect, source="鼠标框选"):
+        """统一的答题区更新入口（鼠标框选 / 数值输入都走这里）。
+
+        · 自动整理左右/上下顺序，校验最小尺寸与页内范围；
+        · 同步 self.questions、spec 里的完整题目和高级里的 4 个数值；
+        · 答题行数按新高度重新估算；
+        · 触发实时预览。
+        """
+        q = self._selected_question()
+        if q is None or not self.spec:
+            return False
+        try:
+            left, right = sorted((float(rect[0]), float(rect[2])))
+            top, bottom = sorted((float(rect[1]), float(rect[3])))
+        except (TypeError, ValueError, IndexError):
+            self._warn("答题区坐标不合法：%r" % (rect,))
+            return False
+        if not (right - left >= MIN_RECT_W_PT
+                and bottom - top >= MIN_RECT_H_PT):
+            self._hint("答题区太小（至少 %.0f×%.0f pt），已取消"
+                       % (MIN_RECT_W_PT, MIN_RECT_H_PT), log=True)
             return False
         pages = (self.spec or {}).get("pages") or []
         pw = ph = 0.0
         if 0 <= int(q.get("page", 0)) < len(pages):
-            pw = float(pages[int(q.get("page", 0))].get("width_pt") or 595.0)
-            ph = float(pages[int(q.get("page", 0))].get("height_pt") or 842.0)
-        if left < 0 or top < 0 or right > pw + 0.5 or bottom > ph + 0.5:
+            pg = pages[int(q.get("page", 0))]
+            pw = float(pg.get("width_pt") or 595.0)
+            ph = float(pg.get("height_pt") or 842.0)
+        if left < -0.5 or top < -0.5 or right > pw + 0.5 or bottom > ph + 0.5:
             self._warn("答题区超出页面范围（%.0f × %.0f pt）" % (pw, ph))
             return False
-        rect = [round(left, 2), round(top, 2), round(right, 2), round(bottom, 2)]
+        left = min(max(0.0, left), max(0.0, pw - MIN_RECT_W_PT - 1.0))
+        top = min(max(0.0, top), max(0.0, ph - MIN_RECT_H_PT - 1.0))
+        right = min(max(right, left + MIN_RECT_W_PT), pw - 1.0)
+        bottom = min(max(bottom, top + MIN_RECT_H_PT), ph - 1.0)
+        rect = [round(left, 2), round(top, 2),
+                round(right, 2), round(bottom, 2)]
         qid = str(q.get("id"))
+        lines = worksheet.estimate_answer_lines(rect[3] - rect[1])
         q["answer_rect"] = list(rect)
+        q["answer_lines"] = lines
         full = self._full_by_id.get(qid)
         if full is not None:
             full["answer_rect"] = list(rect)
-        self.log("已更新 %s 答题区：%s" % (q.get("number") or qid, rect))
+            full["answer_lines"] = lines
+        for i in range(4):
+            try:
+                self.var_rect[i].set("%.1f" % rect[i])
+            except Exception:
+                pass
+        note = ""
+        if self._answer_mode() == worksheet.ANSWER_MODE_BLANK:
+            note = "（当前是空白答题页模式，此值暂不参与排版）"
+        self.log("已更新 %s 答题区：%s（%s）%s"
+                 % (q.get("number") or qid, rect, source, note))
+        self._rebuild_question_views()
         self._schedule_live_preview()
         self._redraw_canvas()
         self._update_status()
+        self._hint("已更新 %s 答题区：%.0f×%.0f pt（%s）"
+                   % (q.get("number") or qid, rect[2] - rect[0],
+                      rect[3] - rect[1], source))
         return True
 
     # ------------------------------------------------------------ 答案位置
@@ -1667,11 +1783,13 @@ class WorksheetWindow:
         else:
             self.log("答案位置：原页答题区")
         # 换答案位置后旧的多页预览不再对应当前模式，回到实时叠加
+        self._cancel_selection()
         self.generated_mode = False
         self._generated_img = None
         self._generated_page = 0
         self._rebuild_question_views()
         self._sync_editor_from_current()
+        self._sync_select_control()
         self._invalidate_live()
         self._redraw_canvas()
         self._update_status()
@@ -1735,6 +1853,26 @@ class WorksheetWindow:
         pw, ph = self._page_dims(page_idx)
         return (ox + (float(x_pt) / max(1e-6, pw)) * img.width * z,
                 oy + (float(y_pt) / max(1e-6, ph)) * img.height * z)
+
+    def _screen_to_page(self, x, y, img, z, ox, oy, page_idx=None,
+                        clamp=False):
+        """画布坐标 → 页面 pt 坐标（_page_to_screen 的逆变换）。
+
+        clamp=False 时，落点必须在页面图片内（用来区分「点空白处」与
+        「开始框选」）；clamp=True 时拖出页面边界也会被夹回页内。
+        """
+        if img is None or z <= 1e-6:
+            return None
+        idx = self.page if page_idx is None else int(page_idx)
+        pw, ph = self._page_dims(idx)
+        u = (float(x) - ox) / max(1e-6, img.width * z)
+        v = (float(y) - oy) / max(1e-6, img.height * z)
+        if clamp:
+            u = min(1.0, max(0.0, u))
+            v = min(1.0, max(0.0, v))
+        elif not (-0.001 <= u <= 1.001 and -0.001 <= v <= 1.001):
+            return None
+        return (u * pw, v * ph)
 
     # -------------------------------------------- 实时叠加预览（纯内存，不落盘）
     def _invalidate_live(self):
@@ -1932,10 +2070,12 @@ class WorksheetWindow:
         self._redraw_canvas()
 
     def _on_pan_start(self, event):
+        if self._sel_start is not None:
+            return
         self._pan_last = (event.x, event.y)
 
     def _on_pan_move(self, event):
-        if not self._pan_last:
+        if self._sel_start is not None or not self._pan_last:
             return
         dx = event.x - self._pan_last[0]
         dy = event.y - self._pan_last[1]
@@ -1943,6 +2083,215 @@ class WorksheetWindow:
         self.pan_x += dx
         self.pan_y += dy
         self._redraw_canvas()
+
+    # ------------------------------------------------------ 鼠标框选答题区
+    def _on_select_toggle(self):
+        self.select_mode = bool(self.var_select.get())
+        self._cancel_selection()
+        try:
+            self.canvas.configure(
+                cursor="crosshair" if self.select_mode else "")
+        except Exception:
+            pass
+        if self.select_mode:
+            self._hint("框选已开启：在预览页上按住左键拖出答题区；"
+                       "右键/中键拖动平移。", log=True)
+        else:
+            self._hint("框选已关闭：左键拖动恢复为平移。", log=True)
+        self._sync_select_control()
+
+    def _on_canvas_press(self, event):
+        for (x0, y0, x1, y1, idx) in self._thumb_hit:
+            if x0 <= event.x <= x1 and y0 <= event.y <= y1:
+                if idx != self.page:
+                    self._goto_page(idx)
+                return
+        if self._start_box_select(event):
+            return
+        self._on_pan_start(event)
+
+    def _on_canvas_drag(self, event):
+        if self._sel_start is not None:
+            self._update_box_select(event)
+            return
+        self._on_pan_move(event)
+
+    def _on_canvas_release(self, event):
+        if self._sel_start is None:
+            self._pan_last = None
+            return
+        self._finish_box_select(event)
+
+    def _first_question_on_page(self, page_idx):
+        for i, q in enumerate(self.questions):
+            if int(q.get("page") or 0) == int(page_idx):
+                return i
+        return None
+
+    def _question_near_point(self, page_idx, y_pt):
+        """本页里离 y_pt 最近的题（优先纵向覆盖该点的题目）。"""
+        best, best_dist = None, None
+        for i, q in enumerate(self.questions):
+            if int(q.get("page") or 0) != int(page_idx):
+                continue
+            rect = q.get("rect") or []
+            if len(rect) != 4:
+                continue
+            if rect[1] - 6 <= y_pt <= rect[3] + 6:
+                return i
+            dist = min(abs(y_pt - rect[1]), abs(y_pt - rect[3]))
+            if best_dist is None or dist < best_dist:
+                best, best_dist = i, dist
+        return best
+
+    def _start_box_select(self, event):
+        """左键按下：能框选就进入框选，否则交给平移。"""
+        if not self.select_mode:
+            return False
+        if not self.spec or self._busy:
+            return False
+        if self.generated_mode:
+            self._hint("生成预览下不能框选：点「预览当前页」返回实时预览。")
+            return False
+        if self._answer_mode() == worksheet.ANSWER_MODE_BLANK:
+            self._hint("空白答题页模式不使用原页答题区："
+                       "先取消「答案写到新空白页」。")
+            return False
+        img, mode = self._display_image()
+        if img is None or mode == "generated":
+            return False
+        cw, ch = self._canvas_size()
+        z, ox, oy = self._view_geom(img, cw, ch)
+        pt = self._screen_to_page(event.x, event.y, img, z, ox, oy)
+        if pt is None:
+            return False                    # 点在页面空白外：平移
+        q = self._selected_question()
+        if q is None or int(q.get("page") or 0) != int(self.page):
+            # 用户直接翻到某页就拖框：自动选离落点最近的题，少一步点击
+            idx = self._question_near_point(self.page, pt[1])
+            if idx is None:
+                idx = self._first_question_on_page(self.page)
+            if idx is None:
+                self._hint("第 %d 页没有识别到题目：先「自动划区」或换页。"
+                           % (self.page + 1))
+                return False
+            self.select_question(idx)
+            q = self.questions[idx]
+            self._hint("已选中本页第 %s 题，拖框即可设置它的答题区。"
+                       % (q.get("number") or q.get("id")))
+        try:
+            self.canvas.focus_set()
+        except Exception:
+            pass
+        self._sel_start = pt
+        self._sel_cur = pt
+        self._sel_px = (event.x, event.y)
+        self._sel_page = int(self.page)
+        self._draw_selection()
+        return True
+
+    def _on_cancel_select(self, _event=None):
+        if self._sel_start is None:
+            return
+        self._cancel_selection()
+        self._hint("已取消框选。")
+
+    def _update_box_select(self, event):
+        if self._sel_page != int(self.page):
+            self._cancel_selection()
+            return
+        img, mode = self._display_image()
+        if img is None or mode == "generated":
+            self._cancel_selection()
+            return
+        cw, ch = self._canvas_size()
+        z, ox, oy = self._view_geom(img, cw, ch)
+        pt = self._screen_to_page(event.x, event.y, img, z, ox, oy,
+                                  clamp=True)
+        if pt is None:
+            return
+        self._sel_cur = pt
+        self._draw_selection()
+
+    def _finish_box_select(self, event=None):
+        rect = self._selection_rect()
+        moved = 0.0
+        if event is not None and self._sel_px is not None:
+            moved = max(abs(event.x - self._sel_px[0]),
+                        abs(event.y - self._sel_px[1]))
+        self._cancel_selection()
+        if rect is None:
+            # 只是单击/双击（没有拖动）时不刷提示，避免双击「适合窗口」被干扰
+            if moved >= 4.0:
+                self._hint("框选太小：至少拖出 %.0f×%.0f pt，已取消。"
+                           % (MIN_RECT_W_PT, MIN_RECT_H_PT))
+            return
+        self._set_answer_rect(rect, source="鼠标框选")
+
+    def _selection_rect(self):
+        if self._sel_start is None or self._sel_cur is None:
+            return None
+        x0, x1 = sorted((self._sel_start[0], self._sel_cur[0]))
+        y0, y1 = sorted((self._sel_start[1], self._sel_cur[1]))
+        if x1 - x0 < MIN_RECT_W_PT or y1 - y0 < MIN_RECT_H_PT:
+            return None
+        return [x0, y0, x1, y1]
+
+    def _cancel_selection(self):
+        c = getattr(self, "canvas", None)
+        for name in ("_sel_item", "_sel_label"):
+            item = getattr(self, name, None)
+            if item is not None and c is not None:
+                try:
+                    c.delete(item)
+                except Exception:
+                    pass
+            setattr(self, name, None)
+        self._sel_start = None
+        self._sel_cur = None
+        self._sel_px = None
+        self._sel_page = None
+
+    def _draw_selection(self):
+        """画拖框时的橡皮筋矩形 + 尺寸标签。"""
+        if self._sel_start is None or self._sel_cur is None:
+            return
+        if self._sel_page != int(self.page):
+            self._cancel_selection()
+            return
+        img, mode = self._display_image()
+        if img is None or mode == "generated":
+            return
+        c = self.canvas
+        for name in ("_sel_item", "_sel_label"):
+            item = getattr(self, name, None)
+            if item is not None:
+                try:
+                    c.delete(item)
+                except Exception:
+                    pass
+            setattr(self, name, None)
+        cw, ch = self._canvas_size()
+        z, ox, oy = self._view_geom(img, cw, ch)
+        x0, x1 = sorted((self._sel_start[0], self._sel_cur[0]))
+        y0, y1 = sorted((self._sel_start[1], self._sel_cur[1]))
+        sx0, sy0 = self._page_to_screen(x0, y0, self.page, img, z, ox, oy)
+        sx1, sy1 = self._page_to_screen(x1, y1, self.page, img, z, ox, oy)
+        accent = self.pal.get("accent", "#4F6BED")
+        soft = self.pal.get("accent_soft", "#EEF1FE")
+        try:
+            self._sel_item = c.create_rectangle(
+                sx0, sy0, sx1, sy1, outline=accent, width=2,
+                dash=(5, 3), fill=soft, stipple="gray25")
+        except Exception:
+            self._sel_item = c.create_rectangle(
+                sx0, sy0, sx1, sy1, outline=accent, width=2, dash=(5, 3))
+        label = "%.0f × %.0f pt" % (x1 - x0, y1 - y0)
+        tx = min(max(8.0, sx0 + 2), max(8.0, cw - 120))
+        ty = sy0 - 16 if sy0 > 22 else sy1 + 4
+        self._sel_label = c.create_text(
+            tx, ty, anchor="nw", text=label, fill=accent,
+            font=(self.font_family, 9, "bold"))
 
     def _view_geom(self, img, cw, ch, margin=24):
         """按当前 zoom / pan 计算 (z, ox, oy)。"""
@@ -1999,6 +2348,61 @@ class WorksheetWindow:
             return
         self.generate(out_pdf=self._compose_out_path())
 
+    def _draw_page_thumbs(self, c, cw, ch, ox):
+        """页边距里的页码缩略图：多页时用起来，窄窗自动不画。"""
+        self._thumb_hit = []
+        if not self.spec:
+            return
+        pages = self.spec.get("pages") or []
+        if len(pages) < 2:
+            return
+        d = max(1.0, float(getattr(self, "_dpi", 1.0)))
+        avail = ox - 24 * d
+        if avail < 70 * d:
+            return
+        tw = int(min(112 * d, avail))
+        try:
+            pw, ph = self._page_dims(self.page)
+        except Exception:
+            pw, ph = 595.0, 842.0
+        th = max(40, int(tw * float(ph) / max(1.0, float(pw))))
+        gap = max(9, int(13 * d))
+        step = th + gap + int(18 * d)
+        maxv = max(1, int((ch - 24 * d) // step))
+        total = len(pages)
+        start = min(max(0, self.page - maxv // 2), max(0, total - maxv))
+        shown = min(total, maxv)
+        y = max(12 * d, (ch - shown * step) / 2.0)
+        x = max(8 * d, (ox - tw) / 2.0)
+        pal = self.pal
+        for i in range(start, start + shown):
+            img = self._load_page_image(i)
+            if img is None:
+                continue
+            key = (i, tw)
+            photo = self._thumb_photos.get(key)
+            if photo is None:
+                try:
+                    im = img.resize(
+                        (tw, th), getattr(Image, "Resampling", Image).LANCZOS)
+                    photo = ImageTk.PhotoImage(im)
+                    self._thumb_photos[key] = photo
+                except Exception:
+                    continue
+            cur = (i == self.page)
+            border = (pal.get("accent", "#0C7F8B") if cur
+                      else pal.get("border", "#E7D9C2"))
+            c.create_image(x, y, anchor="nw", image=photo, tags="thumb")
+            c.create_rectangle(x, y, x + tw, y + th, outline=border,
+                               width=2 if cur else 1, tags="thumb")
+            c.create_text(
+                x + tw / 2.0, y + th + 9 * d, text=str(i + 1),
+                fill=pal.get("accent" if cur else "muted", "#7B7061"),
+                font=(self.font_family, 9, "bold" if cur else "normal"),
+                tags="thumb")
+            self._thumb_hit.append((x, y, x + tw, y + th, i))
+            y += step
+
     def _redraw_canvas(self):
         if not hasattr(self, "canvas"):
             return
@@ -2009,6 +2413,12 @@ class WorksheetWindow:
         pal = self.pal
         try:
             c.delete("all")
+            # 画布重绘会清掉拖框的橡皮筋；若正在拖，等重绘结束后补画
+            if self._sel_start is not None:
+                try:
+                    self.root.after_idle(self._draw_selection)
+                except Exception:
+                    pass
             self._sync_zoom_label()
             img, mode = self._display_image()
             if img is None:
@@ -2030,6 +2440,7 @@ class WorksheetWindow:
             c.create_image(ox, oy, anchor="nw", image=self._preview_photo)
             c.create_rectangle(ox, oy, ox + tw, oy + th,
                                outline=pal.get("border", "#E6E8EF"))
+            self._draw_page_thumbs(c, cw, ch, ox)
             if mode == "generated":
                 if self._answer_mode() == worksheet.ANSWER_MODE_BLANK:
                     head = ("生成预览 · 输出第 %d 页（空白答题页）· %s"

@@ -58,6 +58,13 @@ def main():
         check("题号输入收进弹窗（顶栏不再占位）",
               not hasattr(app, "numbers_entry") or app.numbers_entry is None)
         check("更多菜单锚点存在", app._more_anchor is not None)
+        try:
+            orient = str(app.right_paned.cget("orient"))
+        except Exception:
+            orient = "?"
+        check("预览/答案编辑是横向分栏", orient == "horizontal", orient)
+        panes = list(app.right_paned.panes())
+        check("右侧两栏（预览 + 编辑）", len(panes) == 2, len(panes))
 
         # ---- 图标 / 沙滩条 ----
         import icons
