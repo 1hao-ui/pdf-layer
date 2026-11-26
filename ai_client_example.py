@@ -13,7 +13,7 @@
 演示的调用顺序
 --------------
     GET  /health        健康检查 / 字体可用性
-    GET  /capabilities  字表（汉字 500 / 符号 204）、字号、页面、端点
+    GET  /capabilities  字表（字数随当前字库，默认 500/204）、字号、页面、端点
     POST /prompt        {question} → 内置系统提示词 + tool_schema
     POST /answer        {question, answer_text} → 自动切段 + page_model spec
     POST /render        spec → PNG（写 out/ai_client_render.png）+ PDF

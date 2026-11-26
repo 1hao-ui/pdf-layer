@@ -17,7 +17,7 @@
 端点（全部 JSON，UTF-8）
 -----------------------
     GET  /health          健康检查 + 字体/字表可用性
-    GET  /capabilities    字体/字表（汉字 500、符号 204）、字号、页面、schema、端点表
+    GET  /capabilities    字体/字表（字数随当前字库，默认 500 汉字 + 204 符号）、字号、页面、schema、端点表
     POST /render          segments 简写 或 page_model spec → PNG/PDF（base64/路径）
     POST /render_pdf      segments/spec + 源 PDF → 叠加到指定页，保留原内容
     POST /prompt          {question} → 内置系统提示词（含动态字表）
@@ -1708,18 +1708,22 @@ def run_self_test(base=None):
               and js.get("fonts", {}).get("symbol") is True)
 
         # ---------------- 2. /capabilities
+        # 字数不写死：字库是用户可以自己改的，跟着当前字体的 cmap 走
+        exp_han, exp_sym = ai_prompt.allowed_charset()
         code, cap, _ = _http(base, "GET", "/capabilities")
         cs = cap.get("character_set") or {}
         hanzi_str = cs.get("hanzi") or ""
         symbols_str = cs.get("symbols") or ""
-        check("GET /capabilities 返回汉字 500 个",
-              code == 200 and cs.get("hanzi_count") == 500
-              and len(hanzi_str) == 500,
-              "hanzi_count=%s len=%d" % (cs.get("hanzi_count"), len(hanzi_str)))
-        check("GET /capabilities 返回符号 204 个",
-              cs.get("symbol_count") == 204 and len(symbols_str) == 204,
-              "symbol_count=%s len=%d" % (cs.get("symbol_count"),
-                                          len(symbols_str)))
+        check("GET /capabilities 汉字数与当前字库一致",
+              code == 200 and cs.get("hanzi_count") == len(exp_han)
+              and len(hanzi_str) == len(exp_han),
+              "hanzi_count=%s 期望 %d len=%d"
+              % (cs.get("hanzi_count"), len(exp_han), len(hanzi_str)))
+        check("GET /capabilities 符号数与当前字库一致",
+              cs.get("symbol_count") == len(exp_sym)
+              and len(symbols_str) == len(exp_sym),
+              "symbol_count=%s 期望 %d len=%d"
+              % (cs.get("symbol_count"), len(exp_sym), len(symbols_str)))
         check("capabilities 含页面/字号/段落 schema/端点表",
               cap.get("page", {}).get("a4_pt") == [A4_W, A4_H]
               and cap.get("size", {}).get("default_pt") == DEFAULT_SIZE_PT
@@ -1734,17 +1738,19 @@ def run_self_test(base=None):
         check("POST /prompt 返回 200 且提示词非空",
               code == 200 and pr.get("ok") is True and len(prompt) > 1000,
               "prompt %d 字符" % len(prompt))
-        check("提示词含动态字表（500 汉字 / 204 符号）",
-              "500 个" in prompt and "204 个" in prompt
+        check("提示词含动态字表（%d 汉字 / %d 符号）"
+              % (len(exp_han), len(exp_sym)),
+              ("%d 个" % len(exp_han)) in prompt
+              and ("%d 个" % len(exp_sym)) in prompt
               and set(hanzi_str) <= set(prompt)
               and set(symbols_str) <= set(prompt),
               "汉字表/符号表完整注入")
         check("提示词含考试精炼约束",
               all(k in prompt for k in ("考试", "精炼", "复述题干",
                                         "emoji", "Markdown")))
-        check("提示词含字库外字禁令",
-              "字库外" in prompt and "禁止" in prompt
-              and "改写" in prompt)
+        check("提示词含用字约束（表外回退说明）",
+              "表外" in prompt and "回退" in prompt and "字表" in prompt,
+              "用字约束段缺失")
         check("提示词含题干与 JSON 结构化输出要求",
               question in prompt and '"segments"' in prompt
               and "answer_text" in prompt and "size_pt" in prompt)

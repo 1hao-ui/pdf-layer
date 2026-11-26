@@ -128,6 +128,110 @@ def test_prompt_blank_budget(spec):
         "空白页提示词预算没有放大：%r -> %r" % (inline[0], blank[0])
 
 
+def test_humanize_math():
+    """斜杠 → 分数式、裸根号 → \\sqrt{} 的归一化（用户实测反馈的 4 类坑）。"""
+    cases = [
+        # 普通数字除法
+        ("解：I=220/10=22A。", "解：I=$\\frac{220}{10}$=22A。"),
+        # 幂曾被吞进分母：U^2/R 不能变成 U^\frac{2}{R}
+        ("P=U^2/R", "P=$\\frac{U^2}{R}$"),
+        ("U^{2}/R", "$\\frac{U^{2}}{R}$"),
+        # 链式除法只转第一段 → 现在折成一个分数，分母用 \times
+        ("I=380/1.732/10", "I=$\\frac{380}{1.732\\times 10}$"),
+        # 多字符分母
+        ("S=P/cosφ", "S=$\\frac{P}{cosφ}$"),
+        # 括号分母（用户截图里的实际写法，2026-11-26 补）
+        ("I1=P1/(Ucosφ)", "I1=$\\frac{P1}{Ucosφ}$"),
+        ("I=400/(220×0.5)", "I=$\\frac{400}{220×0.5}$"),
+        ("I2=P/(√3×380×0.8)", "I2=$\\frac{P}{\\sqrt{3}×380×0.8}$"),
+        # 裸根号：被开方数必须被包进根号
+        ("U/√3", "$\\frac{U}{\\sqrt{3}}$"),
+        ("√3×220", "$\\sqrt{3}$×220"),
+        ("√(a+b)", "$\\sqrt{a+b}$"),
+        # 已经在 $...$ 里的：只换成 \frac，不重复加定界符
+        ("$I=U/R$", "$I=\\frac{U}{R}$"),
+        ("$220/10$", "$\\frac{220}{10}$"),
+        # 紧贴汉字的除法/根号也要认（\w 在 Python 里包含汉字，不能用 \w 做边界）
+        ("约3/4的电压", "约$\\frac{3}{4}$的电压"),
+        ("I=220/10伏", "I=$\\frac{220}{10}$伏"),
+        ("约√3倍", "约$\\sqrt{3}$倍"),
+        # 数字+单位的比值不动
+        ("50/60Hz", "50/60Hz"),
+        # 单位比值不是分数
+        ("kvar/h", "kvar/h"),
+        ("kW/h", "kW/h"),
+        ("220V/10A", "220V/10A"),
+    ]
+    for src, want in cases:
+        got = worksheet.humanize_answer(src)
+        assert got == want, \
+            "humanize_answer(%r) = %r，期望 %r" % (src, got, want)
+    for src, _want in cases:
+        once = worksheet.humanize_answer(src)
+        assert worksheet.humanize_answer(once) == once, \
+            "humanize_answer 不幂等：%r -> %r" % (src, once)
+
+
+def test_charset_dynamic():
+    """字表跟着当前字库走：扩展 A 也算汉字，汉字/符号表不重叠。"""
+    import ai_prompt
+    assert ai_prompt.is_han_char("相")
+    assert ai_prompt.is_han_char("㐀"), "扩展 A 应算汉字（字库工作台可选）"
+    assert ai_prompt.is_han_char("〇") and ai_prompt.is_han_char("々")
+    assert not ai_prompt.is_han_char("A")
+    assert not ai_prompt.is_han_char("√")
+    han, sym = ai_prompt.allowed_charset()
+    assert han and sym, "字表为空：检查字体输出/ 下的字库"
+    assert not (han & sym), "汉字表与符号表不应重叠"
+    assert "A" in sym and "A" not in han
+
+
+def test_charset_cache_invalidation(tmp):
+    """原地重建同名字体后，字表缓存必须自动失效（否则要重启程序）。"""
+    import shutil
+    import time
+
+    import ai_prompt
+    src = ai_prompt.han_font_path()
+    if not src:
+        return
+    tmp_font = os.path.join(tmp, "pass2.ttf")
+    shutil.copyfile(src, tmp_font)
+    real_han, real_sym = ai_prompt.han_font_path, ai_prompt.symbol_font_path
+    try:
+        ai_prompt.han_font_path = lambda: tmp_font
+        ai_prompt.symbol_font_path = lambda: None
+        ai_prompt.reload_charset()
+        n1 = len(ai_prompt.allowed_charset()[0])
+        sig1 = ai_prompt._font_signature()
+        os.utime(tmp_font, (time.time() + 5, time.time() + 5))
+        n2 = len(ai_prompt.allowed_charset()[0])
+        sig2 = ai_prompt._font_signature()
+        assert sig1 != sig2, "字体被覆盖后指纹没变，缓存不会失效"
+        assert n1 == n2, "换文件后字表内容异常：%d -> %d" % (n1, n2)
+    finally:
+        ai_prompt.han_font_path = real_han
+        ai_prompt.symbol_font_path = real_sym
+        ai_prompt.reload_charset()
+
+
+def test_answer_height_estimate():
+    """公式高度估算要和渲染器实测对齐（分数 31.3pt / 纯文字 22.9pt）。"""
+    size = 12.4
+    lp = round(size * worksheet.LINE_RATIO, 1)
+    plain = "解：电流为22安。"
+    frac = r"解：电流 $I=\frac{220}{10}=22A$。"
+    sqrt_t = r"解：电压 $U=\sqrt{3}\times 220=381V$。"
+    h_plain = worksheet.estimate_answer_height(plain, 400, size, lp)
+    h_frac = worksheet.estimate_answer_height(frac, 400, size, lp)
+    h_sqrt = worksheet.estimate_answer_height(sqrt_t, 400, size, lp)
+    assert abs(h_plain - 22.9) < 0.5, "纯文字一行应≈22.9pt，实际 %.1f" % h_plain
+    assert 29.0 <= h_frac <= 33.0, "分数一行应≈31.3pt，实际 %.1f" % h_frac
+    assert abs(h_sqrt - h_plain) < 1.0, "根号不应额外增高：%.1f" % h_sqrt
+    # 宽度：分数按排版算，不再按字符数（旧算法约 9.4 字宽）
+    assert 1.5 < worksheet._em_units(r"$\frac{220}{10}$") < 2.6
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="worksheet_reg_") as tmp:
         spec = worksheet.analyze(FIXTURE, numbers="4.2.1,4.2.2")
@@ -138,6 +242,14 @@ def main():
             ar = q["answer_rect"]
             assert ar[0] < ar[2] and ar[1] < ar[3], "答题区非法：%r" % (ar,)
         print("[ok] fixture analyze：4 题，答题区合法")
+        test_humanize_math()
+        print("[ok] 斜杠/根号归一化：分数式、幂、链式除法、单位比值、裸根号")
+        test_charset_dynamic()
+        print("[ok] 字表动态：扩展 A 算汉字、汉字/符号表不重叠")
+        test_charset_cache_invalidation(tmp)
+        print("[ok] 字表缓存：字体文件一改就失效")
+        test_answer_height_estimate()
+        print("[ok] 高度估算：分数 31.3pt / 纯文字 22.9pt 与实测一致")
         test_prompt_blank_budget(spec)
         print("[ok] 空白页提示词：可写字数预算按整页放大")
 

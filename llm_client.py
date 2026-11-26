@@ -291,9 +291,11 @@ def _messages(prompt, spec, vision):
 
     没有截图时用纯字符串 content：纯文本模型（如 deepseek-chat）对
     ``[{type:text}]`` 这种数组形式并不都兼容，字符串最稳。
+    system 只放「身份 + 服从格式」这一句：详细约束在 user 的做题提示词里，
+    这里再抄一遍会互相打架。
     """
-    sys = ("你是严谨的工科答题助手。严格按用户给的格式与约束作答，"
-           "只输出一个 JSON 对象。")
+    sys = ("你是严谨的工科答题助手：严格按用户给的格式与约束作答，"
+           "数学式写成 $...$，只输出一个 JSON 对象。")
     text = prompt + "\n\n请按上面的格式直接输出 JSON。"
     crops = _crops_from_spec(spec) if vision else []
     if crops:

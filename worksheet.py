@@ -1385,24 +1385,115 @@ def normalize_answers(answers, questions):
 # ======================================================================
 # 排版：默认 12.4pt，超过答题区才缩到 8pt
 # ======================================================================
-def _em_units(text):
-    """粗略估算文字宽度（以「一个汉字宽」为单位），用于行数估计。"""
-    units = 0.0
-    in_math = False
-    for ch in text or "":
-        if ch == "$":
-            in_math = not in_math
-            units += 0.2
-            continue
-        if "\u4e00" <= ch <= "\u9fff":
-            units += 1.0
-        elif ch.isspace():
-            units += 0.3
-        elif ord(ch) < 128:
-            units += 0.56
+# 分数（\frac）是上下结构：渲染器实测 12.4pt 时纯文字一行 22.9pt、
+# 带分数一行 31.3pt，即每个「含分数的行」多出约 0.68 个字高；
+# 根号与上下标实测不增高（22.8 / 22.5pt）。
+FRAC_EXTRA_EM = 0.68
+
+
+def _char_units(ch):
+    """单个字符的宽度（单位：一个汉字宽）。"""
+    if "\u4e00" <= ch <= "\u9fff":
+        return 1.0
+    if ch.isspace():
+        return 0.3
+    if ord(ch) < 128:
+        return 0.56
+    if 0x0370 <= ord(ch) <= 0x03FF:      # 希腊字母
+        return 0.62
+    return 0.85
+
+
+def _plain_units(s):
+    """不含公式的纯文字宽度（汉字宽）。"""
+    return sum(_char_units(ch) for ch in s or "")
+
+
+def _take_group(s, i):
+    """从 s[i] 取一个 {…} 组（没有花括号就取一个字符），返回 (内容, 新下标)。"""
+    if i >= len(s):
+        return "", i
+    if s[i] != "{":
+        return s[i], i + 1
+    depth = 0
+    for j in range(i, len(s)):
+        if s[j] == "{":
+            depth += 1
+        elif s[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return s[i + 1:j], j + 1
+    return s[i + 1:], len(s)
+
+
+def _math_units(expr):
+    """估算 $...$ 里公式的宽度（汉字宽）：分数取分子/分母较宽者，上下标不占宽。"""
+    s = expr or ""
+    total, i = 0.0, 0
+    while i < len(s):
+        if s.startswith(("\\frac", "\\dfrac", "\\tfrac"), i):
+            j = i + (6 if s.startswith(("\\dfrac", "\\tfrac"), i) else 5)
+            a, j = _take_group(s, j)
+            b, j = _take_group(s, j)
+            total += max(_math_units(a), _math_units(b)) + 0.30
+            i = j
+        elif s.startswith("\\sqrt", i):
+            j = i + 5
+            if j < len(s) and s[j] == "[":
+                k = s.find("]", j)
+                j = (k + 1) if k > 0 else j
+            a, j = _take_group(s, j)
+            total += _math_units(a) + 0.42
+            i = j
+        elif s[i] in "^_":
+            _arg, j = _take_group(s, i + 1)
+            total += 0.04                 # 上下标叠在字上，几乎不额外占宽
+            i = j
+        elif s[i] == "\\":
+            j = i + 1
+            while j < len(s) and s[j].isalpha():
+                j += 1
+            total += 0.62                 # \times \cdot 这类操作符
+            i = j
+        elif s[i] == "{":
+            a, i = _take_group(s, i)
+            total += _math_units(a)
         else:
-            units += 0.85
-    return max(0.1, units)
+            total += _char_units(s[i])
+            i += 1
+    return max(0.2, total)
+
+
+def _em_units(text):
+    """估算文字宽度（单位：一个汉字宽），$...$ 按公式排版结果算，不按字符数。
+
+    旧版把 ``\\frac{220}{10}`` 当 16 个半角字符（≈7.2 字宽），实际只有 2 字多，
+    结果行数估多、字号被无谓缩小。分数的高度由 FRAC_EXTRA_EM 单独补。
+    """
+    s = str(text or "")
+    total, i = 0.0, 0
+    while i < len(s):
+        j = s.find("$", i)
+        if j < 0:
+            total += _plain_units(s[i:])
+            break
+        total += _plain_units(s[i:j])
+        k = s.find("$", j + 1)
+        if k < 0:                          # 不配对的 $ 当普通字符
+            total += _plain_units(s[j:])
+            break
+        total += _math_units(s[j + 1:k])
+        i = k + 1
+    return max(0.1, total)
+
+
+def _frac_lines(text):
+    """含 \\frac 的行数（同一行里几个分数一样高，只算一次）。"""
+    n = 0
+    for line in str(text or "").replace("\n", HARD_BREAK).split(HARD_BREAK):
+        if "\\frac" in line or "\\dfrac" in line or "\\tfrac" in line:
+            n += 1
+    return n
 
 
 def estimate_line_count(text, width_pt, size_pt):
@@ -1425,6 +1516,20 @@ def estimate_line_count(text, width_pt, size_pt):
     return max(1, total)
 
 
+def estimate_answer_height(text, width_pt, size_pt, line_pt=None):
+    """估算答案渲染后的总高度（pt）：行数 × 行距 + 分数行的额外高度。
+
+    只按字符宽度估行会漏掉分数的高度——分数是上下结构，一行顶一行半，
+    公式多的答案因此「字数没超但溢出」。带分数的行按 FRAC_EXTRA_EM 补高，
+    同一行里多个分数只补一次。
+    """
+    size = max(1.0, float(size_pt))
+    lp = float(line_pt) if line_pt else round(size * LINE_RATIO, 1)
+    lines = estimate_line_count(text, width_pt, size)
+    extra = min(_frac_lines(text), lines) * FRAC_EXTRA_EM * size
+    return lines * lp + extra
+
+
 def fit_answer_size(text, answer_rect, start_size=SIZE_DEFAULT_PT):
     """为一段答案在 answer_rect 里挑可用字号。
 
@@ -1443,30 +1548,34 @@ def fit_answer_size(text, answer_rect, start_size=SIZE_DEFAULT_PT):
     while size >= SIZE_MIN_PT - 1e-9:
         line_pt = round(size * LINE_RATIO, 1)
         lines = estimate_line_count(text, width, size)
-        need = lines * line_pt
+        need = estimate_answer_height(text, width, size, line_pt)
         if need <= avail_h + FIT_TOLERANCE_PT:
             return round(size, 1), line_pt, lines, need, True
         size -= SIZE_STEP_PT
     size = SIZE_MIN_PT
     line_pt = round(size * LINE_RATIO, 1)
     lines = estimate_line_count(text, width, size)
-    return size, line_pt, lines, lines * line_pt, False
+    need = estimate_answer_height(text, width, size, line_pt)
+    return size, line_pt, lines, need, False
 
 
 def _charset_warnings(matches):
-    """检查答案用字是否都在字库内（汉字 500 + 符号 204），返回 warning 列表。"""
+    """检查答案用字是否都在当前字库内，返回 warning 列表。
+
+    字表跟着字体走（用户补字/换库后自动变），所以不写死「500 + 204」，
+    汉字判定也走 ai_prompt.is_han_char（含扩展 A 等码段）。
+    """
     try:
         import ai_prompt
         han, sym = ai_prompt.allowed_charset()
+        is_han = ai_prompt.is_han_char
     except Exception:
         return []
     out = []
     for qid, text in matches.items():
-        missing_han = sorted({c for c in text
-                              if "\u4e00" <= c <= "\u9fff" and c not in han})
+        missing_han = sorted({c for c in text if is_han(c) and c not in han})
         outside = sorted({c for c in text
-                          if (not c.isspace())
-                          and not ("\u4e00" <= c <= "\u9fff")
+                          if (not c.isspace()) and (not is_han(c))
                           and c not in sym})
         if missing_han:
             out.append("题目 %s 答案含 %d 个字库外汉字（将用回退字体）：%s"
@@ -1486,42 +1595,137 @@ def _charset_warnings(matches):
 # 人手写作业里除以很少写斜杠：要么写分数（分子/分母上下叠），要么写 ÷。
 # AI 常输出 "220/10"，直接按普通字符写出来就是斜杠，很“机器”。
 # 这里在渲染前把 ASCII 斜杠换成 LaTeX 分数式（走公式层，渲染成横线上下结构）。
-_FRAC_TOKEN = r"(?:-?\d+(?:\.\d+)?|[A-Za-z])"
-_FRAC_RE = re.compile(r"(?<![\\\w$.])(" + _FRAC_TOKEN
-                      + r")\s*/\s*(" + _FRAC_TOKEN + r")(?![\\\w$.])")
+# 2026-11-26 修正（用户实测反馈）：
+#   1. U^2/R 曾被拆成 U^\frac{2}{R}：幂被吞进分母，式子语义变了
+#      → 现在把「底数 + 幂/下标」整体当分子；
+#   2. 链式除法 380/1.732/10 只转了第一段，后面留一个裸斜杠
+#      → 现在整条折成一个分数（a/(b×c)，与左结合的 a/b/c 数值等价）；
+#   3. cosφ、√3 这类多字符分母一律不转 → 现在支持字母段、希腊字母、根式；
+#      单位比值（kW/h、m/s、220V/10A）仍原样保留，不当分数；
+#   4. 裸根号「√3」只有一根棍，被开方数没被包进根号
+#      → 单独做一遍 √ 归一化，写成 $\sqrt{...}$。
+
+# 单位比值不是分数：kW/h、m/s 这类写法要原样留着，
+# 写成 $\frac{kW}{h}$ 反而像两个物理量相除。
+_UNIT_TOKENS = frozenset((
+    "v", "kv", "mv", "a", "ma", "ua", "w", "kw", "mw", "va", "kva", "mva",
+    "var", "kvar", "hz", "khz", "mhz", "f", "mf", "uf", "pf", "h", "mh",
+    "s", "ms", "us", "min", "km", "m", "cm", "mm", "kg", "g", "kwh",
+    "db", "rpm",
+))
+
+# 一个「算式操作数」：数字、字母段（可含希腊字母）、已包好的 $...$ 公式片段、
+# 根式；后面可再跟一个幂/下标（U^2、U^{2}、I_1）。
+_EXP = r"(?:[\^_](?:\{[^{}]*\}|[A-Za-z0-9]))?"
+_OPERAND = (
+    r"(?:"
+    r"\$[^$]+\$"                                # 已包好的公式片段（√ 归一化后）
+    r"|\\sqrt\s*(?:\{[^{}]*\}|[0-9A-Za-z.]+)"    # 公式里的根式：\sqrt{3} / \sqrt3
+    r"|√\s*(?:\([^()]*\)|[0-9A-Za-z.]+)"        # 兜底：还没归一化的裸根号
+    r"|\([^()]*(?:\([^()]*\)[^()]*)*\)"         # 括号组：P1/(Ucosφ)、400/(220×0.5)
+    r"|-?\d+(?:\.\d+)?"                         # 数字：220 / 1.732 / -3
+    r"|[A-Za-zΑ-Ωα-ω][A-Za-z0-9Α-Ωα-ω]*"        # 字母段：U / cosφ / ωL / j6
+    r")" + _EXP
+)
+
+# 分子前面不能是 LaTeX 反斜杠、单词字符、小数点、幂次符（别切进 \frac、W/h、U^2）；
+# 分母后面同理，别把 220V、10A 这种「数字+单位」切一半。
+_DIVISION_RE = re.compile(
+    r"(?<![\\A-Za-z0-9_.\^_])(" + _OPERAND + r")"
+    r"((?:\s*/\s*" + _OPERAND + r")+)"
+    r"(?![A-Za-z0-9_])"
+)
+
+# 裸根号：√3 / √(a+b) / √1.732。括号不配对时不动，宁可原样也别把式子搞错。
+_RADICAL_RE = re.compile(
+    r"(?<![\\A-Za-z0-9_])√\s*(?:\(([^()]*)\)|([0-9A-Za-z.]+))")
 
 
-def _frac_repl(inside_math):
+def _in_math(text, pos):
+    """pos 之前有奇数个 $ 就是处在 $...$ 里。"""
+    return text.count("$", 0, pos) % 2 == 1
+
+
+def _strip_math(tok):
+    """$...$ 片段去掉定界符；非公式片段原样返回。"""
+    t = tok.strip()
+    if len(t) >= 2 and t.startswith("$") and t.endswith("$"):
+        return t[1:-1]
+    return t
+
+
+def _operand_base(tok):
+    """操作数的「底」：去掉 $、负号、幂次，用来判断是不是单位。"""
+    s = _strip_math(tok).lstrip("-")
+    s = re.split(r"[\^_]", s)[0]
+    return s.strip().lower()
+
+
+def _is_unit_operand(tok):
+    return _operand_base(tok) in _UNIT_TOKENS
+
+
+def _wrap_radicals(text):
+    """裸根号 → 公式根式：√3 写成 $\\sqrt{3}$（已在 $...$ 里就不加定界符）。"""
     def repl(m):
-        a, b = m.group(1), m.group(2)
-        if inside_math:
-            return r"\frac{%s}{%s}" % (a, b)
-        return r"$\frac{%s}{%s}$" % (a, b)
-    return repl
+        inner = (m.group(1) if m.group(1) is not None
+                 else (m.group(2) or "")).strip()
+        if not inner:
+            return m.group(0)
+        body = r"\sqrt{%s}" % inner
+        return body if _in_math(text, m.start()) else "$" + body + "$"
+    return _RADICAL_RE.sub(repl, text)
+
+
+def _plain_operand(tok):
+    """分式里的操作数：去掉 $ 定界符、去掉把整个操作数包起来的一层括号。
+
+    分式线本身就有分组作用，"400/(220×0.5)" 写成 \\frac{400}{220×0.5} 更像手写；
+    括号里如果有 $\\sqrt{3}$（前面的根号归一化加的），要一并去掉 $，
+    否则会嵌出 "$\\frac{400}{$\\sqrt{3}$...}$" 这种坏公式。
+    """
+    s = _strip_math(tok).replace("$", "").strip()
+    if len(s) >= 3 and s[0] == "(" and s[-1] == ")":
+        depth = 0
+        for i, c in enumerate(s):
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+                if depth == 0 and i != len(s) - 1:
+                    return s          # 外层没包住整个操作数
+        return s[1:-1].strip()
+    return s
+
+
+def _fold_divisions(text):
+    """a/b → 分数式；a/b/c → a/(b×c)（与左结合的结果数值等价）。"""
+    def repl(m):
+        num = m.group(1)
+        dens = re.findall(_OPERAND, m.group(2))
+        if not dens:
+            return m.group(0)
+        if _is_unit_operand(num) and all(_is_unit_operand(d) for d in dens):
+            return m.group(0)                    # 单位比值不当分数
+        body = r"\frac{%s}{%s}" % (
+            _plain_operand(num),
+            r"\times ".join(_plain_operand(d) for d in dens))
+        return body if _in_math(text, m.start()) else "$" + body + "$"
+    return _DIVISION_RE.sub(repl, text)
 
 
 def humanize_answer(text):
-    """把答案里的 ASCII 除号斜杠改成手写习惯：a/b → 分数式（上下结构）。
+    """把答案里的 ASCII 除号斜杠和裸根号改成手写习惯。
 
-    已包在 $...$ 里的片段直接换成 \\frac{}{}；普通文字里换成 $\frac{}{}$。
-    只处理「数字/单个字母」之间的斜杠，避免误伤 kW/h 这类单位写法。
+    · ``a/b`` → ``$\\frac{a}{b}$``；已在 ``$...$`` 里的只换成 ``\\frac{}{}``，
+      不重复加定界符；``a/b/c`` 折成一个分数，分母用 ``\\times`` 连起来；
+    · ``√3`` → ``$\\sqrt{3}$``，``√(a+b)`` → ``$\\sqrt{a+b}$``；
+    · 单位比值（kW/h、m/s、220V/10A）和 ``kvar/h`` 这类写法原样保留。
     """
-    text = text or ""
-    out, i = [], 0
-    while i < len(text):
-        j = text.find("$", i)
-        if j < 0:
-            out.append(_FRAC_RE.sub(_frac_repl(False), text[i:]))
-            break
-        out.append(_FRAC_RE.sub(_frac_repl(False), text[i:j]))
-        k = text.find("$", j + 1)
-        if k < 0:                       # 不配对的 $ 原样保留
-            out.append(text[j:])
-            break
-        seg = text[j + 1:k]
-        out.append("$" + _FRAC_RE.sub(_frac_repl(True), seg) + "$")
-        i = k + 1
-    return "".join(out)
+    s = text or ""
+    if "/" not in s and "√" not in s:
+        return s
+    return _fold_divisions(_wrap_radicals(s))
 
 
 # ---------------------------------------------------------------- 语义断行
@@ -1657,7 +1861,9 @@ def _split_answer_chunks(text, width_pt, max_lines, size_pt):
     out, cur = [], []
     for piece in pieces:
         trial = HARD_BREAK.join(cur + [piece]) if cur else piece
-        if cur and estimate_line_count(trial, width_pt, size_pt) > max_lines:
+        if cur and estimate_answer_height(
+                trial, width_pt, size_pt) > max_lines * round(
+                    size_pt * LINE_RATIO, 1):
             out.append(HARD_BREAK.join(cur))
             cur = [piece]
         else:
@@ -1714,8 +1920,7 @@ def _compose_blank_answer_pages(spec, matches, pm, seed, jitter,
             line_pt = round(base_size * LINE_RATIO, 1)
             for ci, chunk in enumerate(chunks):
                 gap = BLANK_ANSWER_GAP_PT if (ci == 0 and page.paragraphs) else 0.0
-                need_default = (estimate_line_count(chunk, width, base_size)
-                                * line_base)
+                need_default = estimate_answer_height(chunk, width, base_size)
                 if page.paragraphs and top + gap + need_default > bottom_limit:
                     pages_out.append(page)
                     page_indices.append(pg_i)
@@ -2085,7 +2290,8 @@ __all__ = [
     "preview_pages", "_compose_answer_pages",
     "ANSWER_MODE_INLINE", "ANSWER_MODE_BLANK",
     "questions_brief", "collect_crops", "format_spec", "normalize_answers",
-    "fit_answer_size", "estimate_line_count", "estimate_answer_lines",
+    "fit_answer_size", "estimate_line_count", "estimate_answer_height",
+    "estimate_answer_lines",
     "humanize_answer", "semantic_breaks", "HARD_BREAK",
     "parse_question_number", "load_spec", "save_spec", "guess_kind",
 ]

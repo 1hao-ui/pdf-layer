@@ -1,17 +1,21 @@
 # -*- coding: utf-8 -*-
 """ai_prompt.py — 手写体生成器的「AI 提示词 + 工具 schema」层。
 
-给上层（ai_api.py / GUI / 外部 AI 客户端）提供三样东西：
+给上层（ai_api.py / GUI / 外部 AI 客户端）提供这几样东西：
 
     allowed_charset()   从字体 cmap 动态读出的 (汉字表, 符号表)；
+    reload_charset()    字库改了想立刻生效时调（缓存自带文件指纹，一般不用管）；
+    is_han_char()       按 Unicode 码段判断是不是汉字（含扩展 A/B）；
     SYSTEM_PROMPT       中文系统提示词模板（字表/字号等由 builtin_prompt 注入）；
     builtin_prompt()    可以直接丢给大模型的完整系统提示词；
+    worksheet_prompt()  做题用的逐题作答提示词；
     tool_schema()       OpenAI / Anthropic function-calling 兼容的工具描述。
 
 设计约束
 --------
-1. **绝不硬编码字表**：ZTi-Han / ZTi-Sym 的字表由 fontTools 读 cmap 得到，
-   字体更新（补字、换 pass）后提示词自动跟着变；
+1. **绝不硬编码字表或字数**：字表由 fontTools 读当前字体的 cmap 得到，缓存带
+   文件指纹（mtime + size），补字、换库、原地重建 pass2.ttf 后自动失效；
+   汉字判定覆盖基本区 + 扩展 A/B + 兼容区 + 々〇，扩展 A 的字不会被当成符号；
 2. 提示词只描述渲染器**真的支持**的能力：$...$ 行内公式，\\frac \\sqrt \\sum
    \\int \\times \\cdot ^ _ 等，不支持 TikZ / 自定义宏 / \\begin 环境；
 3. 输出必须是结构化 JSON，方便上层直接构造 page_model spec。
@@ -44,37 +48,87 @@ import hwrender as H            # noqa: E402  (只取默认字号/行距/墨色�
 import symbols                  # noqa: E402
 
 # ------------------------------------------------------------------ 字库路径
-_CHARSET_CACHE = None           # ((frozenset 汉字), (frozenset 符号))
-_CMAP_CACHE = {}
+#
+# 字库是「用户可以自己改」的：字库工作台补字、换库、原地重建 pass2.ttf 都会让
+# cmap 变。所以缓存不能按路径永久记住，必须带上文件指纹（mtime + size）：
+# 同名文件被覆盖时也能立刻重读，不用重启程序。
+_CMAP_CACHE = {}                # abs path -> ((mtime_ns, size), frozenset)
+_CHARSET_CACHE = None           # (字体指纹, (frozenset 汉字, frozenset 符号))
+
+# CJK 汉字所在的 Unicode 码段。只认基本区会把用户补写的扩展 A 字判成「符号」，
+# 这里与 fontlib.charsets 允许选字的范围保持一致。
+_CJK_RANGES = (
+    (0x3400, 0x4DBF),      # 扩展 A（字库工作台可选）
+    (0x4E00, 0x9FFF),      # 基本区
+    (0xF900, 0xFAFF),      # 兼容汉字
+    (0x20000, 0x2A6DF),    # 扩展 B
+    (0x2A700, 0x2EBEF),    # 扩展 C–F
+    (0x30000, 0x323AF),    # 扩展 G–H
+)
+_CJK_SINGLE = frozenset((0x3005, 0x3007, 0x303B))   # 々 〇 〻
 
 
-def _cmap(path):
-    """字体 Unicode 覆盖集合；读不到返回空集合（不抛异常）。"""
-    if not path:
-        return set()
-    key = os.path.abspath(path)
-    cached = _CMAP_CACHE.get(key)
-    if cached is None:
-        try:
-            from fontTools.ttLib import TTFont
-            cached = set(TTFont(path).getBestCmap() or {})
-        except Exception:
-            cached = set()
-        _CMAP_CACHE[key] = cached
-    return cached
+def is_han_char(ch):
+    """这个字符算不算汉字（看码段，不看字库有没有）。"""
+    if not ch:
+        return False
+    cp = ord(ch[0])
+    return cp in _CJK_SINGLE or any(a <= cp <= b for a, b in _CJK_RANGES)
 
 
 def _is_cjk(ch):
-    return "\u4e00" <= ch <= "\u9fff"
+    """兼容旧名：等价于 is_han_char()。"""
+    return is_han_char(ch)
+
+
+def _stamp(path):
+    """字体文件指纹（mtime + 大小）；路径为空或读不到返回 None。"""
+    if not path:
+        return None
+    try:
+        st = os.stat(path)
+    except (OSError, TypeError):
+        return None
+    return (st.st_mtime_ns, st.st_size)
+
+
+def _cmap(path):
+    """字体 Unicode 覆盖集合；读不到返回空集合（不抛异常）。
+
+    按「路径 + 文件指纹」缓存：用户原地重建同名字体后自动失效。
+    读失败不缓存，下次调用还会重试（建库过程中字体可能正被占用）。
+    """
+    if not path:
+        return set()
+    key = os.path.abspath(path)
+    stamp = _stamp(path)
+    cached = _CMAP_CACHE.get(key)
+    if cached is not None and cached[0] == stamp:
+        return cached[1]
+    try:
+        from fontTools.ttLib import TTFont
+        chars = set(TTFont(path).getBestCmap() or {})
+    except Exception:
+        return set()
+    _CMAP_CACHE[key] = (stamp, chars)
+    return chars
 
 
 def han_font_path():
-    """ZTi-Han 主字体路径（通常 pass2.ttf）；不可用返回 None。"""
+    """汉字主字体路径（通常 pass2.ttf）；不可用返回 None。"""
     return symbols.han_main_font()
 
 
 def symbol_font_path():
-    """ZTi-Sym 符号字体路径（优先 pass2.ttf）；不可用返回 None。"""
+    """符号主字体路径（pass2 优先，缺了退到任一遍）；不可用返回 None。"""
+    fn = getattr(symbols, "sym_main_font", None)
+    if callable(fn):
+        try:
+            p = fn()
+        except Exception:
+            p = None
+        if p and os.path.exists(p):
+            return p
     d = symbols.sym_dir()
     if not d:
         return None
@@ -85,26 +139,66 @@ def symbol_font_path():
     return None
 
 
-def allowed_charset():
-    """返回 (hanzi_set, symbol_set)：从字体 cmap 动态读取，结果缓存。
+# 字库索引.json 的指纹：换库/新增库时注册表要跟着立刻生效，
+# 不然 symbols 会一直返回旧库目录。
+_REGISTRY_WATCH = {"stamp": None}
 
-    汉字表 = ZTi-Han 主字体 cmap 里的基本区汉字；
-    符号表 = ZTi-Sym 主字体 cmap 里的全部字符（ASCII 标点/数字/字母、
-             希腊字母、运算符、中文标点等）。
 
-    每次返回新的 set 副本，调用方可以随意修改，不会污染缓存。
+def _refresh_registry():
+    """字体输出/字库索引.json 变了就强制重读注册表（不存在就跳过）。"""
+    try:
+        import fontlib.registry as registry
+        path = registry.registry_path()
+    except Exception:
+        return
+    stamp = _stamp(path)
+    if _REGISTRY_WATCH["stamp"] == stamp:
+        return
+    try:
+        registry.load(force=True)
+    except Exception:
+        return
+    _REGISTRY_WATCH["stamp"] = stamp
+
+
+def _font_signature():
+    """当前这套字体的指纹；字库一变它就变，缓存跟着失效。"""
+    _refresh_registry()
+    return tuple((p, _stamp(p)) for p in (han_font_path(), symbol_font_path()))
+
+
+def reload_charset():
+    """丢掉字表缓存，下次 allowed_charset() 重读字体与字库注册表。
+
+    字库工作台补字/换库后调一次，整个程序不用重启。
     """
     global _CHARSET_CACHE
-    if _CHARSET_CACHE is None:
+    _CHARSET_CACHE = None
+    _CMAP_CACHE.clear()
+    _REGISTRY_WATCH["stamp"] = None
+
+
+def allowed_charset():
+    """返回 (hanzi_set, symbol_set)：从字体 cmap 动态读取。
+
+    汉字表 = 汉字主字体 cmap 里的 CJK 字符（含扩展 A 等码段）；
+    符号表 = 符号主字体 cmap 里的其它字符（ASCII、希腊字母、运算符、标点等）。
+
+    缓存带字体指纹：补字、换库、原地重建字体后自动重读，不会像以前那样
+    整个进程一直用旧字表。每次返回新的 set 副本，调用方改它不会污染缓存。
+    """
+    global _CHARSET_CACHE
+    key = _font_signature()
+    if _CHARSET_CACHE is None or _CHARSET_CACHE[0] != key:
         han, sym = set(), set()
         p = han_font_path()
         if p:
-            han = {chr(cp) for cp in _cmap(p) if 0x4E00 <= cp <= 0x9FFF}
+            han = {chr(cp) for cp in _cmap(p) if is_han_char(chr(cp))}
         p = symbol_font_path()
         if p:
             sym = {chr(cp) for cp in _cmap(p)} - han
-        _CHARSET_CACHE = (frozenset(han), frozenset(sym))
-    han, sym = _CHARSET_CACHE
+        _CHARSET_CACHE = (key, (frozenset(han), frozenset(sym)))
+    han, sym = _CHARSET_CACHE[1]
     return set(han), set(sym)
 
 
@@ -123,44 +217,40 @@ def _wrap_chars(s, per_line):
 
 
 # ------------------------------------------------------------------ 系统提示词
-SYSTEM_PROMPT = r"""你是「手写体答题器」：根据题干生成一份可以直接渲染成手写笔迹的答案。
+SYSTEM_PROMPT = r"""你是「手写体答题器」：根据题干写出答案，答案会被直接渲染成手写笔迹。
 
-【第一优先级：只能使用字库内的字符】
-1. 你输出的每一个汉字都必须来自下面「汉字表」（共 {han_count} 个）。字表外的汉字一律禁止输出，即使意思更贴切。
-2. 数字、拉丁字母、希腊字母、标点、运算符必须来自下面「符号表」（共 {sym_count} 个）。符号表以外的字符一律禁止：emoji、特殊排版字符、生僻标点都不允许。
-3. 遇到字库外的汉字，必须改写而不是硬写，方法是：
-   - 换同义词或近义词（如「阐述」→「说明」，「因为」→「由于」）；
-   - 换一种说法，把生僻概念拆成字表内的常用词；
-   - 用公式、符号、字母或数字表达（如「线电压」可写成 $U_{线}$）；
-   - 实在无法表达就删掉该修饰语，只保留能说清的核心结论。
-4. 标点请用符号表内的半角符号 , . ; : ? ! ( )，也可用符号表内的全角标点（、。《》【】！（），：；？ 等）；不要用符号表以外的新奇标点或 emoji。
-5. 提交前逐字自检：只要有一个汉字不在汉字表内，就改写那一句。
+【一、输出：只给一个 JSON 对象】
+{"answer_text": "纯文本答案，供人工确认", "segments": [{"text": "第一段", "size_pt": {default_size_pt}, "line_pt": {default_line_pt}, "align": "left"}]}
+- 每个分点、每个公式行单独一段，一般 2–8 段；text 里不能有换行符。
+- size_pt：正文 {default_size_pt}，注释用 {size_min_pt}–{default_size_pt}；
+  line_pt 取字号的 1.6–1.9 倍（正文默认 {default_line_pt}）；align 一律 left。
+- 不要代码块，不要 JSON 以外的任何文字。
 
-【第二优先级：考试答题风格】
-- 按考试/作业答题的方式写：先给结论，再写必要步骤；计算题给式子与结果，证明题给关键推理链。
-- 精炼：不要客套话（「好的」「以下是」「希望有帮助」），不要复述题干，不要解释题目背景，不要写总结性废话。
-- 分点用 1. 2. 3. 或 (1) (2) (3)，每个分点一到两行，行文短、句子直。
-- 不要出现 emoji，不要用 Markdown 装饰（#、*、-、>、表格、代码块、加粗）。
-- 公式是答案的一部分，直接写式子，不要写「根据公式可得」这类空话。
+【二、用字：以字表为准】
+- 汉字以「汉字表」（{han_count} 个）为准，数字、字母、标点、运算符以「符号表」
+  （{sym_count} 个）为准。表外的字会回退到别的字库渲染（风格可能不统一、个别会留白），
+  能换说法就换，别硬写生僻字；emoji 与生僻标点不用。
+- 写完逐字核对一遍字表。
 
-【公式写法（只支持这个子集）】
-- 行内公式用 $...$，例如 $I=\frac{U}{R}$、$\sqrt{3}$、$U_{相}$、$I^2R$、$\sum P$、$\int_0^t i\,dt$。
-- 可用命令：\frac{}{}、\sqrt{}、\sum、\prod、\int、\times、\cdot、\pm、\approx、\le、\ge、\ne、\infty、\angle、\alpha 到 \omega、\Delta、\Omega，以及上下标 ^ 和 _。
-- 不要用 TikZ、\begin{} 到 \end{} 的环境、自定义宏、\text{中文}、\left \right 等未支持写法；不要用 $$...$$ 大公式。
-- 公式里的中文（如 $U_{线}$）会按普通汉字渲染，只能用汉字表内的字。
+【三、公式：写 $...$，不要用汉字名或裸符号代替】
+- 根号：$\sqrt{被开方数}$，被开方数整个放进花括号 —— $\sqrt{3}$、$\sqrt{P^2+Q^2}$。
+- 除法：$\frac{分子}{分母}$（上下结构）—— $\frac{U}{R}$、$\frac{220}{10}$；不要写 220/10。
+- 幂与下标：$U^2$、$U_{相}$、$I^2R$、$\int_0^t i\,dt$。
+- 可用：\frac \sqrt \sum \prod \int \times \cdot \pm \approx \le \ge \ne \infty \angle
+  \alpha~\omega \Delta \Omega 和 ^ _；不要 \begin 环境、TikZ、自定义宏、\text{}、$$...$$。
+- 公式里的中文（如 $U_{线}$）按普通汉字渲染，只能用字表内的字。
 
-【输出格式：只输出一个 JSON 对象，不要代码块，不要任何解释】
-{"answer_text": "答案纯文本，供人工确认", "segments": [{"text": "第一段文字", "size_pt": 12.4, "line_pt": 23.0, "align": "left"}]}
-- segments 按逻辑分点/分行：每个分点、每个公式行单独成段，一般 2 到 8 段。
-- size_pt：正文 {default_size_pt}，小字注释 {size_min_pt} 到 {default_size_pt}，标题最大 {size_max_pt}。
-- line_pt：约为字号的 1.6 到 1.9 倍，正文默认 {default_line_pt}。
-- align：left / center / right，正文一律 left。
-- 每个 segment 的 text 不能含换行符；需要换行请拆成两个 segment。
+【四、像考试答卷】
+- 先给结论或关键步骤：计算题给式子与结果，证明题给推理链。
+- 精炼：不要客套话，不要复述题干，不要解释背景，不要写总结性废话。
+- 分点用 1. 2. 3. 或 (1) (2) (3)，每个分点一到两行，行文短。
+- 不用 Markdown 装饰（# * - > 表格 加粗），不用 emoji。
+- 公式是答案的一部分，直接写式子，不要「根据公式可得」这类空话。
 
-【汉字表（{han_count} 个，由 allowed_charset() 从字体 cmap 动态注入）】
+【汉字表（{han_count} 个，从当前字体 cmap 动态注入）】
 {hanzi_list}
 
-【符号表（{sym_count} 个，由 allowed_charset() 从字体 cmap 动态注入）】
+【符号表（{sym_count} 个，从当前字体 cmap 动态注入）】
 {symbol_list}
 
 {question}
@@ -176,21 +266,19 @@ PAGE_W_PT, PAGE_H_PT = 595.0, 842.0
 
 
 def _question_block(question=None, segments=None):
-    if question is None or not str(question).strip():
-        block = "【题干】\n（未提供题干：只输出答案 JSON，不要复述题目。）"
-    else:
-        block = "【题干】\n" + str(question).strip()
+    """拼【题干】段；没有题干也明确说一声，免得模型自己编题。"""
+    q = str(question).strip() if question is not None else ""
+    block = "【题干】\n" + (q or "（未提供题干：只输出答案 JSON，不要复述题目。）")
     if segments:
         if isinstance(segments, str):
-            block += "\n\n【已有分段（供修订参考，可整段替换）】\n" + segments.strip()
+            js = segments.strip()
         else:
             try:
                 js = json.dumps(segments, ensure_ascii=False, indent=2)
             except Exception:
                 js = str(segments)
-            block += "\n\n【已有分段（供修订参考，可整段替换）】\n" + js
-    block += "\n\n请直接输出 JSON。"
-    return block
+        block += "\n\n【已有分段（可整段替换）】\n" + js
+    return block + "\n\n请直接输出 JSON。"
 
 
 def builtin_prompt(question=None, segments=None):
@@ -198,7 +286,7 @@ def builtin_prompt(question=None, segments=None):
 
     参数
     ----
-    question : 可选，题干；提供后会替换模板里的 {question_block} 占位。
+    question : 可选，题干；提供后会替换模板里的 {question} 占位。
     segments : 可选，已有分段（dict/list/JSON 字符串均可），作为修订参考注入。
     """
     han, sym = allowed_charset()
@@ -229,13 +317,13 @@ def segment_schema():
         "type": "object",
         "properties": {
             "text": {"type": "string",
-                     "description": "这一段要手写的文字；公式用 $...$ 包住，不要含换行符"},
+                     "description": "这一段手写文字；公式用 $...$ 包住，不含换行符"},
             "size_pt": {"type": "number", "minimum": SIZE_MIN_PT,
                         "maximum": SIZE_MAX_PT, "default": DEFAULT_SIZE_PT,
-                        "description": "字号（pt），正文默认 %g" % DEFAULT_SIZE_PT},
+                        "description": "字号（pt），正文 %g" % DEFAULT_SIZE_PT},
             "line_pt": {"type": "number", "minimum": 10, "maximum": 60,
                         "default": DEFAULT_LINE_PT,
-                        "description": "行距（pt），约字号的 1.6 到 1.9 倍"},
+                        "description": "行距（pt），约字号的 1.6–1.9 倍"},
             "align": {"type": "string", "enum": ["left", "center", "right"],
                       "default": "left", "description": "对齐方式"},
         },
@@ -269,12 +357,10 @@ def tool_schema():
     return {
         "name": "render_handwriting",
         "description": (
-            "把手写风格的答案渲染成 PNG 或 PDF：透明的笔迹层可以直接落在"
-            "图片背景、扫描件或指定 PDF 页面的原版面上（不破坏原内容）。"
-            "输入是按逻辑分段的文字与字号/行距，返回图片或 PDF 的 base64、"
-            "汉字覆盖率与缺字警告。汉字只支持字库内 %d 字、符号 %d 个，"
-            "字库外字符会被回退字体渲染或渲染成空白，调用前请按提示词约束检查。"
-            % (len(han), len(sym))
+            "把手写风格的答案渲染成 PNG/PDF：透明笔迹层可直接叠在图片、扫描件或"
+            "指定 PDF 页的原版面上（不破坏原内容）。segments 是分段文字与字号/行距，"
+            "返回 base64、汉字覆盖率与缺字警告。字库仅 %d 汉字 + %d 符号，"
+            "表外字符会回退或渲染空白。" % (len(han), len(sym))
         ),
         "parameters": {
             "type": "object",
@@ -282,15 +368,15 @@ def tool_schema():
                 "segments": {
                     "type": "array", "minItems": 1,
                     "maxItems": 60,
-                    "description": "按逻辑分点/分行的文字段，每段一段话或一行公式",
+                    "description": "按逻辑分点/分行的文字段：一段话或一行公式",
                     "items": segment_schema(),
                 },
                 "background": background_schema(),
                 "format": {"type": "string", "enum": ["png", "pdf"],
                            "default": "png",
-                           "description": "输出格式：png 图片或 pdf（可保留源 PDF 原内容）"},
+                           "description": "输出格式：png，或 pdf（保留源页原内容）"},
                 "return_base64": {"type": "boolean", "default": True,
-                                  "description": "是否在响应里返回 base64（false 时只返回路径/元信息）"},
+                                  "description": "是否返回 base64（false 只给路径与元信息）"},
             },
             "required": ["segments"],
             "additionalProperties": False,
@@ -387,67 +473,67 @@ def worksheet_prompt(spec=None, include_charset=True, max_questions=80):
     has_crop = any(bool(q.get("crop_png_base64"))
                    for pg in (spec or {}).get("pages") or []
                    for q in pg.get("questions") or [])
-    no_text = [it for it in items if not (it["text"] or "").strip()]
 
-    head = r"""你是「手写作业答题器」：下面是一份作业/试卷的版面分析结果，请**逐题作答**，
-只输出一个 JSON 对象，答案会被渲染成手写笔迹写进每题的答题区。
+    # 只有真的带了截图才提截图，避免绝大多数题目被无关指令干扰
+    crop_note = ("- 题干可能是 null（扫描页无文字层）：这类题的题干以题目区域截图给出，"
+                 "按截图理解题意后作答，仍然只输出 JSON。\n" if has_crop else "")
 
-【输出格式（唯一允许的输出）】
-{"answers": {"1": "第一题的答案", "2": "第二题的答案"}}
-- 键必须原样使用【题目清单】里给出的「题号」（例如 "1"、"2"、"4.2.1"）。
-- 值是一题的答案纯文本：不要换行符、不要代码块、不要 JSON 以外的任何文字。
-- 不要输出解释、客套话、Markdown（# * - > 表格 加粗）、emoji、图片链接。
-- 只作答【题目清单】里出现的题；不要编造题号，不要漏题。
+    head = r"""你是「手写作业答题器」：下面是一份作业的版面分析结果，请逐题作答；
+答案会被渲染成手写笔迹，写进每题答题区。
 
-【第一优先级：只能使用字库内字符】
-1. 每个汉字都必须来自下面「汉字表」（共 {han_count} 个）；字表外的汉字一律禁止。
-2. 数字、字母、希腊字母、标点、运算符必须来自「符号表」（共 {sym_count} 个）；
-   emoji、特殊排版字符、生僻标点一律禁止。
-3. 遇到字库外的汉字要改写而不是硬写：换同义词；换一种说法拆成常用词；
-   用公式/符号/字母/数字表达；实在不行删掉修饰语，保留核心结论。
-4. 提交前逐字自检：只要一个汉字不在表内就改写那一句。
+【一、输出：只给一个 JSON 对象】
+{"answers": {"1": "第一题的答案", "4.2.1": "……"}}
+- 键原样使用【题目清单】里的题号，不编造、不漏题。
+- 值是纯文本：不含换行符、代码块、Markdown（# * - 表格 加粗）、emoji。
+- 不要客套话，不要复述题干，不要解释题目背景。
+{crop_note}
+【二、用字：以字表为准】
+- 汉字以「汉字表」（{han_count} 个）为准，数字、字母、标点、运算符以「符号表」
+  （{sym_count} 个）为准。表外的字会回退到别的字库渲染（风格可能不统一、个别会留白），
+  能换说法就换，别硬写生僻字；emoji 与生僻标点不用。
+- 写完逐字核对一遍字表。
 
-【第二优先级：像人写作业那样作答（不要像答题机器）】
-- 每题以「解：」开头；问数值/结论的题，结尾用「答：……」把结果说清楚。
-- 分步写：先用一句自然的话说明依据（如「由换路定则可知」「星形联结时线电流等于相电流」），
-  再写公式与代入，再给结果和单位；必要的文字承上启下，不要只堆一串等式。
-- 不要把答案压成一行短句；按人的书写习惯用「，」「。」自然断句，读起来像学生手写的作业。
-- 但保持考试尺度：不要复述题干、不要解释题目背景、不要客套话或总结废话；每题答案控制在【题目清单】给出的「可写字数」以内，宁短勿长，写不下会被缩字号或溢出。
-- 算式写法要像手写：**除法写成分数式 $\frac{分子}{分母}$（上下结构），不要用斜杠 / ；
-  很简单的算式也可用 ÷**。乘号用 ×，开方用 √，单位照写（A、V、Ω、kW、kvar、kVA）。
-- 公式只支持子集：$...$ 行内公式，可用 \frac{}{}、\sqrt{}、\sum、\prod、\int、
-  \times、\cdot、\pm、\approx、\le、\ge、\ne、\infty、\angle、\alpha~\omega、
-  \Delta、\Omega，以及上下标 ^ 和 _；不要 TikZ/\begin 环境/自定义宏/\text{中文}/$$...$$。
+【三、公式：写 $...$，不要用汉字名或裸符号代替】
+- 根号：$\sqrt{被开方数}$，被开方数整个放进花括号 —— $\sqrt{3}$、$\sqrt{P^2+Q^2}$；
+  不要只写一个 √ 再接字（那样根号只盖住一个字），也不要写「根号3」。
+- 除法：$\frac{分子}{分母}$（上下结构）—— $\frac{U}{R}$、$\frac{220}{10}$；不要写 220/10。
+- 幂与下标：$U^2$、$U_{相}$、$I^2R$。
+- 可用：\frac \sqrt \sum \prod \int \times \cdot \pm \approx \le \ge \ne \infty \angle
+  \alpha~\omega \Delta \Omega 和 ^ _；不要 \begin 环境、TikZ、自定义宏、\text{}、$$...$$。
+- 只把算式包进 $...$；纯数字与单位照写（22A，不写 $22A$）。
+- 不要用「根号、除以、平方、等于」等汉字代替 √ / ^ = 等符号（题目要求文字叙述时除外）。
 
-【作答要求】
-- 答案从每题答题区顶部开始写、按答题区宽度自动换行，所以直接用自然段文字即可，
-  不要自己加换行、缩进或分栏。
-- 扫描件/图片页的题干可能是 null（无文字层）：这类题的题干以题目区域截图给出，
-  请按截图理解题意后作答，仍然只输出 JSON，不要描述图片。
+【四、像学生写作业】
+- 每题以「解：」开头；有数值或结论的题，结尾用「答：……」收口。
+- 先一句依据（如「由换路定则可知」），再写公式与代入，再给结果和单位；不要只堆等式。
+- 用「，」「。」自然断句，不要压成一行短句；也不要写总结废话。
+- 每题不超过【题目清单】给的「可写字数」，宁短勿长（超了会缩字号或溢出）。
+- 答案按答题区宽度自动换行：不要自己加缩进、分栏或强制换行。
 """
+    head = head.replace("{crop_note}", crop_note)
 
     if include_charset:
-        head += "\n【汉字表（{han_count} 个，由 allowed_charset() 从字体 cmap 动态注入）】\n"
+        head += "\n【汉字表（{han_count} 个，从当前字体 cmap 动态注入）】\n"
         head += (_wrap_chars(han_str, 40) if han_str
                  else "（汉字库缺失：请确认 字体输出\\ZTi-Han 是否存在）")
-        head += "\n\n【符号表（{sym_count} 个，由 allowed_charset() 从字体 cmap 动态注入）】\n"
+        head += "\n\n【符号表（{sym_count} 个，从当前字体 cmap 动态注入）】\n"
         head += (_wrap_chars(sym_str, 60) if sym_str
                  else "（符号库缺失：请确认 字体输出\\ZTi-Sym 是否存在）")
         head += "\n"
 
     if items:
-        lines = ["\n【题目清单（共 %d 题；按此顺序作答）】" % len(items)]
+        lines = ["\n【题目清单（共 %d 题，按此顺序作答）】" % len(items)]
         for i, it in enumerate(items, 1):
             lines.append("第 %d 题  题号 %s" % (i, it["number"] or it["id"]))
             text = (it["text"] or "").strip()
             if text:
                 lines.append("  题干：%s" % text)
             else:
-                lines.append("  题干：（无文字层，见题目区域截图 crop_png_base64）")
-            lines.append("  答题区：约 %d 行，每行约 %d 字，合计约 %d 字"
+                lines.append("  题干：（无文字层，见题目区域截图）")
+            lines.append("  答题区：约 %d 行 × 每行约 %d 字 ≈ %d 字"
                          % (it["lines"], it["per_line"], it["max_chars"]))
         lines.append("")
-        lines.append("请直接输出 {\"answers\": {...}}，键用上面的题号。")
+        lines.append("请直接输出 {\"answers\": {...}}。")
         body = "\n".join(lines)
     else:
         body = ("\n【题目清单】\n（未提供题目：只输出空对象 {\"answers\": {}}，"
@@ -460,9 +546,6 @@ def worksheet_prompt(spec=None, include_charset=True, max_questions=80):
     }
     for key, val in mapping.items():
         out = out.replace(key, val)
-    if no_text and has_crop:
-        out += ("\n注：有 %d 题没有文字层，题干以题目区域截图（crop_png_base64）提供。"
-                % len(no_text))
     return out
 
 
