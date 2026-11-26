@@ -17,23 +17,23 @@
     "adv_scale": 1.0
   },
   "text": {
-    "w": 272.75,
-    "h": 54.5,
+    "w": 274.25,
+    "h": 49.25,
     "size": [
-      1091,
-      218
+      1097,
+      197
     ],
     "mode": "RGBA",
-    "sha": "60b6ad1e9e51991af398f47cfc5b8e822db7f71879cd03a2d68bc473c8d42bce"
+    "sha": "7c3ea3866af53ebc82c7c845e07eb096d8e60f59787f7cd5f78c88aa907d1894"
   },
   "formula": {
-    "w": 333.25,
+    "w": 339.0,
     "h": 25.5,
     "size": [
-      1333,
+      1356,
       102
     ],
     "mode": "RGBA",
-    "sha": "3ee641375a9afe98c1d2c5c8e15b6b1aba4facf7d2d62393b5bbbeab9d3184fb"
+    "sha": "f0de8f853c25b3f47649b8918a52949868ba0a9b5631b18ea175477b8e36f454"
   }
 }

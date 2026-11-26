@@ -53,14 +53,39 @@ def size_comp(math_font_path):
         pass
     return MATH_SIZE_COMP
 
+
+def _same_pen_hook(img, size_px, renderer):
+    """公式里缩小渲染的文字（分式上下、上下标）把笔宽/墨色补回正文。
+
+    字号一小，字库的笔宽按比例变细：正文 4px，0.58 倍的角标只剩 2.3px。
+    同一句里两种粗细，看着就不是一支笔（用户反馈）。
+    """
+    try:
+        import fontcal
+        ref = float(getattr(renderer, "ref_size_px", size_px) or size_px)
+        if size_px >= ref - 0.5:
+            return img
+        ratio = getattr(renderer, "pen_em_ratio", None) or 0.056
+        shrink = min(1.0, max(0.0, 1.0 - size_px / ref))
+        # 0.9：补到正文笔宽的九成（补满会把小字母的字孔糊住，见 hwrender）
+        return fontcal.thicken_alpha(img, 0.9 * ratio * (ref - size_px) / 2.0,
+                                     gain=1.0 + min(0.08, 0.12 * shrink))
+    except Exception:
+        return img
+
 # 公式层字形调细：数字/拉丁/希腊与分式横线都走公式层，ZTi-Sym 的笔画比汉字略粗，
 # 整段里数字显得发黑。这里把位图 alpha 的低值端压掉（柔和收边，不产生锯齿），
 # 让数字/字母笔画与汉字接近。数值是 alpha 阈值：0 = 关闭，140 = 默认（比原件细一点）。
 # 可用环境变量 FORMULA_THIN_LEVEL 覆盖。
+#
+# 2026-11-26 起默认关闭（用户反馈「公式里的除号、根号太细太淡」）：
+# 当年是因为 ZTi-Sym 笔画比汉字粗才加的这一层；现在字库全部换成同一支笔写的，
+# 实测三套字库的笔宽都是 4px、墨色都在 220 上下，再压一遍反而让公式比正文淡一档。
+# 真要细一点可用 FORMULA_THIN_LEVEL=60 之类开回去。
 try:
-    FORMULA_THIN_LEVEL = int(float(os.environ.get("FORMULA_THIN_LEVEL", "140")))
+    FORMULA_THIN_LEVEL = int(float(os.environ.get("FORMULA_THIN_LEVEL", "0")))
 except Exception:
-    FORMULA_THIN_LEVEL = 140
+    FORMULA_THIN_LEVEL = 0
 
 # 是否把公式符号用 handstroke 二次笔迹化。
 # 符号来自手写字库时应为 False（保留原笔迹）；
@@ -149,6 +174,19 @@ def _ensure_engine(font_path, size_px, ink, math_font_path=None):
             import handstroke
             handstroke.inline_patch(_engine)
         _renderer = mr.FormulaRenderer(_engine, seed="pdf-layer")
+        # 规则线（分数线/根号横）用这套字库自己的笔宽，而不是内核写死的
+        # 0.024 em。分数线和根号是「程序画的线」，不跟着字库走就会明显比
+        # 正文细一档——用户反馈的「除号、根号太细太淡」就是它。
+        try:
+            px_render = size_px * size_comp(math_font_path)
+            _renderer.pen_em_ratio = fontcal.pen_em_ratio(math_font_path,
+                                                          px_render)
+            _renderer.ref_size_px = px_render
+        except Exception:
+            _renderer.pen_em_ratio = None
+            _renderer.ref_size_px = size_px
+        # 同一支笔：公式文字缩小渲染后补回笔宽（见 _same_pen_hook）
+        mr.TEXT_TILE_HOOK = _same_pen_hook
         _engine_key = key
         return _renderer
 

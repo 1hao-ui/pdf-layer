@@ -201,6 +201,15 @@ FRACTION_CHILD_RATIO = 0.88
 FRACTION_GAP_RATIO = 0.06
 FRACTION_OVERHANG_RATIO = 0.10
 
+# 规则线（分数线、根号横、上下限横线）的笔宽占字号比例。兜底值 = 实测手写
+# 字库的笔宽 4px / 72px；formula.py 会按当前字库实测值覆盖。
+RULE_STROKE_EM = 0.056
+
+# 文字位图后处理钩子：formula.py 用它把「缩小渲染的公式文字」（分式上下、
+# 上下标）的笔宽补回正文笔宽，保证同一句里不同字号的字看起来是一支笔写的。
+# 回调签名：hook(image, size_px, renderer) -> image
+TEXT_TILE_HOOK = None
+
 
 class LatexRenderError(ValueError):
     pass
@@ -788,6 +797,11 @@ class FormulaRenderer:
             weight_seed_extra=self._weight_seed_extra,
             return_baseline=True,
         )
+        if TEXT_TILE_HOOK is not None:
+            try:
+                image = TEXT_TILE_HOOK(image, size_px, self)
+            except Exception:
+                pass
         return MathBox(image, max(1, baseline))
 
     def _generated_symbol_box(
@@ -1297,9 +1311,17 @@ class FormulaRenderer:
         )
 
     def _stroke_width(self, size_px: int) -> float:
+        """规则线（分数线/根号横、上下限横线）的笔宽。
+
+        本地改动（2026-11-26，M2）：默认值由 0.024 em（≈2px）改成 0.056 em
+        （≈4px）——实测手写字库的笔宽就是 4px/72px。原来的值只有正文的一半，
+        分式横线和根号看起来又细又淡，像换了支笔。formula.py 会按当前字库
+        实测的笔宽覆盖 `self.pen_em_ratio`，这里只是兜底。
+        """
         if self.engine.uses_sdt_trajectories:
             return self.engine.uniform_pen_width_px()
-        return max(1, round(size_px * 0.024))
+        ratio = getattr(self, "pen_em_ratio", None) or RULE_STROKE_EM
+        return max(1.0, round(size_px * ratio, 2))
 
     def _rule_curve(
         self,

@@ -36,7 +36,9 @@ DEFAULT_SIZE_PT = fontcal.BASE_SIZE_PT
 # 实测同字号下笔宽 4.5px vs 汉字 4.0px（4x 画布），整段看起来「数字发黑」。
 # 渲染时对这类字形把 alpha 收边 SYMBOL_THIN px（4x 像素；0 = 关闭）。
 # 只影响非汉字（数字/拉丁/希腊），汉字、标点、公式层不动。
-SYMBOL_THIN = 1.0
+# 2026-11-26 起设为 0：三套字库换成同一支笔后，实测笔宽都是 4px（见
+# fontcal.pen_width_at），再收边反而让符号比汉字淡。用户反馈「浓厚不一致」。
+SYMBOL_THIN = 0.0
 DEFAULT_LINE_PT = 23.0         # 行距保持约 1.85 倍字号
 INK = (16, 16, 18)             # 墨色 RGB：黑笔（alpha 逐字抖动）
 PAGE_LEFT_PT = 64.0
@@ -53,9 +55,21 @@ NO_LINE_END = "（《「『“‘([{"
 HARD_BREAK = "\u2028"
 _TILE_PAD = 6                   # 单字贴图四周的透明内边距（px），排版时不能算进字距
 _JITTER_INFLATE = 0.02          # 逐字扰动（缩放/位移/防重叠右推）平均把行宽撑大的比例
-_LINE_HEIGHT_DAMP = 0.80        # 超高行（分式/根号）额外高度的打折系数：
-                                # 1.0=完全按内容给（行距忽大忽小），0.55=压太紧会与下一行相撞
 _LINE_HEIGHT_RATIO = 1.85
+# 行与行之间**墨迹**的最小间隙（px，4x 画布）。真人两行之间大约留
+# 1/3 个字高（12.4pt 时 ≈15px），比它小就会显得挤；字号越大留得越多。
+_LINE_GAP_PX = 8.0
+_LINE_GAP_EM = 0.30
+# 每行画布在墨迹上下各留的余量（px）。公式的实测 asc/desc 与真实墨迹会差
+# 几像素，留出来才不会把分式的分子切掉。
+_LINE_PAD = 6
+# 小字号补笔宽的比例：1.0 = 完全补到正文笔宽。取 0.9 是因为 0.6 倍的角标
+# 只有正文一半大，笔宽补满 4px 后笔画会糊住字孔（尤其 m、e 这类小字母），
+# 3.6px 与正文 4px 肉眼几乎分不出来，字形还保得住。
+_SMALL_PEN_RATIO = 0.9
+# 墨迹高不到标准汉字高这一比例的「平字」（一、二…），要放在字身框中间而不是
+# 压基线；否则「一」看起来就是一条下划线。
+_FLAT_GLYPH_RATIO = 0.35
 
 # ---- 上下标 ----
 _SUP_SCALE = 0.60          # 上下标字号 = 正文 × 0.6
@@ -75,6 +89,16 @@ _RAISE_EM = 0.38
 # 全角中文标点（，。、；：？！…—～）也必须在这里：它们同样没有字高概念，
 # 若走「按回退字体同字高度缩放」会被老 ZTi 的小标点带偏（实测全角冒号缩到 9px）。
 _BOTTOM_MARKS = "。，、．,.;:…·；：？！—～－"
+
+# 贴底小标点的目标高度（占汉字字身框的比例）。
+# 建库时每个字都被缩放到同一个字身框，句号这种本来只有指甲盖大的标点也被
+# 放大成「大圆圈」（用户反馈「句号太大」）。这里只压不放：量出来比目标高
+# 10% 以上才缩，正常大小的标点不动。逗号/问号/叹号不在此表里，保持原样。
+_MARK_TARGET_EM = {
+    "。": 0.30, "．": 0.30,
+    "、": 0.30,
+    "；": 0.52, "：": 0.42,
+}
 
 # 纯文本里哪些字符改用公式渲染（与 $...$ 完全同源，保证粗细墨色一致）。
 # 汉字不走——公式引擎的汉字来自字体度量，和手写汉字库风格不搭。
@@ -124,6 +148,11 @@ _CJK_REF_SAMPLE = "相电压功率流生电的"     # 366 字表内的常用字�
 def _is_plain_symbol(ch):
     """是否为「数字/拉丁/希腊」字形（这些来自 ZTi-Sym，笔画偏粗，需要收边）。"""
     return (ch.isascii() and ch.isalnum()) or ("\u0370" <= ch <= "\u03ff")
+
+
+def _line_gap(px):
+    """行与行之间墨迹的最小空隙（px）：固定 1pt 起，字号越大留得越多。"""
+    return max(_LINE_GAP_PX, px * _LINE_GAP_EM)
 
 
 def _thin_alpha_tile(img, amount):
@@ -395,14 +424,18 @@ class Hand:
             seed=r.randrange(1 << 30),                         # 供符号笔迹采样用
         )
 
-    def _char_tile(self, ch, px, p, font_path=None):
+    def _char_tile(self, ch, px, p, font_path=None, body_px=None):
         """生成单个字符的贴图，返回 (RGBA 图, ox, oy)。
 
         同字多形时不同字库的同一字符高度差很大（实测 13~31%），
         轮换起来像「忽大忽小」而不是「同字异形」。所以这里做**贴图闭环**：
         画完量墨迹高度，与目标高度比，按比例调字号重画（最多 3 轮）。
         这样只保留笔迹差异，大小严格统一。
+
+        body_px：正文（未缩小）的渲染字号。画角标时传正文 px 进来，
+        贴图会把笔宽补回正文笔宽——同一支笔写的大字和小字，笔画一样粗。
         """
+        body_px = body_px or px
         base = font_path or self._font_for(ch)
         if _is_cjk(ch):                 # 只对汉字做缺字回退；标点/数字保持原路径
             base = self._with_fallback(ch, base)
@@ -423,13 +456,15 @@ class Hand:
         # 目标高度：基准字体在参照字号下这个字的墨迹高。
         # 汉字 ×1.0；数字/符号 ×0.86（中文手写里数字通常比汉字略小）；标点 ×1.0。
         target_h = None
+        # 小标点按「占字身框的比例」定大小（见 _MARK_TARGET_EM），只在偏大时缩。
+        mark_t = _MARK_TARGET_EM.get(ch)
+        if mark_t:
+            target_h = mark_t * fontcal.HAN_INK_EM * px
         ratio = (1.0 if (is_cjk or ch in _BOTTOM_MARKS or _is_cjk_punct(ch))
                  else fontcal.ASCII_HEIGHT_RATIO)
-        # 贴底标点：不做高度闭环、也不改字号，直接用符号字库自己的校准字号。
-        # 闭环会把它放大并把底边抬离基线（句号会从底部浮到中间）；
-        # 按「回退字体里同一个标点」的高度去缩放又会被老 ZTi 的小标点带偏，
-        # 实测逗号会缩到 7px（正常 13–16px）。符号字库本来就是同一个人写的，
-        # 大小直接信它自己的 fontcal 即可。
+        # 贴底标点：不做「按回退字体同字高」的闭环，避免被老 ZTi 的小标点带偏
+        # （实测逗号会缩到 7px）。符号字库本来就是同一个人写的，大小直接信它
+        # 自己的校准；只有显式给了 _MARK_TARGET_EM 的才按比例收一点。
         if base != self.font_path and ch in _BOTTOM_MARKS:
             pass
         elif base != self.font_path:
@@ -462,7 +497,8 @@ class Hand:
         k = 1.0
         for attempt in range(3):
             size = max(4, int(round(px * p["scale"] * boost * cal["size_scale"] * k)))
-            tile, ox, oy = self._render_glyph_tile(ch, size, p, base, cal, px)
+            tile, ox, oy = self._render_glyph_tile(ch, size, p, base, cal, px,
+                                                   body_px)
             if tile is None:
                 return None, 0, 0
             if target_h is None or attempt == 2:
@@ -473,6 +509,8 @@ class Hand:
             got = bb[3] - bb[1]
             if got <= 0:
                 break
+            if mark_t and got < target_h:     # 标点只压不放
+                break
             ratio = target_h / got
             if abs(ratio - 1.0) <= 0.04:      # 差 4% 以内就够了
                 break
@@ -480,7 +518,7 @@ class Hand:
             k = max(0.5, min(2.5, k))
         return tile, ox, oy
 
-    def _render_glyph_tile(self, ch, size, p, base, cal, px):
+    def _render_glyph_tile(self, ch, size, p, base, cal, px, body_px=None):
         """按给定字号画一次贴图（不含量高闭环）。"""
         # 合并字体里的数学符号是印刷体轮廓，走「骨架 → 变宽笔道」重绘
         if handstroke.available(ch):
@@ -523,8 +561,32 @@ class Hand:
         # 因为 ascender 高于主字体而浮起来/沉下去。
         asc_base = _ttf(self.font_path, max(4, int(round(px)))).getmetrics()[0]
         asc_font = f.getmetrics()[0]
+        # 同一支笔：角标/压小的标点按字号等比变细了（0.6 倍角标只剩 2.4px），
+        # 和正文 4px 的笔画一比就像换了支细笔。补回笔宽，并补一点墨色
+        # （小字边缘占比高，平均 alpha 天生偏低）。
+        try:
+            ref_font_px = (body_px or px) * (cal.get("size_scale", 1.0) or 1.0)
+            # 句号这类小标点是「圈」，加粗会把中间的孔糊死；标点只缩不放粗。
+            if ref_font_px > size + 1 and ch not in _MARK_TARGET_EM:
+                pen_em = fontcal.pen_em_ratio(base,
+                                              max(4, int(round(ref_font_px))))
+                shrink = min(1.0, max(0.0, 1.0 - size / ref_font_px))
+                img = fontcal.thicken_alpha(
+                    img, _SMALL_PEN_RATIO * pen_em * (ref_font_px - size) / 2.0,
+                    gain=1.0 + min(0.08, 0.12 * shrink))
+        except Exception:
+            pass
+        # 「一」这类只有一两笔横的平字：建库时墨迹底边被对齐到基线，
+        # 于是它贴着行底，看起来像一条下划线（用户反馈「一 就贴底了」）。
+        # 真人写「一」是落在字身框中间的，所以这里把它的墨迹在汉字字身框里居中。
+        lift = 0.0
+        if _is_cjk(ch) and os.path.abspath(base) == os.path.abspath(self.font_path):
+            band = fontcal.HAN_INK_EM * px
+            ink_h = b - t
+            if 0 < ink_h < band * _FLAT_GLYPH_RATIO:
+                lift = (band - ink_h) / 2.0
         return fontcal.finish_tile(img, pad - l,
-                                   pad - t + (asc_font - asc_base), cal)
+                                   pad - t + (asc_font - asc_base) + lift, cal)
 
     def _font_for(self, ch):
         """拉丁字母/数字用「正常人笔写」的字体，汉字用毛笔手写体。
@@ -815,63 +877,140 @@ class Hand:
         lines = self.wrap(text, width_pt)
         px = self.size_pt * SCALE
         font = _ttf(self.font_path, int(round(px)))
-        # 行距跟随字号：DEFAULT_LINE_PT 是按 12.4pt 定的一对常量，
-        # 字号调大后若仍用 23pt 行距，行框装不下字，上半截会被画布裁掉
-        # （实测 24pt 以上墨迹顶到 y=0）。这里按「字号 × 1.85」动态算，
-        # 显式传了 line_pt 则优先用它。
+        # 行距跟随字号：行距 = 字号 × 1.85（显式传 line_pt 则优先用它）。
+        # 这是**最小行距**；含分式/根号的行按实际墨迹再加高（见 _stack_lines）。
         if line_pt:
             base_lh = float(line_pt) * SCALE
         else:
             base_lh = self.size_pt * _LINE_HEIGHT_RATIO * SCALE
 
-        # 逐行按自身高度排布，但对「超出基准的部分」打折：分式/根号行确实需要更多
-        # 垂直空间，但完全按内容给（最高到基准的 1.7 倍）会让整段行距忽大忽小。
-        # 基线固定在行框的 0.78 处，超高的公式向上探入上一行的空白带——
-        # 真人写带分式的笔记正是这样，行距只是略松，不会出现大段空白。
-        metrics = [self._line_box(line, font, px) for line in lines]
-        heights, baselines = [], []
-        for _w, asc, desc in metrics:
-            need = asc + desc
-            h_i = base_lh + max(0.0, need - base_lh) * _LINE_HEIGHT_DAMP
-            h_i = max(base_lh, h_i)
-            # 基线要同时满足：不低于行框 0.78 处（保证重心）、字的上伸不出画布。
-            # 早先这里还夹了个 base_lh*0.78 的上限，字号一大就把基线压死，
-            # 字顶穿画布——去掉上限，改成「至少要容下 asc」。
-            b_i = int(max(h_i * 0.78, asc + 2))
-            h_i = int(max(h_i, b_i + desc + 2))
-            heights.append(h_i)
-            baselines.append(b_i)
-
-        # 行距微抖动：完全等距看起来像排版软件，真人写不出这么准的间距。
-        # 幅度取 ±0.9px（≈±0.22pt），只破坏「机械等距」的观感，不影响阅读。
-        gaps = [int(round(self.rng.uniform(-0.9, 0.9) * self.jitter))
-                for _ in lines]
-
-        # 画布先给足：估算宽度不可靠（逐字扰动让实际墨迹比估算宽 1–4pt，
-        # 防重叠右推还会继续外扩）。所以渲染后检查「墨迹是否顶到画布右缘」，
-        # 顶到就加宽重画——宁可多画一次，也不能把行末的字切掉半个。
+        metrics = [self._line_box(line, font, px) if line else (0.0, 0.0, 0.0)
+                   for line in lines]
+        # 画布宽度先给足：逐字扰动/防重叠右推会让实际墨迹比估算宽几 pt。
         est = max([m[0] for m in metrics] + [width_pt * SCALE])
         W = int(math.ceil(est + 0.02 * px * 8 + 24))
-        H = max(1, sum(heights) + sum(gaps))
-        for _ in range(3):
-            canvas = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-            y = 0
-            for i, line in enumerate(lines):
-                if line:
-                    canvas.alpha_composite(
-                        self._render_line(line, font, px, baselines[i], W / SCALE,
-                                          heights[i]),
-                        (0, y))
-                y += heights[i] + gaps[i]
-            out = canvas.crop((0, 0, W, min(H, y)))
-            bb = out.getbbox()
-            if not bb or bb[2] < W - 1:      # 没顶到右缘，说明没被裁
+        for attempt in range(3):
+            rendered, need_w = self._layout_lines(lines, metrics, font, px,
+                                                  base_lh, W)
+            if need_w < W - 1 or attempt == 2:
                 break
-            W += 48                          # 顶到了，加宽重画
+            W = int(max(W + 48, need_w + 24))   # 顶到右缘，加宽重排
+        out = self._stack_lines(rendered, base_lh, W, px)
+        bb = out.getbbox()
         if bb:
             # 右侧留 6px 白边：贴着画布边缘会被误看成「字被切了」
-            out = out.crop((0, 0, min(out.width, bb[2] + 6), out.height))
+            out = out.crop((0, 0, min(out.width, bb[2] + 6),
+                            min(out.height, bb[3] + 2)))
         return out, out.size[0] / SCALE, out.size[1] / SCALE
+
+    def _layout_lines(self, lines, metrics, font, px, base_lh, W):
+        """逐行渲染并量出**真实墨迹**范围，返回 ([item|None], 最右墨迹)。
+
+        item = (行图, 图内基线, 墨迹顶, 墨迹底)，顶/底相对基线（顶为负）。
+        行图先按估算的 asc/desc 给高度，画完再量——估算与真实差几像素时，
+        以真实墨迹为准，这样行距永远不会压到笔画。
+        """
+        out, need_w = [], 0
+        for i, line in enumerate(lines):
+            if not line:
+                out.append(None)
+                continue
+            _w, asc, desc = metrics[i]
+            pad = _LINE_PAD
+            h = int(math.ceil(asc + desc + 2 * pad + 8))
+            base = int(round(asc + pad))
+            img = self._render_line(line, font, px, base, W / SCALE, h)
+            bb = img.getbbox()
+            if bb is None:
+                out.append(None)
+                continue
+            ink_top = bb[1] - base
+            ink_bot = bb[3] - base
+            need_w = max(need_w, bb[2])
+            # 估算只作下限：真实墨迹比估算更靠外时以真实为准
+            out.append((img, base, min(ink_top, -asc), max(ink_bot, desc)))
+        return out, need_w
+
+    def _stack_lines(self, rendered, base_lh, W, px):
+        """按实测墨迹排垂直位置：上一行墨迹底 + 间隙 + 本行墨迹顶。
+
+        旧算法把「超出基准行距的部分」打 0.8 折，再把基线钉在行框 0.78 处——
+        含分式/根号的行一高，分子就顶进上一行；估算的 asc 与真实墨迹再差几
+        像素，压笔画就成了常态。现在改成先画、量墨迹、再落位：
+            行距 = max(基准行距, 上一行墨迹底 + 本行墨迹顶 + 间隙)
+        普通文本行仍是 1.85 倍字号；公式行自动让开，字号越大让得越多。
+        """
+        gap = _line_gap(px)
+        # 每行 0–2px 的正向抖动：真人写不出机械等距，但不能是负值（会压笔画）。
+        jitter = [self.rng.uniform(0.0, 2.0) * max(0.0, self.jitter)
+                  for _ in rendered]
+        placed = []           # (行图, 贴图 y)
+        prev = None           # (基线 y, 墨迹底)
+        cursor = 0.0
+        for i, item in enumerate(rendered):
+            if item is None:
+                cursor = (prev[0] + base_lh) if prev else (cursor + base_lh)
+                prev = None
+                continue
+            img, base, top, bot = item
+            if prev is None:
+                b = cursor - top + 2.0
+            else:
+                b = max(prev[0] + base_lh,
+                        prev[0] + prev[1] + (-top) + gap + jitter[i])
+            placed.append((img, int(round(b - base))))
+            prev = (b, bot)
+            cursor = b
+        height = (cursor + (prev[1] if prev else 0)) + 3
+        canvas = Image.new("RGBA", (W, max(1, int(math.ceil(height)))),
+                           (0, 0, 0, 0))
+        for img, top_y in placed:
+            canvas.alpha_composite(img, (0, top_y))
+        return canvas
+
+    def measure_block(self, text, width_pt=None, size_pt=None, line_pt=None):
+        """只算尺寸、不落像素：与 render_block 用同一套行距规则。
+
+        给「答题区放不放得下」预估用（worksheet.estimate_answer_height）。
+        比真实渲染略高 2–6px（按估算 asc/desc 算），正好当安全余量。
+        返回 (宽 pt, 高 pt, 行数)。
+        """
+        if size_pt:
+            self.size_pt = size_pt
+        text = humanize_division(text)
+        width_pt = width_pt or (PAGE_RIGHT_PT - PAGE_LEFT_PT)
+        lines = self.wrap(text, width_pt)
+        px = self.size_pt * SCALE
+        font = _ttf(self.font_path, int(round(px)))
+        base_lh = (float(line_pt) * SCALE if line_pt
+                   else self.size_pt * _LINE_HEIGHT_RATIO * SCALE)
+        max_w = 0.0
+        cursor, prev, first_b, last_top, last_bot = 0.0, None, None, 0.0, 0.0
+        for line in lines:
+            if not line:
+                cursor = (prev[0] + base_lh) if prev else (cursor + base_lh)
+                prev = None
+                continue
+            w, asc, desc = self._line_box(line, font, px)
+            max_w = max(max_w, w)
+            top, bot = -(asc + 2), desc + 2
+            if prev is None:
+                b = cursor - top + 2.0
+            else:
+                b = max(prev[0] + base_lh,
+                        prev[0] + prev[1] + (-top) + _line_gap(px))
+            if first_b is None:
+                first_b = b
+            last_top, last_bot = top, bot
+            prev = (b, bot)
+            cursor = b
+        if first_b is None:
+            return max_w / SCALE, base_lh / SCALE, len(lines)
+        # 返回的是「下一段该从哪儿开始」的推进高度：最后一行至少再往下让一整行
+        # 行距（单行答案 = 1 个行距 22.9pt @12.4pt），但最后一行本身要是很高
+        # （分式/根号），也要把它的墨迹算进去，否则下一段会压上来。
+        height = (cursor - first_b) + max(base_lh, -last_top + last_bot + 2)
+        return max_w / SCALE, height / SCALE, len(lines)
 
     def _render_line(self, line, font, px, baseline, width_pt, line_h):
         W = int(width_pt * SCALE)
@@ -909,7 +1048,9 @@ class Hand:
                 shift = -px * _SUP_RISE if kind == "^" else px * _SUB_DROP
                 for c in val:
                     p2 = self._char_params(c, spx)
-                    tile2, ox2, oy2 = self._char_tile(c, spx, p2, self._variant_for(c))
+                    tile2, ox2, oy2 = self._char_tile(c, spx, p2,
+                                                      self._variant_for(c),
+                                                      body_px=px)
                     if tile2 is None:
                         continue
                     bb2 = tile2.getbbox()
@@ -924,6 +1065,12 @@ class Hand:
                     x += self._advance(c, spx) * p2["scale"]
                 continue
             ch = val
+            if ch.isspace():
+                # 空格必须占位。以前贴图量不到墨迹就 continue，x 不前进，
+                # 「由 $\frac…$ 得」会被挤成「由\frac…得」——公式和汉字、
+                # 公式和后面的字贴在一起，看起来像重叠。
+                x += max(self._advance(ch, px), px * 0.18)
+                continue
             if _formula_ready(ch):
                 # 走公式渲染：与 $...$ 同源，粗细墨色一致。
                 # 关键：把轮换选中的那套字体传给公式层，否则公式固定用

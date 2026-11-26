@@ -496,6 +496,7 @@ def _cache_reset():
     _cmap_cache.clear()
     _auto_cache.clear()
     _ink_h_cache.clear()
+    _pen_cache.clear()
 
 
 def load():
@@ -544,6 +545,117 @@ def glyph_scale(path, ch):
 
 
 _ink_h_cache = {}
+
+
+def _pen_mask(path, ch, px):
+    """把单个字画成 8 位掩膜，返回 numpy 数组（失败返回 None）。"""
+    try:
+        import numpy as np
+        from PIL import Image, ImageDraw, ImageFont
+    except Exception:
+        return None
+    try:
+        f = ImageFont.truetype(path, max(4, int(px)))
+        l, t, r, b = f.getbbox(ch)
+        pad = 12
+        im = Image.new("L", (max(1, r - l) + 2 * pad,
+                              max(1, b - t) + 2 * pad), 0)
+        ImageDraw.Draw(im).text((pad - l, pad - t), ch, fill=255, font=f)
+        return np.asarray(im)
+    except Exception:
+        return None
+
+
+_pen_cache = {}
+
+
+def pen_width_at(path, px, chars=None):
+    """该字体在 px 字号下的**实际笔宽**（画布 px），量不到返回 None。
+
+    做法：样本字画成掩膜 → 距离变换。每个墨迹像素的 2×距离就是
+    「局部笔画直径」，取骨架附近（局部极大）的中位数即笔宽。
+
+    为什么需要它：公式层的分数线/根号是按 `size_px * 0.024` 画的
+    （12.4pt 下只有 2px），而手写字库的笔宽实测 4px（≈0.056 em）。
+    规则线只有正文的一半粗，用户看到的就是「除号、根号太细太淡」。
+    """
+    if not path or not os.path.exists(path):
+        return None
+    px = int(round(float(px)))
+    key = (os.path.abspath(path), px, chars or "")
+    if key in _pen_cache:
+        return _pen_cache[key]
+    if chars is None:
+        chars = SAMPLE_ASCII if _looks_ascii(path) else SAMPLE
+    try:
+        import numpy as np
+        from scipy import ndimage
+    except Exception:
+        _pen_cache[key] = None
+        return None
+    vals = []
+    for ch in chars:
+        a = _pen_mask(path, ch, px)
+        if a is None:
+            continue
+        mask = a > 64
+        if not mask.any():
+            continue
+        dist = ndimage.distance_transform_edt(mask)
+        local_max = ndimage.maximum_filter(dist, size=3)
+        ridge = dist[(dist > 0) & (dist >= local_max - 1e-6)]
+        if ridge.size:
+            vals.append(float(np.median(ridge)) * 2.0)
+    val = float(np.median(vals)) if vals else None
+    _pen_cache[key] = val
+    return val
+
+
+def pen_em_ratio(path, px):
+    """笔宽占字号的比值（em）；量不到时给 0.056（=4px/72px 实测值）。"""
+    w = pen_width_at(path, px)
+    if not w:
+        return 0.056
+    return max(0.02, min(0.12, w / float(max(1, int(round(px))))))
+
+
+def thicken_alpha(img, delta_px, gain=1.0):
+    """把小字号的笔画补回正文笔宽与墨色。
+
+    · delta_px：单边加粗量（px），按距离场外扩，亚像素精度；
+    · gain：墨色增益（1.0 = 不动）。小字按比例边缘更多，平均 alpha 天生偏低，
+      补一点让「浓淡」也和正文一致。
+
+    为什么需要：字库的笔宽随字号等比缩放——0.6 倍的角标只剩 2.4px，
+    和正文 4px 的笔画一比就像换了支细笔（用户反馈「角标明显变细」）。
+    """
+    if img is None or (delta_px <= 0.05 and gain is not None and gain <= 1.001):
+        return img
+    try:
+        import numpy as np
+        from scipy import ndimage
+        from PIL import Image
+    except Exception:
+        return img
+    try:
+        a = np.asarray(img.getchannel("A")).astype(np.float32) / 255.0
+        if a.size == 0 or a.max() <= 0.02:
+            return img
+        if delta_px and delta_px > 0.05:
+            mask = a > 0.5
+            if mask.any():
+                din = ndimage.distance_transform_edt(mask)
+                dout = ndimage.distance_transform_edt(~mask)
+                signed = np.where(mask, din - 0.5, 0.5 - dout)
+                grow = np.clip(signed + 0.5 + float(delta_px), 0.0, 1.0)
+                a = np.maximum(a, grow)
+        if gain and gain > 1.001:
+            a = np.clip(a * float(gain), 0.0, 1.0)
+        out = img.copy()
+        out.putalpha(Image.fromarray((a * 255.0 + 0.5).astype(np.uint8), "L"))
+        return out
+    except Exception:
+        return img
 
 
 def ink_height_at(path, ch, px):
