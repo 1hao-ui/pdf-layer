@@ -64,11 +64,13 @@ def test_theme_palette_beach():
     assert light["canvas"] == "#D5E7E6", light["canvas"]
     assert light["accent"] == "#0C7F8B", light["accent"]
     assert light["danger"] == "#DE6A55", light["danger"]
-    assert dark["bg"] == "#101F27", dark["bg"]
-    assert dark["accent"] == "#45BEC8", dark["accent"]
+    # 深色是「夜海」：暖黑沙 + 深海青 + 月光青，不是冷蓝灰
+    assert dark["bg"] == "#1D1712", dark["bg"]
+    assert dark["canvas"] == "#0B2A30", dark["canvas"]
+    assert dark["accent"] == "#5CC9C4", dark["accent"]
     # 纸面永远暖白、墨色永远深（深色模式不反转）
-    assert dark["paper"] == light["paper"] == "#FFFDF8"
-    assert dark["paper_ink"] == light["paper_ink"] == "#27231C"
+    assert light["paper"] == "#FFFDF8" and light["paper_ink"] == "#27231C"
+    assert dark["paper"] == "#FFF8EA" and dark["paper_ink"] == "#241F17"
 
 
 def test_styles_registered():
@@ -199,8 +201,8 @@ def test_dark_mode_switch():
     a = app()
     a.set_dark(True)
     a.root.update()
-    assert a.dark is True and a.pal["bg"] == "#101F27", a.pal["bg"]
-    assert a.canvas.cget("bg").lower() == "#09141a"
+    assert a.dark is True and a.pal["bg"] == "#1D1712", a.pal["bg"]
+    assert a.canvas.cget("bg").lower() == "#0b2a30"
     a.set_dark(False)
     a.root.update()
     assert a.dark is False and a.pal["bg"] == "#F6EDDD"
@@ -223,6 +225,39 @@ def test_page_persisted():
         assert b.page_key == "style", b.page_key
     finally:
         b.close()
+
+
+def test_icons_and_beach():
+    a = app()
+    import icons
+    check_names = ("write", "style", "out", "render", "pdf", "plus",
+                   "trash", "image", "refresh", "dots")
+    for name in check_names:
+        assert name in icons.names(), name
+    assert icons.image("render", 18, dpi=1.5) is not None
+    assert a._icon("render") is not None
+    # 沙滩条：主题模块提供；点一下会记录涟漪/脚印
+    assert a._beach is not None
+    a.root.update_idletasks()
+    a._beach.update_idletasks()
+    n0 = len(a._beach._marks)
+    a._beach._on_click(Ev(40, 60))
+    assert len(a._beach._marks) == n0 + 1
+    # 海面：纸外点一下才有波纹
+    a._canvas_size_override = (900, 700)
+    a.fit_view()
+    a.root.update()
+    try:
+        a._sea_ripples = []
+        a._add_sea_ripple(2, 2)      # 画布左上角，纸外
+        assert len(a._sea_ripples) == 1
+        cx, cy = a._pt2screen(a.page.width_pt / 2, a.page.height_pt / 2)
+        a._add_sea_ripple(int(cx), int(cy))   # 纸中心：不荡波纹
+        assert len(a._sea_ripples) == 1
+    finally:
+        a._canvas_size_override = None
+    a._draw_sea_deco()
+    assert a.canvas.find_withtag("seadeco") != ()
 
 
 def test_shortcuts_bound():

@@ -50,7 +50,9 @@ ttk 限制（详见 docs/界面设计规范.md）
 
 from __future__ import annotations
 
+import math
 import os
+import random
 
 __all__ = [
     "PALETTE_LIGHT",
@@ -68,6 +70,7 @@ __all__ = [
     "available",
     "set_dpi_aware",
     "resolve_font_family",
+    "BeachStrip",
 ]
 
 __version__ = "2.0.0"
@@ -138,39 +141,40 @@ PALETTE_LIGHT = {
     "shadow": "#6A5B45",        # 阴影基色（Canvas 画阴影时自己加 alpha）
 }
 
-# 深色：夜海 —— 深海蓝底 + 月光青主色；纸面依旧是暖白
+# 深色：夜海 —— 月光下的沙滩：暖黑沙 + 深海青 + 月光青
+# 注意别做成冷蓝灰：夜景的「沙」要暖，「海」要深，主色只留一点点月光。
 PALETTE_DARK = {
-    "bg": "#101F27",
-    "card": "#182A33",
-    "card_alt": "#14242C",
-    "sidebar": "#0D1A21",
-    "toolbar": "#142530",
-    "panel": "#142530",
-    "log": "#142530",
-    "canvas": "#09141A",
-    "canvas_dot": "#22343B",
-    "track": "#273A43",
-    "border": "#2A3E47",
-    "border_strong": "#3A515B",
-    "text": "#EAF2F0",
-    "muted": "#9DAFB2",
-    "faint": "#6D8286",
+    "bg": "#1D1712",            # 夜里的沙（暖黑）
+    "card": "#2A2118",          # 浮木卡片
+    "card_alt": "#241C15",
+    "sidebar": "#17110D",       # 背光的沙丘
+    "toolbar": "#241C16",
+    "panel": "#241C16",
+    "log": "#241C16",
+    "canvas": "#0B2A30",        # 深海夜
+    "canvas_dot": "#234045",
+    "track": "#3A2E22",
+    "border": "#3A2E22",
+    "border_strong": "#4E3E2C",
+    "text": "#F4E9D6",          # 月光下的沙白
+    "muted": "#B7A68C",
+    "faint": "#8C7B63",
     "on_accent": "#FFFFFF",
-    "accent": "#45BEC8",        # 月光青
-    "accent_hover": "#63D2DB",
-    "accent_pressed": "#2FA6B1",
-    "accent_soft": "#163A41",
-    "success": "#4FD3A0",
-    "success_soft": "#15322A",
+    "accent": "#5CC9C4",        # 月光青
+    "accent_hover": "#7ADBD5",
+    "accent_pressed": "#45B0AB",
+    "accent_soft": "#1B3A3A",
+    "success": "#6FD39B",
+    "success_soft": "#17352A",
     "danger": "#F08A78",
     "danger_hover": "#E0695A",
-    "danger_soft": "#3A2621",
-    "hover": "#1C303A",
-    "pressed": "#182A33",
-    "selection": "#1D4E57",
-    "paper": "#FFFDF8",         # 纸永远是暖白的（深色界面里更亮眼）
-    "paper_edge": "#2A3E47",
-    "paper_ink": "#27231C",     # 纸上的字永远用深墨色
+    "danger_soft": "#3D2620",
+    "hover": "#32271C",
+    "pressed": "#2A2118",
+    "selection": "#24504F",
+    "paper": "#FFF8EA",         # 纸永远是暖白的（深色界面里更亮眼）
+    "paper_edge": "#3A2E22",
+    "paper_ink": "#241F17",
     "shadow": "#000000",
 }
 
@@ -831,6 +835,349 @@ def apply_theme(root=None, dark=False):
         tokens["ERROR"] = "ttk 样式配置失败：%s: %s" % (type(exc).__name__, exc)
 
     return tokens
+
+
+# --------------------------------------------------------------------------- 装饰：沙滩条
+def _mix_color(color_a, color_b, t):
+    """两个 #rrggbb 按 t（0=a，1=b）混合；解析失败返回 a。纯装饰用。"""
+    def _rgb(c):
+        try:
+            c = str(c).lstrip("#")
+            if len(c) == 3:
+                c = "".join(ch * 2 for ch in c)
+            return tuple(int(c[i:i + 2], 16) for i in (0, 2, 4))
+        except Exception:
+            return None
+    a, b = _rgb(color_a), _rgb(color_b)
+    if not a or not b:
+        return color_a
+    t = max(0.0, min(1.0, float(t)))
+    return "#%02x%02x%02x" % tuple(
+        int(round(a[i] + (b[i] - a[i]) * t)) for i in range(3))
+
+
+class BeachStrip(_tk.Canvas if _tk is not None else object):
+    """工作台底部的「沙滩条」：沙粒、贝壳、海星、水草、小螃蟹，点一下有脚印涟漪。
+
+    纯视觉组件：不读业务状态，只在自身 Canvas 上画图。浅色/深色都靠传进来的
+    palette 取色，切主题时调 ``set_palette()``。没有 tkinter 的环境不会在 import
+    阶段报错（只是不能实例化）。
+
+    用法::
+
+        strip = theme.BeachStrip(parent, palette=tokens["PALETTE"], dpi=1.5)
+        strip.pack(side="bottom", fill="x")
+
+    动画是 110ms 一帧的小螃蟹 + 涟漪；``stop()`` 在窗口关闭时调用。
+    """
+
+    FRAME_MS = 110
+
+    def __init__(self, master, palette=None, dpi=1.0, height=168,
+                 seed=20261126):
+        if _tk is None:  # pragma: no cover - 无 tkinter 环境
+            raise RuntimeError("没有 tkinter，无法创建 BeachStrip")
+        super().__init__(master, highlightthickness=0, bd=0)
+        self._pal = dict(palette or PALETTE)
+        self._dpi = max(1.0, float(dpi or 1.0))
+        self._logical_h = max(90, int(height))
+        self._rnd = random.Random(seed)
+        self._phase = 0.0
+        self._after = None
+        self._ripples = []       # [(x, y, 起始相位)]
+        self._marks = []         # [(x, y, 左右脚)]
+        self._apply_geometry()
+        self.bind("<Configure>", lambda e: self._redraw_sand())
+        self.bind("<Button-1>", self._on_click)
+        self._tick()
+
+    # ------------------------------------------------------------ 对外
+    def set_palette(self, palette):
+        self._pal = dict(palette or self._pal)
+        self._apply_geometry()
+        self._redraw_sand()
+        self._draw_life()
+
+    def stop(self):
+        if self._after is not None:
+            try:
+                self.after_cancel(self._after)
+            except Exception:
+                pass
+            self._after = None
+
+    # ------------------------------------------------------------ 基础
+    def _apply_geometry(self):
+        try:
+            self.configure(bg=self._pal.get("sidebar", "#F1E4CF"),
+                           height=int(self._logical_h * self._dpi))
+        except Exception:
+            pass
+
+    def _colors(self):
+        pal = self._pal
+        sand = pal.get("sidebar", "#F1E4CF")
+        foam = pal.get("card", "#FFFCF4")
+        accent = pal.get("accent", "#0C7F8B")
+        danger = pal.get("danger", "#DE6A55")
+        ink = pal.get("text", "#322C24")
+        return {
+            "sand": sand, "foam": foam, "accent": accent,
+            "danger": danger, "ink": ink,
+            "wet": _mix_color(sand, foam, 0.16),
+            "dry": _mix_color(sand, "#FFFFFF", 0.05),
+            "grain_hi": _mix_color(sand, "#FFFFFF", 0.22),
+            "grain_lo": _mix_color(sand, "#000000", 0.12),
+            "grain_warm": _mix_color(sand, danger, 0.12),
+            "outline": _mix_color(ink, sand, 0.45),
+            "shell": _mix_color(foam, danger, 0.30),
+            "star": _mix_color(danger, foam, 0.10),
+            "weed": _mix_color("#5E8C5A", sand, 0.30),
+        }
+
+    # ------------------------------------------------------------ 静态沙滩
+    def _redraw_sand(self):
+        if _tk is None:
+            return
+        try:
+            if not self.winfo_exists():
+                return
+            w = max(80, self.winfo_width())
+            h = max(60, self.winfo_height())
+        except Exception:
+            return
+        try:
+            self.delete("sand")
+        except Exception:
+            return
+        c = self._colors()
+        d = self._dpi
+        # 泡沫线以下的「湿沙」只比干沙深一点点，避免和上面的侧栏出现色带
+        foam_y = 9 * d
+        self.create_rectangle(0, foam_y, w, h,
+                              fill=_mix_color(c["sand"], "#000000", 0.045),
+                              outline="", tags="sand")
+        # 沙粒：满铺，靠下更密
+        n = int(min(2400, max(260, w * h / 60.0)))
+        for _ in range(n):
+            x = self._rnd.uniform(0, w)
+            y = self._rnd.uniform(max(3 * d, foam_y * 0.4), h)
+            r = self._rnd.random()
+            if r < 0.45:
+                col = c["grain_hi"]
+            elif r < 0.82:
+                col = c["grain_lo"]
+            else:
+                col = c["grain_warm"]
+            ln = 1 if self._rnd.random() < 0.72 else 2
+            self.create_line(x, y, x + ln, y + (1 if self._rnd.random() < 0.18
+                                                else 0),
+                             fill=col, tags="sand")
+        # 泡沫线（沙滩条的“水边”）+ 一排小泡泡
+        pts = []
+        x = -10 * d
+        while x <= w + 10 * d:
+            pts += [x, foam_y + 2.4 * d * math.sin(x / (44 * d))]
+            x += 8 * d
+        self.create_line(pts, fill=_mix_color(c["foam"], c["sand"], 0.25),
+                         width=max(1, int(2 * d)), smooth=True, tags="sand")
+        pts2 = [v + (0 if i % 2 == 0 else 4 * d) for i, v in enumerate(pts)]
+        self.create_line(pts2, fill=c["accent"], width=1, smooth=True,
+                         tags="sand")
+        for i in range(9):
+            bx = (0.08 + i * 0.105) * w + self._rnd.uniform(-6, 6) * d
+            by = foam_y + self._rnd.uniform(2, 9) * d
+            rr = self._rnd.uniform(0.8, 1.8) * d
+            self.create_oval(bx - rr, by - rr, bx + rr, by + rr,
+                             outline=c["foam"], width=1, tags="sand")
+        # 小石子：让沙面不只有细粒
+        for _ in range(16):
+            px = self._rnd.uniform(6 * d, w - 6 * d)
+            py = self._rnd.uniform(h * 0.35, h - 6 * d)
+            pr = self._rnd.uniform(1.2, 2.6) * d
+            col = _mix_color(c["grain_lo"], c["grain_hi"],
+                             0.3 + self._rnd.random() * 0.4)
+            self.create_oval(px - pr, py - pr * 0.7, px + pr, py + pr * 0.7,
+                             fill=col, outline="", tags="sand")
+
+        # 贝壳 / 海星 / 水草 / 脚印
+        self._draw_shell(w * 0.17, h * 0.62, 14 * d, c)
+        self._draw_shell(w * 0.79, h * 0.54, 10 * d, c)
+        self._draw_shell(w * 0.90, h * 0.78, 7 * d, c)
+        self._draw_star(w * 0.60, h * 0.70, 11 * d, c)
+        self._draw_star(w * 0.36, h * 0.90, 7 * d, c)
+        for k in range(3):
+            self._draw_weed(w * 0.88 + k * 5 * d, h * 0.94, 7 * d, c, k)
+        for i in range(4):
+            fx = w * 0.33 + i * 17 * d
+            fy = h * 0.82 + math.sin(i * 1.7) * 4 * d
+            self._draw_foot(fx, fy, i % 2 == 0, d, c, tag="sand")
+
+    def _draw_shell(self, cx, cy, size, c):
+        pts = [cx, cy]
+        for i in range(7):
+            a = math.pi * (1.04 + 0.92 * i / 6.0)
+            pts += [cx + size * math.cos(a),
+                    cy + size * 0.82 * math.sin(a)]
+        self.create_polygon(pts, fill=c["shell"], outline=c["outline"],
+                            width=1, smooth=True, tags="sand")
+        for i in range(5):
+            a = math.pi * (1.12 + 0.76 * i / 4.0)
+            self.create_line(cx, cy,
+                             cx + size * 0.9 * math.cos(a),
+                             cy + size * 0.74 * math.sin(a),
+                             fill=c["outline"], width=1, tags="sand")
+        self.create_oval(cx - 1.4 * size / 13, cy - 1.2 * size / 13,
+                         cx + 1.4 * size / 13, cy + 1.2 * size / 13,
+                         fill=c["foam"], outline="", tags="sand")
+
+    def _draw_star(self, cx, cy, r, c):
+        pts = []
+        for i in range(10):
+            ang = -math.pi / 2 + i * math.pi / 5
+            rr = r if i % 2 == 0 else r * 0.42
+            pts += [cx + rr * math.cos(ang), cy + rr * math.sin(ang)]
+        self.create_polygon(pts, fill=c["star"], outline=c["outline"],
+                            width=1, tags="sand")
+        self.create_oval(cx - 1.2, cy - 1.2, cx + 1.2, cy + 1.2,
+                         fill=c["outline"], outline="", tags="sand")
+
+    def _draw_weed(self, x0, y0, step, c, k):
+        pts = [x0, y0]
+        for j in range(1, 6):
+            pts += [x0 + 3.2 * self._dpi * math.sin(j * 1.15 + k),
+                    y0 - j * step]
+        self.create_line(pts, fill=c["weed"],
+                         width=max(1, int(1.3 * self._dpi)), smooth=True,
+                         tags="sand")
+
+    def _draw_foot(self, x, y, left, d, c, tag="mark"):
+        col = _mix_color(c["sand"], c["ink"], 0.26)
+        off = (-2.6 if left else 2.6) * d
+        self.create_oval(x + off - 2.6 * d, y - 1.0 * d,
+                         x + off + 2.6 * d, y + 4.6 * d,
+                         outline=col, width=max(1, int(1.1 * d)), tags=tag)
+        for i in (-1, 0, 1):
+            tx = x + off + i * 2.4 * d
+            self.create_oval(tx - 0.9 * d, y - 4.4 * d,
+                             tx + 0.9 * d, y - 2.2 * d,
+                             outline=col, width=1, tags=tag)
+
+    # ------------------------------------------------------------ 活动层
+    def _draw_life(self):
+        if _tk is None:
+            return
+        try:
+            if not self.winfo_exists():
+                return
+            w = max(80, self.winfo_width())
+            h = max(60, self.winfo_height())
+        except Exception:
+            return
+        try:
+            self.delete("life")
+            self.delete("ripple")
+            self.delete("mark")
+        except Exception:
+            return
+        c = self._colors()
+        d = self._dpi
+        t = self._phase
+        # 小螃蟹：在沙滩条里慢慢横着走
+        pad = 34 * d
+        span = max(10.0, w - 2 * pad)
+        cx = pad + span * (0.5 + 0.5 * math.sin(t * 0.045))
+        cy = h - 30 * d + 1.5 * d * math.sin(t * 0.42)
+        self._draw_crab(cx, cy, d, t, c)
+
+        # 点击涟漪（扁椭圆，像踩在湿沙上）
+        alive = []
+        for (rx, ry, t0) in self._ripples:
+            age = max(0.0, t - t0)
+            if age > 15:
+                continue
+            alive.append((rx, ry, t0))
+            k = age / 15.0
+            for j in range(2):
+                rr = (8 + 38 * k) * d * (1 - 0.24 * j)
+                col = _mix_color(c["foam"], c["sand"], min(1.0, 0.25 + k))
+                self.create_oval(rx - rr, ry - rr * 0.42,
+                                 rx + rr, ry + rr * 0.42,
+                                 outline=col, width=max(1, int(1.2 * d)),
+                                 tags="ripple")
+        self._ripples = alive
+
+        # 点击留下的脚印
+        for (mx, my, left) in self._marks:
+            self._draw_foot(mx, my, left, d, c, tag="mark")
+
+    def _draw_crab(self, x, y, d, t, c):
+        body = _mix_color(c["danger"], c["ink"], 0.22)
+        dark = _mix_color(c["ink"], c["danger"], 0.30)
+        # 六条腿
+        for i in range(3):
+            ox = (-1 + i) * 7 * d
+            for s in (-1, 1):
+                self.create_line(x + ox, y + 2.5 * d,
+                                 x + ox + s * 10 * d, y + 7.5 * d,
+                                 fill=dark, width=max(1, int(1.1 * d)),
+                                 tags="life")
+        # 身子 + 壳上的高光
+        self.create_oval(x - 12 * d, y - 7 * d, x + 12 * d, y + 7.5 * d,
+                         fill=body, outline=dark, width=1, tags="life")
+        self.create_arc(x - 9 * d, y - 5.5 * d, x + 9 * d, y + 2 * d,
+                        start=20, extent=140,
+                        style="arc", outline=c["foam"], width=1, tags="life")
+        # 两只钳子（一开一合）
+        open_ = 1.8 * d * math.sin(t * 0.5)
+        for s in (-1, 1):
+            bx = x + s * 13 * d
+            by = y - 3 * d
+            self.create_line(bx, by, bx + s * 6 * d, by - 4.5 * d,
+                             fill=dark, width=max(1, int(1.4 * d)),
+                             tags="life")
+            hx = bx + s * 6 * d
+            hy = by - 4.5 * d
+            self.create_oval(hx - 3.2 * d, hy - 2.4 * d + open_,
+                             hx + 3.2 * d, hy + 2.4 * d + open_,
+                             fill=body, outline=dark, width=1, tags="life")
+        # 眼睛
+        for s in (-1, 1):
+            ex = x + s * 4 * d
+            ey = y - 9 * d
+            self.create_line(ex, y - 6 * d, ex, ey, fill=dark, width=1,
+                             tags="life")
+            self.create_oval(ex - 1.2 * d, ey - 1.2 * d,
+                             ex + 1.2 * d, ey + 1.2 * d,
+                             fill=c["ink"], outline="", tags="life")
+
+    # ------------------------------------------------------------ 动画 / 交互
+    def _on_click(self, event):
+        try:
+            self._ripples.append((float(event.x), float(event.y), self._phase))
+            if len(self._ripples) > 6:
+                self._ripples = self._ripples[-6:]
+            left = len(self._marks) % 2 == 0
+            self._marks.append((float(event.x), float(event.y), left))
+            if len(self._marks) > 12:
+                self._marks = self._marks[-12:]
+        except Exception:
+            pass
+
+    def _tick(self):
+        self._after = None
+        try:
+            if not self.winfo_exists():
+                return
+            self._phase += 1
+            if self.winfo_viewable():
+                self._draw_life()
+        except Exception:
+            return
+        try:
+            self._after = self.after(self.FRAME_MS, self._tick)
+        except Exception:
+            self._after = None
 
 
 if __name__ == "__main__":  # 手动自测：py -3 theme.py

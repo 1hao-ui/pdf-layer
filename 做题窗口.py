@@ -37,6 +37,7 @@ import re
 import sys
 import threading
 import time
+import math
 import traceback
 from datetime import datetime
 
@@ -51,6 +52,11 @@ from tkinter import font as tkfont         # noqa: E402
 from PIL import Image, ImageTk             # noqa: E402
 
 import worksheet                           # noqa: E402
+
+try:                                       # 线性图标（缺模块时按钮退回纯文字）
+    import icons as _icons
+except Exception:                          # pragma: no cover
+    _icons = None
 
 try:                                       # 主题（可能不存在 / 无显示）；失败就走内置色板
     import theme as _theme
@@ -78,6 +84,24 @@ ZOOM_MAX = 4.0
 LIVE_DEBOUNCE_MS = 450
 
 ALIGN_LABELS = {"左对齐": "left", "居中": "center", "右对齐": "right"}
+
+
+def _mix_hex(color_a, color_b, t):
+    """两个 #rrggbb 按 t 混合（图标着色用）。"""
+    def _rgb(c):
+        try:
+            c = str(c).lstrip("#")
+            if len(c) == 3:
+                c = "".join(ch * 2 for ch in c)
+            return tuple(int(c[i:i + 2], 16) for i in (0, 2, 4))
+        except Exception:
+            return None
+    a, b = _rgb(color_a), _rgb(color_b)
+    if not a or not b:
+        return color_a
+    t = max(0.0, min(1.0, float(t)))
+    return "#%02x%02x%02x" % tuple(
+        int(round(a[i] + (b[i] - a[i]) * t)) for i in range(3))
 
 
 def _enable_dpi():
@@ -483,6 +507,10 @@ class WorksheetWindow:
         self._syncing_editor = False
         self._log_open = False
         self._busy = False
+        self._icons = {}
+        self._icon_refs = []
+        self._beach = None
+        self._more_anchor = None
 
         # ---- 实时叠加预览（纯内存，不落盘）----
         self.live_preview_on = True
@@ -500,7 +528,7 @@ class WorksheetWindow:
         # ---- 输出路径（会话内记忆；窗口启动不写任何配置文件）----
         self._outname_custom = False
 
-        root.title("ZTi 智能做题助手 v1.3 · AI 作答 + 手写写回")
+        root.title("ZTi 智能做题助手 v1.3")
         _set_window_icon(root)
         self._setup_window_geometry()
         self._build_ui()
@@ -541,6 +569,7 @@ class WorksheetWindow:
         outer.pack(fill="both", expand=True)
 
         self._build_toolbar(outer)
+        self._build_wave(outer)
         self._build_statusbar(outer)
         self._build_log(outer)
 
@@ -616,93 +645,275 @@ class WorksheetWindow:
             except Exception:
                 pass
 
+    # ------------------------------------------------------------ 图标
+    def _icon(self, name, size=17, tone="text"):
+        if _icons is None or not getattr(_icons, "PIL_OK", False):
+            return None
+        pal = self.pal
+        if tone == "on_accent":
+            fg = pal.get("on_accent", "#FFFFFF")
+            ac = _mix_hex(fg, pal.get("accent", "#0C7F8B"), 0.45)
+        elif tone == "muted":
+            fg = pal.get("muted", "#7B7061")
+            ac = _mix_hex(fg, pal.get("accent", "#0C7F8B"), 0.55)
+        elif tone == "brand":
+            fg = pal.get("accent", "#0C7F8B")
+            ac = fg
+        else:
+            fg = pal.get("text", "#322C24")
+            ac = pal.get("accent", "#0C7F8B")
+        key = (name, size, fg, ac)
+        cache = self._icons
+        if key in cache:
+            return cache[key]
+        try:
+            img = _icons.photo(self.root, name, size=size, fg=fg, accent=ac,
+                               dpi=self._dpi)
+        except Exception:
+            img = None
+        cache[key] = img
+        return img
+
+    def _button(self, parent, text, command, style=None, icon=None,
+                tone="text", size=17, **kw):
+        img = self._icon(icon, size, tone) if icon else None
+        if img is not None:
+            kw["image"] = img
+            kw["compound"] = "left"
+            text = (" " + text) if text else ""
+        else:
+            text = text or None
+        b = ttk.Button(parent, text=text, command=command,
+                       style=style or self._style("button", "TButton"),
+                       width=0, **kw)
+        if img is not None:
+            self._icon_refs.append((b, icon, size, tone))
+        return b
+
+    def _refresh_icons(self):
+        for i, (w, name, size, tone) in enumerate(list(self._icon_refs)):
+            img = self._icon(name, size, tone)
+            if img is None:
+                continue
+            try:
+                w.configure(image=img)
+            except Exception:
+                pass
+            self._icon_refs[i] = (w, name, size, tone)
+
+    # ------------------------------------------------------------ 顶栏 / 状态 / 日志
     def _build_toolbar(self, parent):
+        """一行顶栏：品牌 + 打开 + 页码 + 自动划区 + 两个主操作 + 更多。"""
         bar = ttk.Frame(parent, style=self._style("toolbar", "Toolbar.TFrame"),
-                        padding=(6, 4))
+                        padding=(10, 6))
         bar.pack(side="top", fill="x")
         self.toolbar = bar
-        pad = (10, 5)
+        self.var_numbers = tk.StringVar(value="")
 
-        def btn(row, text, cmd, style=None, width=0):
-            b = ttk.Button(row, text=text, command=cmd,
-                           style=style or self._style("button", "TButton"),
-                           padding=pad, width=width)
-            b.pack(side="left", padx=1)
-            return b
+        brand = ttk.Frame(bar, style=self._style("toolbar", "Toolbar.TFrame"))
+        brand.pack(side="left", padx=(2, 16))
+        try:
+            tk.Label(brand, text="≈", bd=0, padx=0, pady=0,
+                     fg=self.pal.get("accent", "#0C7F8B"),
+                     bg=self.pal.get("toolbar", "#FFFCF4"),
+                     font=(self.font_family, 17, "bold")).pack(side="left",
+                                                               padx=(0, 5))
+        except Exception:
+            pass
+        ttk.Label(brand, text="ZTi 智能做题助手",
+                  style=self._style("brand", "Brand.TLabel")).pack(side="left")
 
-        def sep(row):
-            ttk.Separator(row, orient="vertical").pack(side="left", fill="y",
-                                                        padx=6, pady=3)
+        self._button(bar, "打开作业页", self._dlg_open_source,
+                     self._style("button", "TButton"),
+                     icon="open").pack(side="left", padx=(0, 8))
 
-        row1 = ttk.Frame(bar, style=self._style("toolbar", "Toolbar.TFrame"))
-        row1.pack(fill="x")
-        btn(row1, "打开作业页", self._dlg_open_source)
-        sep(row1)
-        ttk.Button(row1, text="◀", command=lambda: self.go_page(-1),
-                   style=self._style("ghost_button", "Ghost.TButton"),
-                   padding=(6, 4), width=2).pack(side="left", padx=(0, 2))
+        nav = ttk.Frame(bar, style=self._style("toolbar", "Toolbar.TFrame"))
+        nav.pack(side="left", padx=(2, 6))
+        self._button(nav, "", lambda: self.go_page(-1),
+                     self._style("ghost_button", "Ghost.TButton"),
+                     icon="left", tone="muted", size=16,
+                     padding=(5, 4)).pack(side="left")
         self.var_page = tk.StringVar(value="1")
-        self.page_entry = ttk.Entry(row1, textvariable=self.var_page, width=4,
+        self.page_entry = ttk.Entry(nav, textvariable=self.var_page, width=4,
                                     justify="center")
-        self.page_entry.pack(side="left")
+        self.page_entry.pack(side="left", padx=2)
         self.page_entry.bind("<Return>", lambda e: self._on_page_spin())
         self.page_entry.bind("<FocusOut>", lambda e: self._on_page_spin())
-        ttk.Button(row1, text="▶", command=lambda: self.go_page(1),
-                   style=self._style("ghost_button", "Ghost.TButton"),
-                   padding=(6, 4), width=2).pack(side="left", padx=(2, 4))
+        self._button(nav, "", lambda: self.go_page(1),
+                     self._style("ghost_button", "Ghost.TButton"),
+                     icon="right", tone="muted", size=16,
+                     padding=(5, 4)).pack(side="left")
         self.page_total_label = ttk.Label(
-            row1, text="— / — 页",
+            nav, text="— / — 页",
             style=self._style("toolbar_muted", "Toolbar.Muted.TLabel"))
-        self.page_total_label.pack(side="left", padx=(0, 4))
-        sep(row1)
-        btn(row1, "自动划区", self.reanalyze)
-        ttk.Label(row1, text="题号(扫描件):",
-                  style=self._style("toolbar_muted", "Toolbar.Muted.TLabel")
-                  ).pack(side="left", padx=(6, 2))
-        self.var_numbers = tk.StringVar(value="")
-        self.numbers_entry = ttk.Entry(row1, textvariable=self.var_numbers,
-                                       width=30)
-        self.numbers_entry.pack(side="left", fill="x", expand=True, padx=(0, 4))
-        self.numbers_entry.bind("<Return>", lambda e: self.reanalyze())
-        ttk.Label(row1, text="逗号分隔",
-                  style=self._style("toolbar_muted", "Toolbar.Muted.TLabel")
-                  ).pack(side="left", padx=(0, 4))
+        self.page_total_label.pack(side="left", padx=(6, 0))
 
-        row2 = ttk.Frame(bar, style=self._style("toolbar", "Toolbar.TFrame"))
-        row2.pack(fill="x", pady=(3, 0))
-        btn(row2, "打开答案JSON", self._dlg_open_answers)
-        btn(row2, "保存答案JSON", self._dlg_save_answers)
-        sep(row2)
-        self.btn_ai = ttk.Button(
-            row2, text="AI 自动作答", command=self.ai_solve,
-            style=self._style("accent_button", "Accent.TButton"),
-            padding=(14, 6))
-        self.btn_ai.pack(side="left", padx=1)
-        btn(row2, "AI 设置", self._dlg_ai_settings)
-        sep(row2)
-        self.btn_generate = ttk.Button(
-            row2, text="生成手写作答", command=self._generate_default,
-            style=self._style("accent_button", "Accent.TButton"),
-            padding=(14, 6), width=0)
-        self.btn_generate.pack(side="left", padx=1)
-        btn(row2, "另存为…", self._dlg_generate)
-        btn(row2, "预览当前页", self.preview_current_page)
-        ttk.Label(row2, text="AI 出答案 → 实时叠加预览 → 生成保存",
-                  style=self._style("toolbar_muted", "Toolbar.Muted.TLabel")
-                  ).pack(side="right", padx=6)
+        self._button(bar, "自动划区", self.reanalyze,
+                     self._style("button", "TButton"),
+                     icon="scan").pack(side="left", padx=(8, 0))
+
+        right = ttk.Frame(bar, style=self._style("toolbar", "Toolbar.TFrame"))
+        right.pack(side="right")
+        self._more_anchor = self._button(
+            right, "", self._show_more_menu,
+            self._style("ghost_button", "Ghost.TButton"),
+            icon="dots", tone="muted", size=20, padding=(7, 4))
+        self._more_anchor.pack(side="right", padx=(6, 0))
+        self.btn_generate = self._button(
+            right, "生成手写作答", self._generate_default,
+            self._style("accent_button", "Accent.TButton"),
+            icon="write", tone="on_accent")
+        self.btn_generate.pack(side="right", padx=(6, 0))
+        self.btn_ai = self._button(
+            right, "AI 自动作答", self.ai_solve,
+            self._style("button", "TButton"), icon="ai")
+        self.btn_ai.pack(side="right")
+
+    def _menu(self):
+        fam = self.font_family or "Microsoft YaHei UI"
+        return tk.Menu(self.root, tearoff=0, bd=0, relief="flat",
+                       bg=self.pal.get("card", "#FFFCF4"),
+                       fg=self.pal.get("text", "#322C24"),
+                       activebackground=self.pal.get("accent_soft", "#DBEFEE"),
+                       activeforeground=self.pal.get("accent", "#0C7F8B"),
+                       disabledforeground=self.pal.get("faint", "#A99C86"),
+                       font=(fam, 10))
+
+    def _popup_menu(self, menu, widget):
+        try:
+            x = widget.winfo_rootx()
+            y = widget.winfo_rooty() + widget.winfo_height() + 2
+            menu.tk_popup(x, y)
+        except Exception:
+            pass
+        finally:
+            try:
+                menu.grab_release()
+            except Exception:
+                pass
+
+    def _show_more_menu(self):
+        m = self._menu()
+        m.add_command(label="打开答案 JSON…", command=self._dlg_open_answers)
+        m.add_command(label="保存答案 JSON…", command=self._dlg_save_answers)
+        m.add_separator()
+        m.add_command(label="预览当前页", command=self.preview_current_page)
+        m.add_command(label="另存为…", command=self._dlg_generate)
+        m.add_separator()
+        m.add_command(label="扫描件题号…", command=self._dlg_numbers)
+        m.add_command(label="AI 设置…", command=self._dlg_ai_settings)
+        m.add_separator()
+        m.add_command(label="日志", command=self.toggle_log)
+        m.add_command(label="快捷键与说明", command=self._show_help)
+        self._popup_menu(m, self._more_anchor)
+
+    def _show_help(self):
+        messagebox.showinfo(
+            "快捷键与手势",
+            "滚轮　　　　　以光标为中心缩放\n"
+            "左键拖动　　　平移预览\n"
+            "双击　　　　　适合窗口\n"
+            "Ctrl+Enter　　生成手写作答\n"
+            "Ctrl+O　　　　打开作业页",
+            parent=self.root)
+
+    def _dlg_numbers(self):
+        """扫描件题号：没 OCR 时手工给（逗号分隔）。"""
+        top = tk.Toplevel(self.root)
+        top.title("扫描件题号")
+        top.transient(self.root)
+        top.configure(bg=self.pal.get("bg", "#F6EDDD"))
+        top.resizable(False, False)
+        fam = self.font_family or "Microsoft YaHei UI"
+        frame = ttk.Frame(top, padding=(16, 14))
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text="题号（逗号分隔，如 4.2.1,4.2.2）",
+                  style=self._style("muted", "Muted.TLabel")).pack(anchor="w")
+        ent = ttk.Entry(frame, textvariable=self.var_numbers, width=40)
+        ent.pack(fill="x", pady=(6, 10))
+        self.numbers_entry = ent
+        row = ttk.Frame(frame)
+        row.pack(fill="x")
+
+        def ok():
+            try:
+                top.grab_release()
+            except Exception:
+                pass
+            top.destroy()
+            self.reanalyze()
+
+        self._button(row, "识别", ok,
+                     self._style("accent_button", "Accent.TButton"),
+                     icon="scan", tone="on_accent").pack(side="right")
+        self._button(row, "取消", lambda: top.destroy(),
+                     self._style("button", "TButton")).pack(side="right",
+                                                           padx=(0, 6))
+        ent.bind("<Return>", lambda e: ok())
+        top.bind("<Escape>", lambda e: top.destroy())
+        try:
+            top.grab_set()
+            top.update_idletasks()
+            x = self.root.winfo_rootx() + 80
+            y = self.root.winfo_rooty() + 80
+            top.geometry("+%d+%d" % (x, y))
+        except Exception:
+            pass
+        ent.focus_set()
+
+    # ------------------------------------------------------------ 浪花条
+    def _build_wave(self, parent):
+        self._wave = tk.Canvas(parent, height=10, bd=0, highlightthickness=0,
+                               bg=self.pal.get("accent_soft", "#DBEFEE"))
+        self._wave.pack(side="top", fill="x")
+        self._wave.bind("<Configure>", lambda e: self._draw_wave())
+        try:
+            self.root.after(60, self._draw_wave)
+        except Exception:
+            pass
+
+    def _draw_wave(self):
+        c = getattr(self, "_wave", None)
+        if c is None:
+            return
+        try:
+            w = max(240, int(c.winfo_width()))
+        except Exception:
+            w = 240
+        pal = self.pal
+        try:
+            c.delete("all")
+            c.configure(bg=pal.get("accent_soft", "#DBEFEE"), bd=0,
+                        highlightthickness=0)
+            top = pal.get("toolbar", "#FFFCF4")
+            pts = []
+            x = -8
+            while x <= w + 12:
+                pts += [x, 4.6 + 2.4 * math.sin(x / 82.0 * 2 * math.pi + 0.9)]
+                x += 7
+            c.create_polygon(pts + [w + 12, -2, -8, -2], fill=top, outline="")
+            c.create_line(pts, fill=pal.get("accent", "#0C7F8B"), width=1,
+                          smooth=True)
+            pts2 = []
+            x = -8
+            while x <= w + 12:
+                pts2 += [x, 7.6 + 1.4 * math.sin(x / 61.0 * 2 * math.pi + 2.6)]
+                x += 7
+            c.create_line(pts2, smooth=True, width=1,
+                          fill=_mix_hex(pal.get("accent_soft", "#DBEFEE"),
+                                        pal.get("accent", "#0C7F8B"), 0.45))
+        except Exception:
+            pass
 
     def _build_statusbar(self, parent):
         bar = ttk.Frame(parent, style=self._style("toolbar", "Toolbar.TFrame"),
-                        padding=(10, 3))
+                        padding=(12, 4))
         bar.pack(side="bottom", fill="x")
         self.status_label = ttk.Label(
             bar, text="未打开作业页", anchor="w",
             style=self._style("toolbar_muted", "Toolbar.Muted.TLabel"))
         self.status_label.pack(side="left", fill="x", expand=True)
-        self.hint_label = ttk.Label(
-            bar, text="答题只改内存 · 实时预览不落盘 · 生成才写文件",
-            style=self._style("toolbar_muted", "Toolbar.Muted.TLabel"))
-        self.hint_label.pack(side="right")
+        self.hint_label = None
 
     def _build_log(self, parent):
         wrap = ttk.Frame(parent, style=self._style("frame", "TFrame"))
@@ -711,16 +922,12 @@ class WorksheetWindow:
         head = ttk.Frame(wrap, style=self._style("toolbar", "Toolbar.TFrame"),
                          padding=(6, 0))
         head.pack(fill="x")
-        self.log_btn = ttk.Button(
-            head, text="▸ 日志", command=self.toggle_log,
-            style=self._style("ghost_button", "Ghost.TButton"),
-            padding=(6, 2))
+        self.log_btn = self._button(head, "日志", self.toggle_log,
+                                    self._style("ghost_button", "Ghost.TButton"),
+                                    icon="log", tone="muted")
         self.log_btn.pack(side="left")
-        ttk.Label(head, text="分析/生成过程与 warning 都在这里",
-                  style=self._style("toolbar_muted", "Toolbar.Muted.TLabel")
-                  ).pack(side="left", padx=8)
         self.log_body = ttk.Frame(wrap, style=self._style("log", "TFrame"),
-                                 padding=(8, 4))
+                                  padding=(8, 4))
         self.log_body.configure(height=120)
         self.log_body.pack_propagate(False)
         self.log_text = tk.Text(self.log_body, height=4, wrap="word",
@@ -734,11 +941,10 @@ class WorksheetWindow:
     def toggle_log(self):
         if self._log_open:
             self.log_body.pack_forget()
-            self.log_btn.configure(text="▸ 日志")
+            self._log_open = False
         else:
             self.log_body.pack(fill="x", pady=(2, 0))
-            self.log_btn.configure(text="▾ 日志")
-        self._log_open = not self._log_open
+            self._log_open = True
 
     def log(self, msg):
         try:
@@ -750,7 +956,21 @@ class WorksheetWindow:
         except Exception:
             pass
 
+    # ------------------------------------------------------------ 左右两栏
+    def _make_beach(self, parent, height=132):
+        cls = getattr(_theme, "BeachStrip", None) if _theme is not None else None
+        if cls is None:
+            return None
+        try:
+            return cls(parent, palette=self.pal, dpi=self._dpi,
+                       height=height)
+        except Exception:
+            return None
+
     def _build_left(self, parent):
+        self._beach = self._make_beach(parent)
+        if self._beach is not None:
+            self._beach.pack(side="bottom", fill="x", pady=(4, 0))
         card = ttk.Labelframe(parent, text="题目列表",
                               style=self._style("card_box", "Card.TLabelframe"),
                               padding=(10, 8))
@@ -778,11 +998,10 @@ class WorksheetWindow:
         self._build_preview_toolbar(preview_card)
         self.canvas = tk.Canvas(preview_card, height=240,
                                 bg=self.tk_tokens.get("canvas_bg")
-                                or self.pal.get("canvas", "#E9EBF2"),
+                                or self.pal.get("canvas", "#D5E7E6"),
                                 highlightthickness=0, bd=0)
         self.canvas.pack(fill="both", expand=True)
         self.canvas.bind("<Configure>", lambda e: self._redraw_canvas())
-        # 缩放 / 平移：滚轮以鼠标为锚点，按住左键拖拽，双击回到适合窗口
         self.canvas.bind("<MouseWheel>", self._on_canvas_wheel)
         self.canvas.bind("<Button-4>",
                          lambda e: self._zoom_at(e.x, e.y, 1.15))
@@ -803,35 +1022,30 @@ class WorksheetWindow:
         self._build_editor(editor_card)
 
     def _build_preview_toolbar(self, parent):
-        """预览卡片顶部：实时叠加开关 + 缩放控制。"""
         bar = ttk.Frame(parent, style=self._style("card", "Card.TFrame"))
         bar.pack(side="top", fill="x", pady=(0, 4))
         self.var_live = tk.BooleanVar(value=True)
-        ttk.Checkbutton(bar, text="实时叠加答案", variable=self.var_live,
+        ttk.Checkbutton(bar, text="实时叠加", variable=self.var_live,
                         command=self._on_live_toggle).pack(side="left")
-        ttk.Button(bar, text="刷新预览", command=self._refresh_live_preview,
-                   style=self._style("ghost_button", "Ghost.TButton"),
-                   padding=(8, 2)).pack(side="left", padx=(6, 10))
-        ttk.Separator(bar, orient="vertical").pack(side="left", fill="y",
-                                                    padx=4, pady=2)
-        ttk.Button(bar, text="－", width=3,
-                   command=lambda: self._zoom_step(1.0 / 1.25),
-                   style=self._style("ghost_button", "Ghost.TButton"),
-                   padding=(4, 2)).pack(side="left")
+        self._button(bar, "刷新", self._refresh_live_preview,
+                     self._style("ghost_button", "Ghost.TButton"),
+                     icon="refresh", tone="muted", size=15,
+                     padding=(7, 3)).pack(side="left", padx=(6, 8))
+        self._button(bar, "", lambda: self._zoom_step(1.0 / 1.25),
+                     self._style("ghost_button", "Ghost.TButton"),
+                     icon="minus", tone="muted", size=14,
+                     padding=(5, 3)).pack(side="left")
         self.var_zoom = tk.StringVar(value="100%")
         ttk.Label(bar, textvariable=self.var_zoom, width=7, anchor="center",
-                  foreground=self.pal.get("accent", "#4F6BED"),
                   style=self._style("card_label", "Card.TLabel")).pack(side="left")
-        ttk.Button(bar, text="＋", width=3,
-                   command=lambda: self._zoom_step(1.25),
-                   style=self._style("ghost_button", "Ghost.TButton"),
-                   padding=(4, 2)).pack(side="left")
-        ttk.Button(bar, text="适合窗口", command=self._zoom_fit,
-                   style=self._style("ghost_button", "Ghost.TButton"),
-                   padding=(8, 2)).pack(side="left", padx=(4, 0))
-        ttk.Label(bar, text="滚轮缩放 · 拖拽平移 · 双击复位",
-                  style=self._style("card_muted", "Card.Muted.TLabel")
-                  ).pack(side="right", padx=4)
+        self._button(bar, "", lambda: self._zoom_step(1.25),
+                     self._style("ghost_button", "Ghost.TButton"),
+                     icon="plus", tone="muted", size=14,
+                     padding=(5, 3)).pack(side="left")
+        self._button(bar, "适合", self._zoom_fit,
+                     self._style("ghost_button", "Ghost.TButton"),
+                     icon="fit", tone="muted", size=14,
+                     padding=(7, 3)).pack(side="left", padx=(4, 0))
         self._sync_zoom_label()
 
     def _build_editor(self, parent):
@@ -855,14 +1069,14 @@ class WorksheetWindow:
 
         ctrl = ttk.Frame(parent, style=self._style("card", "Card.TFrame"))
         ctrl.pack(fill="x")
-        ttk.Label(ctrl, text="字号 pt",
+        ttk.Label(ctrl, text="字号",
                   style=self._style("card_muted", "Card.Muted.TLabel")
                   ).pack(side="left")
         self.var_size = tk.StringVar(value="%.1f" % DEFAULT_SIZE_PT)
         self.size_spin = ttk.Spinbox(ctrl, textvariable=self.var_size,
                                      from_=8, to=30, increment=0.2, width=6,
                                      command=self._on_size_align_change)
-        self.size_spin.pack(side="left", padx=(3, 10))
+        self.size_spin.pack(side="left", padx=(3, 12))
         self.size_spin.bind("<Return>", lambda e: self._on_size_align_change())
         self.size_spin.bind("<FocusOut>",
                             lambda e: self._on_size_align_change())
@@ -873,17 +1087,43 @@ class WorksheetWindow:
         self.align_box = ttk.Combobox(ctrl, textvariable=self.var_align,
                                       values=["左对齐", "居中", "右对齐"],
                                       state="readonly", width=7)
-        self.align_box.pack(side="left", padx=(3, 10))
+        self.align_box.pack(side="left", padx=(3, 0))
         self.align_box.bind("<<ComboboxSelected>>",
                             lambda e: self._on_size_align_change())
-        self.size_hint = ttk.Label(
-            ctrl, text="默认 12.4；只有改过才会覆盖自动字号",
-            style=self._style("card_muted", "Card.Muted.TLabel"))
-        self.size_hint.pack(side="left", padx=4)
 
-        rect_row = ttk.Frame(parent, style=self._style("card", "Card.TFrame"))
-        rect_row.pack(fill="x", pady=(5, 0))
-        ttk.Label(rect_row, text="答题区 左/上/右/下 (pt)",
+        # ---- 输出：目录 / 文件名（生成前用，常驻但只占两行）----
+        out1 = ttk.Frame(parent, style=self._style("card", "Card.TFrame"))
+        out1.pack(fill="x", pady=(6, 0))
+        ttk.Label(out1, text="输出",
+                  style=self._style("card_muted", "Card.Muted.TLabel")
+                  ).pack(side="left")
+        self.var_outdir = tk.StringVar(value=OUT_DIR)
+        ttk.Entry(out1, textvariable=self.var_outdir).pack(
+            side="left", fill="x", expand=True, padx=(4, 4))
+        self._button(out1, "浏览", self._dlg_choose_outdir,
+                     self._style("ghost_button", "Ghost.TButton"),
+                     icon="open", tone="muted", size=15,
+                     padding=(6, 3)).pack(side="left")
+        out2 = ttk.Frame(parent, style=self._style("card", "Card.TFrame"))
+        out2.pack(fill="x", pady=(4, 0))
+        ttk.Label(out2, text="文件名",
+                  style=self._style("card_muted", "Card.Muted.TLabel")
+                  ).pack(side="left")
+        self.var_outname = tk.StringVar(value=self._stamped_name())
+        name_entry = ttk.Entry(out2, textvariable=self.var_outname)
+        name_entry.pack(side="left", fill="x", expand=True, padx=(4, 4))
+        name_entry.bind("<KeyRelease>",
+                        lambda e: setattr(self, "_outname_custom", True))
+        self._button(out2, "时间戳", self._reset_outname,
+                     self._style("ghost_button", "Ghost.TButton"),
+                     icon="refresh", tone="muted", size=14,
+                     padding=(6, 3)).pack(side="left")
+
+        # ---- 高级：答题区 / 空白页（收起来）----
+        adv = self._collapsible(parent, "高级")
+        rect_row = ttk.Frame(adv, style=self._style("card", "Card.TFrame"))
+        rect_row.pack(fill="x")
+        ttk.Label(rect_row, text="答题区",
                   style=self._style("card_muted", "Card.Muted.TLabel")
                   ).pack(side="left")
         self.var_rect = [tk.StringVar(value="") for _ in range(4)]
@@ -891,61 +1131,58 @@ class WorksheetWindow:
             e = ttk.Entry(rect_row, textvariable=self.var_rect[i], width=6)
             e.pack(side="left", padx=(3, 0))
             e.bind("<Return>", lambda ev: self._apply_rect())
-        ttk.Button(rect_row, text="应用",
-                   command=self._apply_rect,
-                   style=self._style("ghost_button", "Ghost.TButton"),
-                   padding=(8, 3)).pack(side="left", padx=(8, 0))
-        self.rect_hint = ttk.Label(
-            rect_row, text="只影响高亮与生成",
-            style=self._style("card_muted", "Card.Muted.TLabel"))
-        self.rect_hint.pack(side="left", padx=6)
-
-        # ---- 答案位置：原答题区 / 新插空白页（题目页没有留白时用）----
-        mode_row = ttk.Frame(parent, style=self._style("card", "Card.TFrame"))
-        mode_row.pack(fill="x", pady=(5, 0))
+        self._button(rect_row, "应用", self._apply_rect,
+                     self._style("ghost_button", "Ghost.TButton"),
+                     icon="check", tone="muted", size=14,
+                     padding=(6, 3)).pack(side="left", padx=(6, 0))
+        mode_row = ttk.Frame(adv, style=self._style("card", "Card.TFrame"))
+        mode_row.pack(fill="x", pady=(6, 0))
         self.var_blank = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
-            mode_row, text="答案写到新空白页",
-            variable=self.var_blank,
-            command=self._on_answer_mode_change).pack(side="left")
-        self.blank_hint = ttk.Label(
-            mode_row,
-            text="勾选后：每页作业后插一页空白页写答案（题目页没留白时用）",
-            style=self._style("card_muted", "Card.Muted.TLabel"))
-        self.blank_hint.pack(side="left", padx=6)
+        ttk.Checkbutton(mode_row, text="答案写到新空白页",
+                        variable=self.var_blank,
+                        command=self._on_answer_mode_change).pack(side="left")
 
-        # ---- 输出文件：目录 + 文件名（默认时间戳，均可自定义）----
-        out_row = ttk.Frame(parent, style=self._style("card", "Card.TFrame"))
-        out_row.pack(fill="x", pady=(6, 0))
-        ttk.Label(out_row, text="输出目录",
-                  style=self._style("card_muted", "Card.Muted.TLabel")
-                  ).pack(side="left")
-        self.var_outdir = tk.StringVar(value=OUT_DIR)
-        ttk.Entry(out_row, textvariable=self.var_outdir
-                  ).pack(side="left", fill="x", expand=True, padx=(3, 0))
-        ttk.Button(out_row, text="浏览…", command=self._dlg_choose_outdir,
-                   style=self._style("ghost_button", "Ghost.TButton"),
-                   padding=(8, 2)).pack(side="left", padx=(4, 10))
-        ttk.Label(out_row, text="文件名",
-                  style=self._style("card_muted", "Card.Muted.TLabel")
-                  ).pack(side="left")
-        self.var_outname = tk.StringVar(value=self._stamped_name())
-        name_entry = ttk.Entry(out_row, textvariable=self.var_outname, width=26)
-        name_entry.pack(side="left", padx=(3, 0))
-        name_entry.bind("<KeyRelease>",
-                        lambda e: setattr(self, "_outname_custom", True))
-        ttk.Button(out_row, text="用时间戳", command=self._reset_outname,
-                   style=self._style("ghost_button", "Ghost.TButton"),
-                   padding=(8, 2)).pack(side="left", padx=4)
-        self.out_hint = ttk.Label(
-            parent, text="默认按时间命名；点「生成手写作答」直接存到这里，"
-                         "或点「另存为…」临时换位置",
-            style=self._style("card_muted", "Card.Muted.TLabel"))
-        self.out_hint.pack(anchor="w", pady=(2, 0))
+    def _collapsible(self, parent, title, open=False):
+        """卡片内可折叠小节；返回内容容器。"""
+        holder = ttk.Frame(parent, style=self._style("card", "Card.TFrame"))
+        holder.pack(fill="x", pady=(6, 0))
+        body = ttk.Frame(holder, style=self._style("card", "Card.TFrame"))
+        state = {"open": bool(open)}
+
+        def paint():
+            try:
+                btn.configure(text=("▾  " if state["open"] else "▸  ") + title)
+            except Exception:
+                pass
+
+        def toggle():
+            state["open"] = not state["open"]
+            if state["open"]:
+                body.pack(fill="x", pady=(4, 0))
+            else:
+                body.pack_forget()
+            paint()
+
+        btn = ttk.Button(holder, text=title, style="Section.TButton", width=0,
+                         command=toggle)
+        btn.pack(fill="x")
+        if state["open"]:
+            body.pack(fill="x", pady=(4, 0))
+        paint()
+        return body
 
     def _apply_widget_colors(self):
         pal = self.pal
         tk_tokens = self.tk_tokens
+        if self._beach is not None:
+            try:
+                self._beach.set_palette(pal)
+            except Exception:
+                pass
+        try:
+            self._refresh_icons()
+        except Exception:
+            pass
         try:
             self.root.configure(bg=pal.get("bg", "#F7F8FA"))
         except Exception:
@@ -1050,7 +1287,8 @@ class WorksheetWindow:
     def _update_page_controls(self):
         try:
             self.page_entry.configure(state="normal" if self.spec else "disabled")
-            self.numbers_entry.configure(state="normal")
+            if getattr(self, "numbers_entry", None) is not None:
+                self.numbers_entry.configure(state="normal")
         except Exception:
             pass
 
@@ -1228,14 +1466,16 @@ class WorksheetWindow:
             else:
                 title = "%s  （扫描件，无文字层）" % num
             conf = q.get("confidence")
-            conf_txt = ("置信度 %.0f%%" % (100.0 * float(conf))
-                        if conf is not None else "置信度 —")
-            sub = "第%d页 · 答题区%d行 · %s" % (
-                int(q.get("page", 0)) + 1, int(q.get("answer_lines") or 0),
-                conf_txt)
+            sub = "第 %d 页 · 答题区 %d 行" % (
+                int(q.get("page", 0)) + 1, int(q.get("answer_lines") or 0))
             if self._answer_mode() == worksheet.ANSWER_MODE_BLANK:
-                sub = "第%d页 · 空白答题页 · %s" % (
-                    int(q.get("page", 0)) + 1, conf_txt)
+                sub = "第 %d 页 · 空白答题页" % (int(q.get("page", 0)) + 1)
+            # 只在置信度偏低时提醒，别每条都挂一排数字
+            try:
+                if conf is not None and float(conf) < 0.8:
+                    sub += " · 置信度 %.0f%%" % (100.0 * float(conf))
+            except Exception:
+                pass
             items.append((title, sub))
         try:
             self.qlist.set_items(items, selected=self.current)
@@ -1775,8 +2015,7 @@ class WorksheetWindow:
                 c.create_text(
                     cw / 2.0, ch / 2.0,
                     text=("当前页预览加载失败" if self.spec else
-                          "打开作业页（PDF / 图片）后自动划题\n"
-                          "不会自动生成、不会写文件"),
+                          "打开作业页（PDF / 图片）后自动划题"),
                     fill=pal.get("danger" if self.spec else "muted",
                                  "#6B7280"),
                     font=(self.font_family, 11), justify="center")
@@ -1892,13 +2131,6 @@ class WorksheetWindow:
                              % int(q.get("answer_lines") or 0),
                         fill=pal.get("accent", "#4F6BED"),
                         font=(self.font_family, 9))
-            c.create_text(
-                10, 8, anchor="nw",
-                text="第 %d/%d 页 · %.0f×%.0f pt · %s"
-                     % (page_idx + 1, max(1, len(pages)), pw, ph,
-                        os.path.basename(self.source)),
-                fill=pal.get("muted", "#6B7280"),
-                font=(self.font_family, 9))
         except Exception:
             self.log("预览绘制失败：\n" + traceback.format_exc())
 

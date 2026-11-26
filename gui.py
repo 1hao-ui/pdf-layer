@@ -71,6 +71,11 @@ import symbols                # noqa: E402
 import page_model as PM       # noqa: E402
 from PIL import Image         # noqa: E402
 
+try:                          # 线性图标（PIL 现画，缺模块时按钮退回纯文字）
+    import icons as _icons
+except Exception:             # pragma: no cover
+    _icons = None
+
 try:                          # tkinter 缺失时也允许 `import gui`（测试/无显示环境）
     import tkinter as _tk
     from tkinter import ttk as _ttk
@@ -968,6 +973,11 @@ class App:
         self._hover_cursor = ""
         self._last_status = ""
         self._theme_hint = ""
+        # ---- 沙滩条 / 海面装饰 ----
+        self._beach = None            # theme.BeachStrip（主题模块提供）
+        self._sea_phase = 0.0
+        self._sea_ripples = []        # [(x, y, 起始帧)]
+        self._sea_after = None
 
         # ---- 渲染参数（段落参数在 page.paragraphs 里；这里存新段落默认值）----
         self.cfg = {
@@ -1004,6 +1014,8 @@ class App:
         except Exception:
             self._dpi_scale = 1.0
         self._tag_font = None
+        self._icons = {}              # (name,size,fg,accent) -> PhotoImage
+        self._icon_refs = []          # [(widget, name, size, tone)] 切主题时刷新
         self._toolbar_specs = []
         self._toolbar_compact = False
         self._toolbar_full_req = 0
@@ -1019,6 +1031,10 @@ class App:
         self._restore_ui_state()
         self._bind_global()
         self._timed(80, self._init_toolbar_state)
+        try:
+            self._sea_after = self.root.after(220, self._sea_tick)
+        except Exception:
+            self._sea_after = None
 
         self.log("就绪。示例文字已载入，点右上「渲染」更新预览。")
         if DEFAULT_FONT == HAN_OWN:
@@ -1104,7 +1120,7 @@ class App:
                 pass
         self._timers = []
         for attr in ("_render_after", "_text_after", "_param_after",
-                     "_poll_after", "_sash_after"):
+                     "_poll_after", "_sash_after", "_sea_after"):
             self._cancel(attr)
 
     def _on_close(self):
@@ -1112,6 +1128,11 @@ class App:
             return
         self.closing = True
         self._cancel_all_timers()
+        if getattr(self, "_beach", None) is not None:
+            try:
+                self._beach.stop()
+            except Exception:
+                pass
         self.save_config()
         try:
             if self.ai_proc is not None and self.ai_proc.poll() is None:
@@ -1356,6 +1377,11 @@ class App:
                 self._float_inner.configure(style="Toolbar.TFrame")
         except Exception:
             pass
+        if getattr(self, "_beach", None) is not None:
+            try:
+                self._beach.set_palette(pal)
+            except Exception:
+                pass
         # 顶栏上的 tk 按钮（品牌标 / ⋯ / 三页）不吃 ttk 样式，要手动刷色
         for attr, fg in (("brand_mark", pal["accent"]), ("more_btn", pal["muted"])):
             w = getattr(self, attr, None)
@@ -1366,6 +1392,10 @@ class App:
                                 activeforeground=pal["text"])
                 except Exception:
                     pass
+        try:
+            self._refresh_icons()
+        except Exception:
+            pass
         try:
             self._update_nav()
         except Exception:
@@ -1420,6 +1450,70 @@ class App:
                 pass
             setattr(self, attr, None)
 
+    # ============================================================ 图标
+    def _icon(self, name, size=18, tone="text"):
+        """按当前调色板取一张图标（带缓存）。没有 icons/PIL 时返回 None。"""
+        if _icons is None or not getattr(_icons, "PIL_OK", False):
+            return None
+        pal = self.pal
+        if tone == "on_accent":
+            fg = pal.get("on_accent", "#FFFFFF")
+            ac = _mix(fg, pal.get("accent", "#0C7F8B"), 0.45)
+        elif tone == "danger":
+            fg = pal.get("danger", "#DE6A55")
+            ac = fg
+        elif tone == "muted":
+            fg = pal.get("muted", "#7B7061")
+            ac = _mix(fg, pal.get("accent", "#0C7F8B"), 0.55)
+        elif tone == "brand":
+            fg = pal.get("accent", "#0C7F8B")
+            ac = fg
+        else:
+            fg = pal.get("text", "#322C24")
+            ac = pal.get("accent", "#0C7F8B")
+        key = (name, size, fg, ac)
+        cache = self._icons
+        if key in cache:
+            return cache[key]
+        try:
+            img = _icons.photo(self.root, name, size=size, fg=fg, accent=ac,
+                               dpi=getattr(self, "_dpi_scale", 1.0))
+        except Exception:
+            img = None
+        cache[key] = img
+        return img
+
+    def _button(self, parent, text, command, style="TButton", icon=None,
+                tone="text", size=18, width=0, **kw):
+        """带图标的 ttk 按钮；图片会自动登记，切深浅色时统一刷新。"""
+        img = self._icon(icon, size, tone) if icon else None
+        if img is not None:
+            kw["image"] = img
+            kw["compound"] = "left"
+            text = (" " + text) if text else ""
+            self._icon_refs.append((None, icon, size, tone))
+        else:
+            text = text or None
+        b = self.ttk.Button(parent, text=text, command=command, style=style,
+                            width=width, **kw)
+        if img is not None:
+            self._icon_refs[-1] = (b, icon, size, tone)
+        return b
+
+    def _refresh_icons(self):
+        """主题切换后重画所有按钮图标（颜色跟着 pal 走）。"""
+        for i, (w, name, size, tone) in enumerate(list(self._icon_refs)):
+            if w is None:
+                continue
+            img = self._icon(name, size, tone)
+            if img is None:
+                continue
+            try:
+                w.configure(image=img)
+            except Exception:
+                pass
+            self._icon_refs[i] = (w, name, size, tone)
+
     # ============================================================ UI 骨架
     # 三个页面共用同一块画布，只切换左侧工作台：
     #   书写 —— 段落 / 正文 / 背景       样式 —— 字体 / 墨色与笔迹 / 高级
@@ -1446,6 +1540,9 @@ class App:
 
         left = ttk.Frame(self.paned, style="Sidebar.TFrame")
         self.paned.add(left, weight=0)
+        self._beach = self._make_beach_strip(left)
+        if self._beach is not None:
+            self._beach.pack(side="bottom", fill="x")
         self._scroll = _ScrollFrame(left, bg=self.pal["sidebar"])
         self._scroll.pack(fill="both", expand=True)
         host = self._scroll.inner
@@ -1560,8 +1657,11 @@ class App:
         self._nav = nav
         self._nav_buttons = {}
         for key, label in self.PAGES:
-            b = tk.Button(nav, text=label, bd=0, highlightthickness=0,
-                          relief="flat", cursor="hand2", padx=15, pady=4,
+            b = tk.Button(nav, text="  " + label,
+                          image=self._icon(key, 17, "muted"),
+                          compound="left",
+                          bd=0, highlightthickness=0,
+                          relief="flat", cursor="hand2", padx=13, pady=4,
                           font=(fam, 10), bg=pal["toolbar"], fg=pal["muted"],
                           activebackground=pal["accent_soft"],
                           activeforeground=pal["accent"],
@@ -1573,18 +1673,20 @@ class App:
 
         right = ttk.Frame(outer, style="Toolbar.TFrame")
         right.pack(side="right", padx=(0, 14))
-        self.render_btn = ttk.Button(right, text="渲染",
-                                     command=self.render_async,
-                                     style="Accent.TButton", width=0)
+        self.render_btn = self._button(right, "渲染", self.render_async,
+                                       "Accent.TButton", icon="render",
+                                       tone="on_accent")
         self.render_btn.pack(side="left")
-        self.more_btn = tk.Button(right, text="⋯", bd=0, highlightthickness=0,
-                                  relief="flat", cursor="hand2", padx=9, pady=0,
-                                  font=(fam, 15), bg=pal["toolbar"],
-                                  fg=pal["muted"],
+        self.more_btn = tk.Button(right, text="",
+                                  image=self._icon("dots", 20, "muted"),
+                                  bd=0, highlightthickness=0,
+                                  relief="flat", cursor="hand2", padx=8, pady=2,
+                                  bg=pal["toolbar"], fg=pal["muted"],
                                   activebackground=pal["hover"],
                                   activeforeground=pal["text"],
                                   command=self._show_more_menu)
         self.more_btn.pack(side="left", padx=(6, 0))
+        self._icon_refs.append((self.more_btn, "dots", 20, "muted"))
         self.theme_btn = None          # 深浅色在「⋯」菜单里，旧属性保留
 
     def _build_wave(self, parent):
@@ -1626,6 +1728,120 @@ class App:
         except Exception:
             pass
 
+    # ------------------------------------------------------------ 沙滩 / 海面
+    def _make_beach_strip(self, parent):
+        """主题模块里的 BeachStrip；没有就返回 None（界面照常可用）。"""
+        mod = _THEME_MOD or _load_theme_module()
+        cls = getattr(mod, "BeachStrip", None) if mod is not None else None
+        if cls is None:
+            return None
+        try:
+            return cls(parent, palette=self.pal,
+                       dpi=getattr(self, "_dpi_scale", 1.0), height=152)
+        except Exception:
+            return None
+
+    def _sea_tick(self):
+        self._sea_after = None
+        if self.closing:
+            return
+        self._sea_phase += 1
+        try:
+            if self.canvas.winfo_viewable():
+                self._draw_sea_deco()
+        except Exception:
+            pass
+        try:
+            self._sea_after = self.root.after(120, self._sea_tick)
+        except Exception:
+            self._sea_after = None
+
+    def _add_sea_ripple(self, x, y):
+        """在纸面外的海面上点一下：荡开一圈圈波纹。"""
+        try:
+            px, py = self._screen_to_pt(x, y)
+        except Exception:
+            return
+        if 0 <= px <= self.page.width_pt and 0 <= py <= self.page.height_pt:
+            return                      # 点在纸上，不荡波纹
+        self._sea_ripples.append((float(x), float(y), self._sea_phase))
+        if len(self._sea_ripples) > 8:
+            self._sea_ripples = self._sea_ripples[-8:]
+
+    def _draw_sea_deco(self):
+        """海面装饰：波浪线 / 两条小鱼 / 海鸥 / 点击波纹。全部在纸面之下。"""
+        c = getattr(self, "canvas", None)
+        if c is None:
+            return
+        pal = self.pal
+        try:
+            cw, ch = self.canvas_size()
+        except Exception:
+            return
+        d = max(1.0, float(getattr(self, "_dpi_scale", 1.0)))
+        base = pal["canvas"]
+        accent = pal["accent"]
+        line1 = _mix(base, accent, 0.32)
+        line2 = _mix(base, accent, 0.18)
+        fine = _mix(base, pal.get("on_accent", "#FFFFFF"), 0.55)
+        t = self._sea_phase
+        try:
+            c.delete("seadeco")
+            # ---- 底部三道浪 ----
+            for i, (yy, amp, col, spd) in enumerate((
+                    (ch - 30 * d, 3.2 * d, line1, 0.05),
+                    (ch - 18 * d, 2.2 * d, line2, 0.08),
+                    (ch - 8 * d, 1.6 * d, line2, 0.11))):
+                pts = []
+                x = -20.0
+                while x <= cw + 20:
+                    pts += [x, yy + amp * math.sin(x / (110 * d) + t * spd + i * 1.1)]
+                    x += 16 * d
+                c.create_line(pts, fill=col, width=1, smooth=True,
+                              tags="seadeco")
+            # ---- 海鸥（左上方慢慢滑过）----
+            gx = ((t * 1.1 * d) % (cw + 120 * d)) - 60 * d
+            gy = 54 * d + 4 * d * math.sin(t * 0.08)
+            c.create_line([(gx - 9 * d, gy), (gx, gy - 5 * d),
+                           (gx + 9 * d, gy)],
+                          fill=line1, width=1, smooth=True, tags="seadeco")
+            # ---- 小鱼：上下各一条，方向相反 ----
+            for k, (yy, spd, sgn) in enumerate(((ch * 0.24, 0.9, 1),
+                                                (ch * 0.84, -0.7, -1))):
+                fx = ((t * spd * 1.4 * d + k * 260) % (cw + 200 * d)) - 100 * d
+                self._draw_fish(c, fx, yy + 3 * d * math.sin(t * 0.12 + k),
+                                d, line1, sgn, fine)
+            # ---- 点击涟漪 ----
+            alive = []
+            for (rx, ry, t0) in self._sea_ripples:
+                age = max(0.0, t - t0)
+                if age > 18:
+                    continue
+                alive.append((rx, ry, t0))
+                k = age / 18.0
+                for j in range(3):
+                    rr = (10 + 78 * k) * d * (1 - 0.22 * j)
+                    col = _mix(base, fine, max(0.0, 0.75 * (1 - k)) * (1 - 0.18 * j))
+                    c.create_oval(rx - rr, ry - rr * 0.55, rx + rr,
+                                  ry + rr * 0.55, outline=col, width=1,
+                                  tags="seadeco")
+            self._sea_ripples = alive
+            c.tag_lower("seadeco")
+        except Exception:
+            pass
+
+    def _draw_fish(self, c, x, y, d, col, dirn, eye_col):
+        """一条只画轮廓的小鱼（dirn=1 向右）。"""
+        c.create_oval(x - 11 * d, y - 4.2 * d, x + 11 * d, y + 4.2 * d,
+                      outline=col, width=1, tags="seadeco")
+        c.create_polygon(x - dirn * 10 * d, y,
+                         x - dirn * 16 * d, y - 4.2 * d,
+                         x - dirn * 16 * d, y + 4.2 * d,
+                         fill="", outline=col, width=1, tags="seadeco")
+        c.create_oval(x + dirn * 6.2 * d - 1.1 * d, y - 1.1 * d,
+                      x + dirn * 6.2 * d + 1.1 * d, y + 1.1 * d,
+                      fill=eye_col, outline="", tags="seadeco")
+
     # ---- 页面切换
     def _nav_hover(self, key, inside):
         b = getattr(self, "_nav_buttons", {}).get(key)
@@ -1640,11 +1856,17 @@ class App:
         fam = getattr(self, "_ui_family", "TkDefaultFont")
         for key, b in getattr(self, "_nav_buttons", {}).items():
             active = (key == self.page_key)
+            label = dict(getattr(self, "PAGES", ())).get(key, key)
+            img = self._icon(key, 17, "brand" if active else "muted")
+            opts = dict(
+                bg=self.pal["accent_soft"] if active else self.pal["toolbar"],
+                fg=self.pal["accent"] if active else self.pal["muted"],
+                font=(fam, 10, "bold") if active else (fam, 10),
+                text="  " + label)
+            if img is not None:
+                opts.update(image=img, compound="left")
             try:
-                b.configure(
-                    bg=self.pal["accent_soft"] if active else self.pal["toolbar"],
-                    fg=self.pal["accent"] if active else self.pal["muted"],
-                    font=(fam, 10, "bold") if active else (fam, 10))
+                b.configure(**opts)
             except Exception:
                 pass
 
@@ -1804,12 +2026,13 @@ class App:
         head = ttk.Frame(wrap, style="Toolbar.TFrame")
         head.pack(fill="x")
         ttk.Label(head, text="日志", style="Toolbar.Muted.TLabel").pack(side="left")
-        self.console_btn = ttk.Button(head, text="收起",
-                                      command=self.toggle_console,
-                                      style="Ghost.TButton", width=0)
+        self.console_btn = self._button(head, "收起", self.toggle_console,
+                                         "Ghost.TButton", icon="down",
+                                         tone="muted")
         self.console_btn.pack(side="right")
-        ttk.Button(head, text="清空", command=self._clear_log,
-                   style="Ghost.TButton", width=0).pack(side="right", padx=(0, 4))
+        self._button(head, "清空", self._clear_log, "Ghost.TButton",
+                     icon="trash", tone="muted").pack(side="right",
+                                                      padx=(0, 4))
 
         body = ttk.Frame(wrap, style="Card.TFrame", padding=(10, 6))
         body.pack(fill="x", pady=(4, 0))
@@ -1832,10 +2055,10 @@ class App:
         self.entry = ttk.Entry(row)
         self.entry.pack(side="left", fill="x", expand=True, padx=4)
         self.entry.bind("<Return>", lambda e: self._on_command())
-        ttk.Button(row, text="执行", command=self._on_command,
-                   style="Ghost.TButton", width=0).pack(side="left", padx=1)
-        ttk.Button(row, text="记录意见", command=self._record_note,
-                   style="Ghost.TButton", width=0).pack(side="left", padx=1)
+        self._button(row, "执行", self._on_command, "Ghost.TButton",
+                     icon="play", tone="muted").pack(side="left", padx=1)
+        self._button(row, "记录意见", self._record_note, "Ghost.TButton",
+                     icon="chat", tone="muted").pack(side="left", padx=1)
 
     def toggle_console(self):
         """日志抽屉：pack 在 paned 之前，收起时整块让位给画布。"""
@@ -1916,14 +2139,17 @@ class App:
         row = ttk.Frame(body, style="Card.TFrame")
         row.pack(fill="x", pady=(8, 0))
         self.draw_btn = None       # 新版：纸面空白处直接拖框，「框选」按钮已去掉
-        ttk.Button(row, text="＋ 段落", command=self.add_paragraph,
-                   style="Soft.TButton", width=0).pack(side="left")
-        ttk.Button(row, text="删除", command=self.delete_paragraph,
-                   style="DangerOutline.TButton").pack(side="left", padx=(5, 0))
-        ttk.Button(row, text="↓", command=lambda: self.move_paragraph(1),
-                   style="Ghost.TButton", width=2).pack(side="right", padx=(1, 0))
-        ttk.Button(row, text="↑", command=lambda: self.move_paragraph(-1),
-                   style="Ghost.TButton", width=2).pack(side="right")
+        self._button(row, "段落", self.add_paragraph, "Soft.TButton",
+                     icon="plus").pack(side="left")
+        self._button(row, "删除", self.delete_paragraph,
+                     "DangerOutline.TButton", icon="trash",
+                     tone="danger").pack(side="left", padx=(5, 0))
+        self._button(row, "", lambda: self.move_paragraph(1),
+                     "Ghost.TButton", icon="down", tone="muted",
+                     size=15, padding=(6, 5)).pack(side="right", padx=(1, 0))
+        self._button(row, "", lambda: self.move_paragraph(-1),
+                     "Ghost.TButton", icon="up", tone="muted",
+                     size=15, padding=(6, 5)).pack(side="right")
 
         body = self._section(parent, "正文")
         self.para_title = ttk.Label(body, text="第 1 段", style="Card.Muted.TLabel")
@@ -1973,9 +2199,8 @@ class App:
         body = self._section(parent, "背景")
         row = ttk.Frame(body, style="Card.TFrame")
         row.pack(fill="x")
-        self.bg_btn = ttk.Button(row, text="空白 A4  ▾",
-                                 command=self._show_bg_menu,
-                                 style="Soft.TButton", width=0)
+        self.bg_btn = self._button(row, "空白 A4  ▾", self._show_bg_menu,
+                                   "Soft.TButton", icon="image")
         self.bg_btn.pack(side="left")
         self.page_info = ttk.Label(row, text="1/1 页", style="Chip.TLabel")
         self.page_info.pack(side="right")
@@ -1994,12 +2219,13 @@ class App:
         self.font_box.bind("<<ComboboxSelected>>", lambda e: self._on_font())
         row = ttk.Frame(body, style="Card.TFrame")
         row.pack(fill="x", pady=(7, 8))
-        ttk.Button(row, text="字库工作台…", command=self.open_fontlab,
-                   style="Soft.TButton", width=0).pack(side="left")
-        ttk.Button(row, text="补缺字…", command=self.open_fontlab_missing,
-                   style="TButton", width=0).pack(side="left", padx=(5, 0))
-        ttk.Button(row, text="刷新字库", command=self.reload_fonts,
-                   style="TButton", width=0).pack(side="left", padx=(5, 0))
+        self._button(row, "字库工作台…", self.open_fontlab,
+                     "Soft.TButton", icon="sliders").pack(side="left")
+        self._button(row, "补缺字…", self.open_fontlab_missing,
+                     "TButton", icon="plus").pack(side="left", padx=(5, 0))
+        self._button(row, "", self.reload_fonts, "TButton",
+                     icon="refresh", padding=(8, 6)).pack(side="left",
+                                                          padx=(5, 0))
         self.var_variants = tk.BooleanVar(value=bool(self.cfg["variants"]))
         self.var_newsym = tk.BooleanVar(value=bool(self.cfg["newsym"]))
         ttk.Checkbutton(body, text="多套字形轮换", variable=self.var_variants,
@@ -2018,8 +2244,8 @@ class App:
         ent.pack(side="left", padx=(6, 4))
         ent.bind("<Return>", lambda e: self._on_ink_change())
         ent.bind("<FocusOut>", lambda e: self._on_ink_change())
-        ttk.Button(row, text="应用到全部", command=self._ink_all,
-                   style="TButton", width=0).pack(side="left")
+        self._button(row, "应用到全部", self._ink_all, "TButton",
+                     icon="check").pack(side="left")
 
         grid = ttk.Frame(body, style="Card.TFrame")
         grid.pack(fill="x", pady=(8, 0))
@@ -2070,21 +2296,21 @@ class App:
         body = self._section(parent, "导出")
         row = ttk.Frame(body, style="Card.TFrame")
         row.pack(fill="x")
-        ttk.Button(row, text="导出 PDF", command=self.save_pdf,
-                   style="Accent.TButton", width=0).pack(
+        self._button(row, "导出 PDF", self.save_pdf, "Accent.TButton",
+                     icon="pdf", tone="on_accent").pack(
             side="left", expand=True, fill="x")
-        ttk.Button(row, text="导出 PNG", command=self.save_png,
-                   style="Soft.TButton", width=0).pack(
+        self._button(row, "导出 PNG", self.save_png, "Soft.TButton",
+                     icon="png").pack(
             side="left", expand=True, fill="x", padx=(6, 0))
 
         body = self._section(parent, "项目")
         row = ttk.Frame(body, style="Card.TFrame")
         row.pack(fill="x")
-        ttk.Button(row, text="保存项目…", command=self._dlg_save_project,
-                   style="Soft.TButton", width=0).pack(
+        self._button(row, "保存项目…", self._dlg_save_project,
+                     "Soft.TButton", icon="save").pack(
             side="left", expand=True, fill="x")
-        ttk.Button(row, text="打开项目…", command=self._dlg_open_project,
-                   style="Soft.TButton", width=0).pack(
+        self._button(row, "打开项目…", self._dlg_open_project,
+                     "Soft.TButton", icon="open").pack(
             side="left", expand=True, fill="x", padx=(6, 0))
 
         body = self._section(parent, "AI 接口")
@@ -2098,16 +2324,16 @@ class App:
         lbl.pack(side="left")
         self._ai_dots.append(dot)
         self._ai_status_labels.append(lbl)
-        ttk.Button(row, text="启动", command=self.launch_ai,
-                   style="TButton", width=0).pack(side="right")
+        self._button(row, "启动", self.launch_ai, "TButton",
+                     icon="play").pack(side="right")
 
         body = self._section(parent, "日志")
         row = ttk.Frame(body, style="Card.TFrame")
         row.pack(fill="x")
-        ttk.Button(row, text="查看日志", command=self.toggle_console,
-                   style="Soft.TButton", width=0).pack(side="left")
-        ttk.Button(row, text="反馈意见", command=self._open_feedback,
-                   style="TButton", width=0).pack(side="left", padx=(5, 0))
+        self._button(row, "查看日志", self.toggle_console, "Soft.TButton",
+                     icon="log").pack(side="left")
+        self._button(row, "反馈意见", self._open_feedback, "TButton",
+                     icon="chat").pack(side="left", padx=(5, 0))
 
     # ------------------------------------------------------------ 画布
     def _build_canvas(self, parent):
@@ -2124,15 +2350,18 @@ class App:
                                       style="Toolbar.TFrame", padding=(2, 1))
         self._float_inner.pack(padx=1, pady=1)
         fpad = (7, 2)
-        ttk.Button(self._float_inner, text="－", command=lambda: self._zoom_step(-1),
-                   style="Ghost.TButton", padding=fpad).pack(side="left", padx=1)
+        self._button(self._float_inner, "", lambda: self._zoom_step(-1),
+                     "Ghost.TButton", icon="minus", tone="muted", size=14,
+                     padding=fpad).pack(side="left", padx=1)
         self.zoom_label = ttk.Label(self._float_inner, text="适应",
                                     style="Toolbar.Muted.TLabel")
         self.zoom_label.pack(side="left", padx=3)
-        ttk.Button(self._float_inner, text="＋", command=lambda: self._zoom_step(1),
-                   style="Ghost.TButton", padding=fpad).pack(side="left", padx=1)
-        ttk.Button(self._float_inner, text="适应", command=self.fit_view,
-                   style="Ghost.TButton", padding=fpad).pack(side="left", padx=(3, 0))
+        self._button(self._float_inner, "", lambda: self._zoom_step(1),
+                     "Ghost.TButton", icon="plus", tone="muted", size=14,
+                     padding=fpad).pack(side="left", padx=1)
+        self._button(self._float_inner, "适应", self.fit_view,
+                     "Ghost.TButton", icon="fit", tone="muted", size=14,
+                     padding=fpad).pack(side="left", padx=(3, 0))
         self._float_window = self.canvas.create_window(
             0, 0, window=self._float_outer, anchor="ne", tags="floatbar")
         self.canvas.bind("<Configure>", self._on_canvas_configure)
@@ -3101,6 +3330,7 @@ class App:
                                width=1, tags="pageframe")
             self._draw_overlay()
             self._draw_hint(cw, ch)
+            self._draw_sea_deco()
             # 悬浮缩放工具条固定在画布右上角
             if self._float_window is not None:
                 try:
@@ -3402,6 +3632,11 @@ class App:
             self._interact = None
             return
         kind = it.get("kind")
+        if kind == "pan":
+            moved = abs(event.x - it.get("x", event.x)) + abs(
+                event.y - it.get("y", event.y))
+            if moved <= 4:
+                self._add_sea_ripple(event.x, event.y)
         if kind == "draw":
             # 注意：先别清 _interact，_end_draw 还要用它取起点
             self._end_draw(event.x, event.y)
