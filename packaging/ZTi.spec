@@ -14,14 +14,18 @@
 历史：1.1 及以前打三个 exe、共享一份 _internal、各自独立授权。
 """
 import os
+import sys as _sys
+import tempfile as _tempfile
 
-ICON_PATH = os.path.normpath(os.path.join(SPECPATH, "..", "assets", "icon", "app.ico"))
-# 目录一律从 spec 自身位置推导：spec 在 <项目>/源码/pdf-layer/packaging/，
-# 上两级是仓库根，再上一级是项目根（字体输出/ 在那里）。
-# 不要再写死 C:\Users\... 之类的绝对路径——项目一挪就失效。
-APP = os.path.normpath(os.path.join(SPECPATH, os.pardir))
-ROOT = os.path.normpath(os.path.join(APP, os.pardir, os.pardir))
-FONTS = os.path.join(ROOT, "字体输出")
+# 路径约定 / 隐藏导入 / 瘦身规则全部来自 packaging/build_common.py，
+# 与自检 spec 共用同一份配置。
+if SPECPATH not in _sys.path:
+    _sys.path.insert(0, SPECPATH)
+import build_common as _bc  # noqa: E402
+
+APP = _bc.APP
+FONTS = _bc.FONTS
+ICON_PATH = _bc.ICON_PATH
 
 # ---------------------------------------------------------------------------
 # 手写字体：构建时加密，包里不放明文 TTF
@@ -31,9 +35,6 @@ FONTS = os.path.join(ROOT, "字体输出")
 # 现在构建时封存成一个加密块，运行时由 zti_lic.fonts 在**授权校验通过之后**
 # 解密还原到原位置——渲染链路一行不用改。
 # ---------------------------------------------------------------------------
-import sys as _sys
-import tempfile as _tempfile
-
 if APP not in _sys.path:
     _sys.path.insert(0, APP)
 from zti_lic import fonts as _zfonts  # noqa: E402
@@ -55,22 +56,12 @@ DATAS = [
     (os.path.join(APP, "assets"), "assets"),
 ]
 
-HIDDEN = [
-    "mthw", "mthw.math_renderer", "mthw.handwriting", "mthw.config",
-    "mthw.latex_parser",
-    # 字库注册表是延迟导入（symbols/hwrender 里才 import），显式列出
-    "fontlib", "fontlib.registry", "fontlib.charsets", "fontlib.template",
-    "fontlib.intake", "fontlib.autotune", "fontlib.builder", "fontlib.preview",
-    # 激活系统：guard 和 ui 之间是延迟导入，显式列出避免 PyInstaller 漏掉
-    "zti_lic", "zti_lic._ed25519", "zti_lic._pubkey", "zti_lic._b32", "zti_lic._fontkey", "zti_lic.fonts",
-    "zti_lic._console", "zti_lic._endpoint", "zti_lic.license",
-    "zti_lic.payload", "zti_lic.machine", "zti_lic.store", "zti_lic.trial",
-    "zti_lic.net", "zti_lic.activation", "zti_lic.guard", "zti_lic.ui",
-]
-
 # 唯一的主程序：做题窗口
 a_main = Analysis([os.path.join(APP, "做题窗口.py")], pathex=[APP],
-                  datas=DATAS, hiddenimports=HIDDEN, noarchive=False)
+                  datas=DATAS, hiddenimports=_bc.HIDDEN,
+                  excludes=_bc.EXCLUDES, noarchive=False)
+_bc.slim_analysis(a_main)
+
 pyz_main = PYZ(a_main.pure)
 exe_main = EXE(pyz_main, a_main.scripts, [],
                exclude_binaries=True, name="ZTi智能做题助手", icon=ICON_PATH,

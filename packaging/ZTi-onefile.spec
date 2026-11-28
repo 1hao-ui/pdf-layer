@@ -28,7 +28,7 @@ HIDDEN = [
     "mthw", "mthw.math_renderer", "mthw.handwriting", "mthw.config",
     "mthw.latex_parser",
     "fontlib", "fontlib.registry", "fontlib.charsets", "fontlib.template",
-    "fontlib.intake", "fontlib.autotune", "fontlib.builder", "fontlib.preview",
+    "fontlib.intake", "fontlib.autotune", "fontlib.builder", "fontlib.importer", "fontlib.preview",
 ]
 
 a = Analysis([os.path.join(APP, "做题窗口.py")], pathex=[APP],
