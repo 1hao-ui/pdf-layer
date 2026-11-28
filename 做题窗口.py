@@ -576,7 +576,7 @@ class WorksheetWindow:
         # ---- 输出路径（会话内记忆；窗口启动不写任何配置文件）----
         self._outname_custom = False
 
-        root.title("ZTi 智能做题助手 v1.5")
+        root.title("ZTi 智能做题助手 v1.6")
         _set_window_icon(root)
         self._setup_window_geometry()
         self._build_ui()
@@ -3312,7 +3312,7 @@ def main(argv=None):
 
     # === ZTi 授权校验（由 激活系统/tools/install_to_host.py 插入，勿手改）===
     from zti_lic import require as _zti_require
-    _zti_require("ziti", ui="tk", argv=argv, app_version="1.5")
+    _zti_require("ziti", ui="tk", argv=argv, app_version="1.6")
     # === ZTi 授权校验结束 ===
     parser = argparse.ArgumentParser(
         prog="做题窗口.py",
