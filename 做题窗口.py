@@ -539,6 +539,8 @@ class WorksheetWindow:
         self._page_cache = {}
         self._preview_img = None
         self._preview_photo = None
+        self._sea_phase = 0
+        self._sea_after = None
         self._thumb_hit = []              # [(x0,y0,x1,y1,page_idx)]
         self._thumb_photos = {}           # (page_idx, 宽) -> PhotoImage
         self._syncing_editor = False
@@ -582,6 +584,10 @@ class WorksheetWindow:
         self._update_page_controls()
         self._update_status()
         self.log("做题窗口就绪：打开作业页后自动划题；只有点「生成手写作答」才写 PDF。")
+        try:
+            self._sea_after = self.root.after(240, self._sea_tick)
+        except Exception:
+            self._sea_after = None
 
     # ------------------------------------------------------------ 基础
     def _detect_dpi(self):
@@ -761,11 +767,17 @@ class WorksheetWindow:
         brand = ttk.Frame(bar, style=self._style("toolbar", "Toolbar.TFrame"))
         brand.pack(side="left", padx=(2, 16))
         try:
-            tk.Label(brand, text="≈", bd=0, padx=0, pady=0,
-                     fg=self.pal.get("accent", "#0C7F8B"),
-                     bg=self.pal.get("toolbar", "#FFFCF4"),
-                     font=(self.font_family, 17, "bold")).pack(side="left",
-                                                               padx=(0, 5))
+            palm = self._icon("palm", 24, "brand")
+            mark = tk.Label(brand, bd=0, padx=0, pady=0,
+                            fg=self.pal.get("accent", "#0C7F8B"),
+                            bg=self.pal.get("toolbar", "#FFFCF4"),
+                            font=(self.font_family, 17, "bold"))
+            if palm is not None:
+                mark.configure(image=palm)
+                self._icon_refs.append((mark, "palm", 24, "brand"))
+            else:
+                mark.configure(text="≈")
+            mark.pack(side="left", padx=(0, 5))
         except Exception:
             pass
         ttk.Label(brand, text="ZTi 智能做题助手",
@@ -2624,6 +2636,31 @@ class WorksheetWindow:
             self._thumb_hit.append((x, y, x + tw, y + th, i))
             y += step
 
+    def _sea_tick(self):
+        """预览海面的慢速动画（140ms 一帧，只重画 seabg 这一组）。"""
+        self._sea_after = None
+        try:
+            if not self.canvas.winfo_exists():
+                return
+            self._sea_phase += 1
+            if self.canvas.winfo_viewable():
+                self._draw_sea_bg()
+            self._sea_after = self.root.after(140, self._sea_tick)
+        except Exception:
+            self._sea_after = None
+
+    def _draw_sea_bg(self):
+        fn = getattr(_theme, "paint_sea", None) if _theme is not None else None
+        if fn is None:
+            return
+        try:
+            cw = self.canvas.winfo_width()
+            ch = self.canvas.winfo_height()
+            fn(self.canvas, cw, ch, self.pal, self._sea_phase,
+               getattr(self, "_dpi", 1.0), tag="seabg")
+        except Exception:
+            pass
+
     def _redraw_canvas(self):
         if not hasattr(self, "canvas"):
             return
@@ -2634,6 +2671,7 @@ class WorksheetWindow:
         pal = self.pal
         try:
             c.delete("all")
+            self._draw_sea_bg()
             # 画布重绘会清掉拖框的橡皮筋；若正在拖，等重绘结束后补画
             if self._sel_start is not None:
                 try:

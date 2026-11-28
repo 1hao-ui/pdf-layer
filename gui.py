@@ -1690,9 +1690,15 @@ class App:
 
         brand = ttk.Frame(outer, style="Toolbar.TFrame")
         brand.pack(side="left", padx=(16, 2), pady=(7, 6))
-        self.brand_mark = tk.Label(brand, text="≈", bd=0, padx=0, pady=0,
+        palm = self._icon("palm", 24, "brand")
+        self.brand_mark = tk.Label(brand, bd=0, padx=0, pady=0,
                                    fg=pal["accent"], bg=pal["toolbar"],
                                    font=(fam, 18, "bold"))
+        if palm is not None:
+            self.brand_mark.configure(image=palm)
+            self._icon_refs.append((self.brand_mark, "palm", 24, "brand"))
+        else:
+            self.brand_mark.configure(text="≈")
         self.brand_mark.pack(side="left", padx=(0, 5))
         self.brand_text = ttk.Label(brand, text="手写体生成器",
                                     style="Brand.TLabel")
@@ -1719,6 +1725,10 @@ class App:
 
         right = ttk.Frame(outer, style="Toolbar.TFrame")
         right.pack(side="right", padx=(0, 14))
+        # 「字库」入口放在顶栏：上传字体 / 自建补字 / 管理，不藏在二级页里
+        self.font_menu_btn = self._button(right, "字库", self._show_font_menu,
+                                          "TButton", icon="sliders")
+        self.font_menu_btn.pack(side="left", padx=(0, 6))
         self.render_btn = self._button(right, "渲染", self.render_async,
                                        "Accent.TButton", icon="render",
                                        tone="on_accent")
@@ -1814,8 +1824,32 @@ class App:
         if len(self._sea_ripples) > 8:
             self._sea_ripples = self._sea_ripples[-8:]
 
+    def _moon_glow(self, d):
+        """一张径向渐变的月晕（按 dpi 缓存）。"""
+        key = round(float(d), 2)
+        if getattr(self, "_moon_glow_key", None) == key:
+            return getattr(self, "_moon_glow_photo", None)
+        try:
+            from PIL import Image, ImageTk
+            size = max(64, int(190 * d))
+            grad = Image.radial_gradient("L").resize(
+                (size, size), Image.BILINEAR)
+            alpha = grad.point(
+                lambda v: int((255 - v) ** 1.7 / (255 ** 0.7) * 0.34))
+            img = Image.new("RGBA", (size, size), (255, 244, 216, 255))
+            img.putalpha(alpha)
+            self._moon_glow_photo = ImageTk.PhotoImage(img, master=self.root)
+            self._moon_glow_key = key
+        except Exception:
+            self._moon_glow_photo = None
+            self._moon_glow_key = key
+        return self._moon_glow_photo
+
     def _draw_sea_deco(self):
-        """海面装饰：波浪线 / 两条小鱼 / 海鸥 / 点击波纹。全部在纸面之下。"""
+        """海面装饰：多层浪 + 浪尖泡沫 + 阳光碎金 + 海鸥 + 小鱼 + 点击涟漪。
+
+        全部压在纸面之下（最后 tag_lower），所以只在纸外的海面露出来。
+        """
         c = getattr(self, "canvas", None)
         if c is None:
             return
@@ -1827,63 +1861,187 @@ class App:
         d = max(1.0, float(getattr(self, "_dpi_scale", 1.0)))
         base = pal["canvas"]
         accent = pal["accent"]
-        line1 = _mix(base, accent, 0.32)
-        line2 = _mix(base, accent, 0.18)
-        fine = _mix(base, pal.get("on_accent", "#FFFFFF"), 0.55)
+        foam = _mix(base, pal.get("on_accent", "#FFFFFF"), 0.82)
+        ink = _mix(base, pal.get("on_accent", "#FFFFFF"), 0.55)
         t = self._sea_phase
         try:
             c.delete("seadeco")
-            # ---- 底部三道浪 ----
-            for i, (yy, amp, col, spd) in enumerate((
-                    (ch - 30 * d, 3.2 * d, line1, 0.05),
-                    (ch - 18 * d, 2.2 * d, line2, 0.08),
-                    (ch - 8 * d, 1.6 * d, line2, 0.11))):
+            # ---- 水的深浅：从远处浅海色过渡到近处稍深 ----
+            deep = _mix(base, accent, 0.12)
+            steps = 16
+            for i in range(steps):
+                k = i / float(max(1, steps - 1))
+                col = _mix(base, deep, k)
+                yy = ch * i / float(steps)
+                c.create_line(0, yy, cw, yy, fill=col,
+                              width=max(2, int(ch / steps) + 2),
+                              tags="seadeco")
+            # ---- 夜海：夜空 / 星星 / 月亮 / 月光倒影 ----
+            if getattr(self, "dark", False):
+                sky_h = max(96 * d, ch * 0.30)
+                c.create_rectangle(0, 0, cw, sky_h,
+                                   fill=_mix(base, "#04141B", 0.62),
+                                   outline="", tags="seadeco")
+                # 星星：只在夜空里，缓慢明灭
+                for i in range(52):
+                    sx = 8 + ((i * 193.7 + 21) % max(1.0, cw - 16))
+                    sy = 6 + ((i * 71.3 + 17) % max(1.0, sky_h * 0.86))
+                    tw = math.sin(t * 0.11 + i * 1.9)
+                    if tw < 0.18:
+                        continue
+                    r = (0.6 + 1.2 * tw) * d
+                    col = _mix(base, "#FFFFFF", 0.28 + 0.6 * tw)
+                    c.create_line(sx - r, sy, sx + r, sy, fill=col,
+                                  width=1, tags="seadeco")
+                    c.create_line(sx, sy - r, sx, sy + r, fill=col,
+                                  width=1, tags="seadeco")
+                # 月亮 + 径向光晕（PIL 生成，边缘自然过渡）
+                mx, my, mr = 150 * d, 88 * d, 21 * d
+                glow = self._moon_glow(d)
+                if glow is not None:
+                    c.create_image(mx, my, image=glow, tags="seadeco")
+                c.create_oval(mx - mr, my - mr, mx + mr, my + mr,
+                              fill=_mix("#FFFFFF", "#FFF4D8", 0.45),
+                              outline="", tags="seadeco")
+                for dx, dy, cr, amt in ((-6, -4, 6, 0.16), (7, 5, 4, 0.12),
+                                        (1, 9, 3, 0.10)):
+                    c.create_oval(mx + (dx - cr) * d, my + (dy - cr) * d,
+                                  mx + (dx + cr) * d, my + (dy + cr) * d,
+                                  fill=_mix("#FFF4D8", base, amt),
+                                  outline="", tags="seadeco")
+                # 月光在海上拉出的倒影
+                for j in range(16):
+                    ry = sky_h + (10 + j * 14) * d
+                    if ry > ch - 8 * d:
+                        break
+                    rw = (mr * (0.45 + 0.30 * math.sin(t * 0.09 + j * 0.9))
+                          * max(0.15, 1 - j / 20.0))
+                    c.create_line(mx - rw, ry, mx + rw, ry,
+                                  fill=_mix(base, "#FFF4D8",
+                                            0.34 * max(0.1, 1 - j / 16.0)),
+                                  width=max(1, int(1.4 * d)), tags="seadeco")
+                c.create_line(0, sky_h, cw, sky_h,
+                              fill=_mix(base, "#FFF4D8", 0.10), width=1,
+                              tags="seadeco")
+            # ---- 由远及近的四道浪：越近越深、越快 ----
+            layers = (
+                (ch * 0.18, 1.4 * d, 0.10, 0.022, False),
+                (ch - 52 * d, 2.2 * d, 0.24, 0.035, False),
+                (ch - 38 * d, 3.6 * d, 0.34, 0.052, True),
+                (ch - 22 * d, 2.8 * d, 0.22, 0.075, True),
+                (ch - 9 * d, 1.9 * d, 0.15, 0.095, False),
+            )
+            for idx, (yy, amp, amt, spd, caps) in enumerate(layers):
+                if getattr(self, "dark", False) and idx == 0:
+                    continue        # 夜里最上面那道浪在夜空里，不要
                 pts = []
                 x = -20.0
                 while x <= cw + 20:
-                    pts += [x, yy + amp * math.sin(x / (110 * d) + t * spd + i * 1.1)]
-                    x += 16 * d
-                c.create_line(pts, fill=col, width=1, smooth=True,
+                    pts += [x, yy + amp * math.sin(
+                        x / (118 * d) + t * spd + idx * 1.3)]
+                    x += 13 * d
+                c.create_line(pts, fill=_mix(base, accent, amt), width=1,
+                              smooth=True, tags="seadeco")
+                if caps:
+                    # 浪尖上的一小段白泡沫，跟着相位漂
+                    for k in range(7):
+                        fx = (k * 0.155 + 0.05) * cw + 26 * d * math.sin(
+                            t * 0.02 + k)
+                        fx = max(24 * d, min(cw - 24 * d, fx))
+                        f0 = fx - 8 * d
+                        f1 = fx
+                        f2 = fx + 8 * d
+                        y0 = yy + amp * math.sin(
+                            f0 / (118 * d) + t * spd + idx * 1.3)
+                        y1 = yy + amp * math.sin(
+                            f1 / (118 * d) + t * spd + idx * 1.3)
+                        y2 = yy + amp * math.sin(
+                            f2 / (118 * d) + t * spd + idx * 1.3)
+                        c.create_line([(f0, y0), (f1, y1), (f2, y2)],
+                                      fill=foam, width=max(1, int(1.4 * d)),
+                                      smooth=True, tags="seadeco")
+            # ---- 阳光碎金：海面上的闪光 ----
+            for i in range(30):
+                sx = 18 + ((i * 173.3 + 31) % max(1.0, cw - 36))
+                sy = 18 + ((i * 97.1 + 57) % max(1.0, ch - 36))
+                tw = math.sin(t * 0.15 + i * 1.9)
+                if tw < 0.45:
+                    continue
+                r = (0.8 + 1.7 * tw) * d
+                col = _mix(base, "#FFFFFF", 0.30 + 0.45 * tw)
+                c.create_line(sx - r, sy, sx + r, sy, fill=col, width=1,
                               tags="seadeco")
-            # ---- 海鸥（左上方慢慢滑过）----
-            gx = ((t * 1.1 * d) % (cw + 120 * d)) - 60 * d
-            gy = 54 * d + 4 * d * math.sin(t * 0.08)
-            c.create_line([(gx - 9 * d, gy), (gx, gy - 5 * d),
-                           (gx + 9 * d, gy)],
-                          fill=line1, width=1, smooth=True, tags="seadeco")
-            # ---- 小鱼：上下各一条，方向相反 ----
-            for k, (yy, spd, sgn) in enumerate(((ch * 0.24, 0.9, 1),
-                                                (ch * 0.84, -0.7, -1))):
+                c.create_line(sx, sy - r, sx, sy + r, fill=col, width=1,
+                              tags="seadeco")
+            # ---- 两只海鸥：扇翅膀 ----
+            for k, (gy, spd, scale) in enumerate(((52 * d, 1.05, 1.0),
+                                                  (84 * d, 0.8, 0.66))):
+                gx = ((t * spd * d + k * 340) % (cw + 160 * d)) - 80 * d
+                flap = (2.6 + 2.4 * math.sin(t * 0.38 + k * 1.7)) * scale * d
+                body_y = gy + 4 * d * math.sin(t * 0.08 + k)
+                c.create_line(
+                    [(gx - 10 * scale * d, body_y + flap),
+                     (gx, body_y - 1.2 * d),
+                     (gx + 10 * scale * d, body_y + flap)],
+                    fill=ink, width=1, smooth=True, tags="seadeco")
+            # ---- 两条小鱼：尾巴摆动 + 吐泡泡 ----
+            for k, (yy, spd, sgn) in enumerate(((ch * 0.26, 0.9, 1),
+                                                (ch * 0.80, -0.7, -1))):
                 fx = ((t * spd * 1.4 * d + k * 260) % (cw + 200 * d)) - 100 * d
-                self._draw_fish(c, fx, yy + 3 * d * math.sin(t * 0.12 + k),
-                                d, line1, sgn, fine)
-            # ---- 点击涟漪 ----
+                fy = yy + 3 * d * math.sin(t * 0.12 + k)
+                self._draw_fish(c, fx, fy, d, ink, sgn, foam, t, k)
+                for b in range(2):
+                    bx = fx - sgn * (16 + b * 5) * d
+                    by = fy - (b + 1) * 4 * d - (t % 30) * 0.25 * d
+                    rr = (0.8 + 0.5 * b) * d
+                    c.create_oval(bx - rr, by - rr, bx + rr, by + rr,
+                                  outline=foam, width=1, tags="seadeco")
+            # ---- 点击涟漪：四圈 + 中心闪光 + 水花 ----
             alive = []
             for (rx, ry, t0) in self._sea_ripples:
                 age = max(0.0, t - t0)
-                if age > 18:
+                if age > 20:
                     continue
                 alive.append((rx, ry, t0))
-                k = age / 18.0
-                for j in range(3):
-                    rr = (10 + 78 * k) * d * (1 - 0.22 * j)
-                    col = _mix(base, fine, max(0.0, 0.75 * (1 - k)) * (1 - 0.18 * j))
-                    c.create_oval(rx - rr, ry - rr * 0.55, rx + rr,
-                                  ry + rr * 0.55, outline=col, width=1,
-                                  tags="seadeco")
+                k = age / 20.0
+                for j in range(4):
+                    rr = (8 + 86 * k) * d * (1 - 0.16 * j)
+                    col = _mix(base, foam,
+                               max(0.0, 0.85 * (1 - k)) * (1 - 0.14 * j))
+                    c.create_oval(rx - rr, ry - rr * 0.52,
+                                  rx + rr, ry + rr * 0.52,
+                                  outline=col, width=1, tags="seadeco")
+                if age < 3:
+                    c.create_oval(rx - 3.5 * d, ry - 2.0 * d,
+                                  rx + 3.5 * d, ry + 2.0 * d,
+                                  fill=foam, outline="", tags="seadeco")
+                if age < 6:
+                    for s in range(6):
+                        ang = s * math.pi / 3 + 0.4
+                        rr = (3 + age * 2.8) * d
+                        px = rx + rr * math.cos(ang)
+                        py = ry + rr * math.sin(ang) * 0.55
+                        c.create_line(px, py,
+                                      px + 2.2 * d * math.cos(ang),
+                                      py + 2.2 * d * math.sin(ang) * 0.55,
+                                      fill=foam, width=1, tags="seadeco")
             self._sea_ripples = alive
             c.tag_lower("seadeco")
         except Exception:
             pass
 
-    def _draw_fish(self, c, x, y, d, col, dirn, eye_col):
-        """一条只画轮廓的小鱼（dirn=1 向右）。"""
+    def _draw_fish(self, c, x, y, d, col, dirn, eye_col, t=0.0, k=0):
+        """一条只画轮廓的小鱼：尾巴摆、眼睛亮（dirn=1 向右）。"""
+        wag = 2.4 * d * math.sin(t * 0.55 + k * 2.1)
         c.create_oval(x - 11 * d, y - 4.2 * d, x + 11 * d, y + 4.2 * d,
                       outline=col, width=1, tags="seadeco")
         c.create_polygon(x - dirn * 10 * d, y,
-                         x - dirn * 16 * d, y - 4.2 * d,
-                         x - dirn * 16 * d, y + 4.2 * d,
+                         x - dirn * 16 * d, y - 4.2 * d + wag,
+                         x - dirn * 16 * d, y + 4.2 * d + wag,
                          fill="", outline=col, width=1, tags="seadeco")
+        c.create_line(x + dirn * 1.5 * d, y - 2.2 * d,
+                      x + dirn * 1.5 * d, y + 2.2 * d,
+                      fill=col, width=1, tags="seadeco")
         c.create_oval(x + dirn * 6.2 * d - 1.1 * d, y - 1.1 * d,
                       x + dirn * 6.2 * d + 1.1 * d, y + 1.1 * d,
                       fill=eye_col, outline="", tags="seadeco")
@@ -2005,6 +2163,30 @@ class App:
             except Exception:
                 pass
 
+    def _show_font_menu(self):
+        """顶栏「字库」菜单：上传字体 / 自建补字 / 管理。"""
+        m = self._menu()
+        m.add_command(label="上传字体文件（TTF / OTF）…",
+                      command=self.open_import_font)
+        m.add_command(label="新建 / 补字（上传手写扫描）…",
+                      command=self.open_fontlab)
+        m.add_command(label="按当前正文缺字出模板…",
+                      command=self.open_fontlab_missing)
+        m.add_separator()
+        m.add_command(label="管理字库（工作台）…", command=self.open_fontlab)
+        m.add_command(label="刷新字库列表", command=self.reload_fonts)
+        self._popup_menu(m, self.font_menu_btn)
+
+    def open_import_font(self):
+        """上传现成字体文件（TTF/OTF/TTC）作为字库。"""
+        try:
+            import fontlab_gui
+            return fontlab_gui.import_dialog(self.root,
+                                             on_done=self.reload_fonts)
+        except Exception as e:
+            self._warn("上传字体失败：%r" % (e,))
+            return None
+
     def _show_more_menu(self):
         m = self._menu()
         m.add_command(label="保存项目…", command=self._dlg_save_project)
@@ -2020,6 +2202,10 @@ class App:
                       command=self.toggle_dark)
         m.add_command(label="日志 / 控制台", command=self.toggle_console)
         m.add_command(label="启动 AI 接口", command=self.launch_ai)
+        m.add_separator()
+        m.add_command(label="上传字体文件（TTF / OTF）…",
+                      command=self.open_import_font)
+        m.add_command(label="字库工作台…", command=self.open_fontlab)
         m.add_separator()
         m.add_command(label="快捷键与手势", command=self._show_about)
         self._popup_menu(m, self.more_btn)
@@ -2306,7 +2492,7 @@ class App:
         self.font_box.pack(fill="x")
         self.font_box.bind("<<ComboboxSelected>>", lambda e: self._on_font())
         row = ttk.Frame(body, style="Card.TFrame")
-        row.pack(fill="x", pady=(7, 8))
+        row.pack(fill="x", pady=(7, 4))
         self._button(row, "字库工作台…", self.open_fontlab,
                      "Soft.TButton", icon="sliders").pack(side="left")
         self._button(row, "补缺字…", self.open_fontlab_missing,
@@ -2314,6 +2500,10 @@ class App:
         self._button(row, "", self.reload_fonts, "TButton",
                      icon="refresh", padding=(8, 6)).pack(side="left",
                                                           padx=(5, 0))
+        row_up = ttk.Frame(body, style="Card.TFrame")
+        row_up.pack(fill="x", pady=(0, 8))
+        self._button(row_up, "上传字体文件（TTF / OTF）…", self.open_import_font,
+                     "TButton", icon="image").pack(side="left")
         self.var_variants = tk.BooleanVar(value=bool(self.cfg["variants"]))
         self.var_newsym = tk.BooleanVar(value=bool(self.cfg["newsym"]))
         ttk.Checkbutton(body, text="多套字形轮换", variable=self.var_variants,

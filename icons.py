@@ -274,6 +274,18 @@ def _gear(p, fg, ac):
                 (12 + 9.4 * _m.cos(a), 12 + 9.4 * _m.sin(a))], fg, 1.7)
 
 
+def _palm(p, fg, ac):
+    """品牌标：一棵椰子树（弯曲的树干 + 5 片下垂的叶 + 2 颗椰子）。"""
+    p.line([(13.0, 21.0), (12.2, 16.0), (12.4, 11.2)], fg, 2.4)
+    p.line([(12.4, 11.2), (9.0, 8.2), (4.6, 8.9)], ac, 2.0)
+    p.line([(12.4, 11.2), (9.6, 11.4), (5.2, 13.7)], ac, 2.0)
+    p.line([(12.4, 11.2), (11.8, 6.7), (9.3, 4.0)], ac, 2.0)
+    p.line([(12.4, 11.2), (14.9, 6.9), (18.5, 5.4)], ac, 2.0)
+    p.line([(12.4, 11.2), (15.7, 10.7), (19.5, 13.1)], ac, 2.0)
+    p.circle(11.3, 11.9, 1.1, fg, 1.1, fill=fg)
+    p.circle(13.6, 12.1, 1.1, fg, 1.1, fill=fg)
+
+
 def _sun(p, fg, ac):
     """深浅色：半月。"""
     p.circle(12, 12, 7.2, fg, 1.8)
@@ -289,6 +301,7 @@ ICONS = {
     "chat": _chat, "save": _save, "open": _open, "dots": _dots,
     "minus": _minus, "fit": _fit, "play": _play, "gear": _gear,
     "sun": _sun, "left": _left, "right": _right, "scan": _scan,
+    "palm": _palm,
     "eye": _eye,
 }
 
