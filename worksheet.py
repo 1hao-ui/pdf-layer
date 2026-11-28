@@ -1910,15 +1910,18 @@ def _split_answer_chunks(text, width_pt, max_lines, size_pt):
 
 
 def _compose_blank_answer_pages(spec, matches, pm, seed, jitter,
-                                warnings, coverage, preferred_sizes=None):
+                                warnings, coverage, preferred_sizes=None,
+                                ink=None, paper=None):
     """把答案排到「新插入的空白页」上（每页作业后插页）。
 
     返回 (pages_out, page_indices)：page_indices 是答案所属的**源页下标**，
     导出时据此把空白页插到对应作业页后面；一题太长时会自动续页。
     preferred_sizes 是 {题号: pt}：GUI 里为该题改过字号时，空白页间距也
     按该字号估算，避免大字号答案互相压住。
+    ink / paper：GUI 选的笔色与纸张（paper 只在这个模式生效）。
     """
     preferred_sizes = preferred_sizes or {}
+    answer_ink = tuple(ink or DEFAULT_INK)
     pages_out, page_indices = [], []
     running = 0
     for pg_i, pg in enumerate(spec.get("pages") or []):
@@ -1926,13 +1929,29 @@ def _compose_blank_answer_pages(spec, matches, pm, seed, jitter,
               if str(q.get("id")) in matches]
         if not qs:
             continue
-        page_w = float(pg.get("width_pt") or 595.0)
-        page_h = float(pg.get("height_pt") or 842.0)
+        src_w = float(pg.get("width_pt") or 595.0)
+        src_h = float(pg.get("height_pt") or 842.0)
+
+        def _new_sheet():
+            sheet = pm.Page(width_pt=src_w, height_pt=src_h)
+            if paper:
+                size = paper.get("size")
+                material = paper.get("material") or None
+                if size and str(size) not in ("auto", "follow", "跟随作业页"):
+                    sheet.set_paper(size=str(size),
+                                    landscape=paper.get("landscape"),
+                                    material=material)
+                elif material:
+                    # 跟随作业页尺寸时只换纸材质，不重设页面大小
+                    sheet.set_paper(material=material, resize=False)
+            return sheet
+
+        page = _new_sheet()
+        page_w, page_h = float(page.width_pt), float(page.height_pt)
         left = BLANK_ANSWER_MARGIN_PT
         right = max(left + 120.0, page_w - BLANK_ANSWER_MARGIN_PT)
         width = right - left
         bottom_limit = page_h - BLANK_ANSWER_BOTTOM_PT
-        page = pm.Page(width_pt=page_w, height_pt=page_h)
         top = BLANK_ANSWER_TOP_PT
         for q in qs:
             qid = str(q.get("id"))
@@ -1960,7 +1979,7 @@ def _compose_blank_answer_pages(spec, matches, pm, seed, jitter,
                 if page.paragraphs and top + gap + need_default > bottom_limit:
                     pages_out.append(page)
                     page_indices.append(pg_i)
-                    page = pm.Page(width_pt=page_w, height_pt=page_h)
+                    page = _new_sheet()
                     top = BLANK_ANSWER_TOP_PT
                     gap = 0.0
                 top += gap
@@ -1986,7 +2005,7 @@ def _compose_blank_answer_pages(spec, matches, pm, seed, jitter,
                     text=chunk, rect=rect, size_pt=size, line_pt=line_pt,
                     align="left", jitter=jitter,
                     seed=int(seed) + running * 17,
-                    ink=tuple(DEFAULT_INK))
+                    ink=answer_ink)
                 try:
                     para._qid = qid
                 except Exception:
@@ -2032,6 +2051,12 @@ def _export_blank_answer_pdf(pm, spec, pages_out, page_indices, out_pdf):
     def add_sheet(sheet):
         pg = out.new_page(width=float(sheet.width_pt),
                           height=float(sheet.height_pt))
+        # 空白答题页也可以选纸张材质：先把纸纹写成底图，再叠透明手写层。
+        if not sheet.paper_is_plain():
+            bg = io.BytesIO()
+            sheet.background().convert("RGB").save(bg, format="PNG")
+            pg.insert_image(pg.rect, stream=bg.getvalue(), overlay=False,
+                            keep_proportion=False)
         layer = pm.handwriting_layer(sheet)
         buf = io.BytesIO()
         layer.save(buf, format="PNG")
@@ -2078,7 +2103,7 @@ def _export_blank_answer_pdf(pm, spec, pages_out, page_indices, out_pdf):
 
 def _compose_answer_pages(spec, answers, page_model=None,
                           seed=20261118, jitter=1.0, answer_mode=None,
-                          preferred_sizes=None):
+                          preferred_sizes=None, ink=None, paper=None):
     """把答案排进 spec 的答题区，只构造 Page 对象（不落盘、不渲染位图）。
 
     这是 render_answers / preview_pages 共用的排版内核：GUI 的实时预览
@@ -2133,7 +2158,7 @@ def _compose_answer_pages(spec, answers, page_model=None,
     if mode == ANSWER_MODE_BLANK:
         pages_out, page_indices = _compose_blank_answer_pages(
             spec, matches, pm, seed, jitter, warnings, coverage,
-            preferred_sizes=preferred_sizes)
+            preferred_sizes=preferred_sizes, ink=ink, paper=paper)
         if not pages_out:
             raise ValueError("答案没有匹配到任何页面")
         return pm, pages_out, page_indices, warnings, coverage
@@ -2175,7 +2200,7 @@ def _compose_answer_pages(spec, answers, page_model=None,
             para = pm.Paragraph(
                 text=text, rect=para_rect, size_pt=size, line_pt=line_pt,
                 align="left", jitter=jitter, seed=int(seed) + i * 17,
-                ink=tuple(DEFAULT_INK))
+                ink=tuple(ink or DEFAULT_INK))
             try:
                 para._qid = qid        # GUI 的 page_model 代理按题目注入覆盖
             except Exception:
@@ -2198,7 +2223,7 @@ def _compose_answer_pages(spec, answers, page_model=None,
 
 def render_answers(spec, answers, out_pdf=None, out_png=None, page_model=None,
                    seed=20261118, jitter=1.0, answer_mode=None,
-                   preferred_sizes=None):
+                   preferred_sizes=None, ink=None, paper=None):
     """把答案手写排进 spec 的答题区并导出 PDF / PNG。
 
     参数
@@ -2212,6 +2237,9 @@ def render_answers(spec, answers, out_pdf=None, out_png=None, page_model=None,
     answer_mode: "inline"（默认，写回原页答题区）/"blank"（每页作业后插
                  空白页写答案）；也读 spec["answer_mode"]。
     preferred_sizes: {题号: pt}，用户为某题指定的字号（空白页排间距用）。
+    ink        : (r,g,b) 手写笔色；默认 worksheet.DEFAULT_INK。
+    paper      : {"size": A4|...|"auto", "landscape": bool,
+                  "material": clean|...}；只在 blank 模式生效。
 
     返回 (pdf_path, warnings, coverage_summary)；答案一个都没匹配到题目时
     抛 ValueError（CLI/API 转成明确错误）。
@@ -2219,7 +2247,8 @@ def render_answers(spec, answers, out_pdf=None, out_png=None, page_model=None,
     mode = _resolve_answer_mode(spec, answer_mode)
     pm, pages_out, page_indices, warnings, coverage = _compose_answer_pages(
         spec, answers, page_model=page_model, seed=seed, jitter=jitter,
-        answer_mode=mode, preferred_sizes=preferred_sizes)
+        answer_mode=mode, preferred_sizes=preferred_sizes, ink=ink,
+        paper=paper)
     pdf_path = None
     if out_pdf:
         out_dir = os.path.dirname(os.path.abspath(out_pdf))
@@ -2251,7 +2280,7 @@ def render_answers(spec, answers, out_pdf=None, out_png=None, page_model=None,
 
 def preview_pages(spec, answers, page_model=None, only_page=None,
                   seed=20261118, jitter=1.0, answer_mode=None,
-                  preferred_sizes=None):
+                  preferred_sizes=None, ink=None, paper=None):
     """「实时预览」内核：把答案手写叠加到作业页背景，纯内存、不写任何文件。
 
     与 render_answers 共用 _compose_answer_pages 排版，再对需要的页调用
@@ -2264,13 +2293,15 @@ def preview_pages(spec, answers, page_model=None, only_page=None,
                 答案覆盖率等统计仍按全量计算。
     answer_mode : "blank" 时返回的图是「该页作业后面新插的空白答题页」，
                 同一源页有多张答题页时只返回第一张（预览用）。
+    ink / paper : 与 render_answers 相同；paper 只在 blank 模式生效。
 
     返回 (images, warnings, coverage)，images 为 {页下标: PIL.Image(RGB)}。
     """
     mode = _resolve_answer_mode(spec, answer_mode)
     pm, pages_out, page_indices, warnings, coverage = _compose_answer_pages(
         spec, answers, page_model=page_model, seed=seed, jitter=jitter,
-        answer_mode=mode, preferred_sizes=preferred_sizes)
+        answer_mode=mode, preferred_sizes=preferred_sizes, ink=ink,
+        paper=paper)
     images = {}
     for page_idx, page in zip(page_indices, pages_out):
         if only_page is not None and int(page_idx) != int(only_page):

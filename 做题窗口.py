@@ -10,9 +10,10 @@
 做五件事：
     1. 打开作业页（PDF / 图片）；
     2. 自动划题：调用 worksheet.analyze()，只显示题目列表和答题区高亮，**不渲染、不写文件**；
-    3. 手动查看/修改答案（编辑框实时进内存，切题不丢），可改字号/对齐；
+    3. 手动查看/修改答案（编辑框实时进内存，切题不丢），可改字号/对齐/笔色；
        **在预览页上按住左键拖框即可划定当前题答题区**（高级里仍保留 4 个 pt 数值做精确微调）；
-       题目页没有留白时勾「答案写到新空白页」，生成时每页作业后插空白页写答案；
+       题目页没有留白时勾「答案写到新空白页」，生成时每页作业后插空白页写答案，
+       并可选择空白答题页的纸张尺寸（含「跟随作业页」）、横向与 6 种纸张材质；
     4. **实时叠加预览**：AI 作答 / 编辑答案后自动把手写效果叠到作业页上（纯内存，
        防抖 + 后台线程 + 按答案签名缓存），不导出 PDF 也能看到最终效果；预览支持
        滚轮缩放、拖拽平移、适合窗口；
@@ -53,6 +54,7 @@ from tkinter import font as tkfont         # noqa: E402
 from PIL import Image, ImageTk             # noqa: E402
 
 import worksheet                           # noqa: E402
+import page_model as PM                    # noqa: E402  （纸张尺寸/材质定义）
 
 try:                                       # 线性图标（缺模块时按钮退回纯文字）
     import icons as _icons
@@ -89,6 +91,29 @@ MIN_RECT_W_PT = 20.0
 MIN_RECT_H_PT = 14.0
 
 ALIGN_LABELS = {"左对齐": "left", "居中": "center", "右对齐": "right"}
+
+# 常用笔色（与 gui.py 的 INK_PRESETS 保持一致；做题窗口不 import gui）
+INK_PRESETS = (
+    ("墨黑", (16, 16, 18)),
+    ("蓝黑", (30, 45, 78)),
+    ("纯蓝", (24, 64, 160)),
+    ("朱红", (170, 42, 46)),
+    ("墨绿", (32, 96, 66)),
+    ("棕褐", (92, 64, 40)),
+)
+PAPER_FOLLOW_LABEL = "跟随作业页"
+
+
+def _hex(rgb):
+    """(r,g,b) → '#rrggbb'。"""
+    r, g, b = (max(0, min(255, int(v))) for v in tuple(rgb)[:3])
+    return "#%02x%02x%02x" % (r, g, b)
+
+
+def _contrast_fg(rgb):
+    """按亮度选黑/白字。"""
+    r, g, b = (max(0, min(255, int(v))) for v in tuple(rgb)[:3])
+    return "#1b1712" if (0.299 * r + 0.587 * g + 0.114 * b) > 150 else "#ffffff"
 
 
 def _mix_hex(color_a, color_b, t):
@@ -498,6 +523,11 @@ class WorksheetWindow:
         self.answers = {}            # id -> 答案文本（实时内存）
         self.sizes = {}              # id -> 字号 pt（用户改过才有）
         self.aligns = {}             # id -> left/center/right
+        # ---- 手写样式（本题窗口内生效，不写配置）----
+        self.ink_rgb = tuple(worksheet.DEFAULT_INK)
+        self.paper_size = "auto"     # auto = 跟随作业页
+        self.paper_landscape = False
+        self.paper_kind = "clean"
         self.current = None          # 当前题目索引（self.questions 下标）
         self.page = 0
         self.generated_path = None
@@ -1127,6 +1157,76 @@ class WorksheetWindow:
         self.align_box.bind("<<ComboboxSelected>>",
                             lambda e: self._on_size_align_change())
 
+        # ---- 笔色 / 纸张（字体颜色 + 空白答题页纸型）----
+        ink_row = ttk.Frame(parent, style=self._style("card", "Card.TFrame"))
+        ink_row.pack(fill="x", pady=(6, 0))
+        ttk.Label(ink_row, text="笔色",
+                  style=self._style("card_muted", "Card.Muted.TLabel")
+                  ).pack(side="left")
+        ink_chips = ttk.Frame(ink_row, style=self._style("card", "Card.TFrame"))
+        ink_chips.pack(side="left", fill="x", expand=True, padx=(3, 0))
+        self._ink_chips = {}
+        for label, rgb in INK_PRESETS:
+            b = tk.Button(ink_chips, text=label, bd=0, relief="flat",
+                          cursor="hand2", padx=2, pady=3,
+                          font=(self.font_family, 9), bg=_hex(rgb),
+                          fg=_contrast_fg(rgb), activebackground=_hex(rgb),
+                          activeforeground=_contrast_fg(rgb),
+                          highlightthickness=1,
+                          highlightbackground=self.pal.get("border", "#E7D9C2"),
+                          command=lambda v=rgb: self._on_ink_change(v))
+            b.pack(side="left", padx=(0, 3))
+            self._ink_chips[tuple(rgb)] = b
+
+        paper_row = ttk.Frame(parent, style=self._style("card", "Card.TFrame"))
+        paper_row.pack(fill="x", pady=(5, 0))
+        ttk.Label(paper_row, text="纸张",
+                  style=self._style("card_muted", "Card.Muted.TLabel")
+                  ).pack(side="left")
+        self.var_paper_size = tk.StringVar(value=PAPER_FOLLOW_LABEL)
+        self.paper_size_box = ttk.Combobox(
+            paper_row, textvariable=self.var_paper_size, state="readonly",
+            width=13, values=([PAPER_FOLLOW_LABEL]
+                              + [PM.paper_size_label(k)
+                                 for k in PM.PAPER_SIZE_ORDER]))
+        self.paper_size_box.pack(side="left", padx=(3, 4))
+        self.paper_size_box.bind("<<ComboboxSelected>>",
+                                 lambda e: self._on_paper_style_change())
+        self.var_paper_land = tk.BooleanVar(value=False)
+        self.paper_land_check = ttk.Checkbutton(
+            paper_row, text="横向", variable=self.var_paper_land,
+            command=self._on_paper_style_change)
+        self.paper_land_check.pack(side="left")
+
+        mat_row = ttk.Frame(parent, style=self._style("card", "Card.TFrame"))
+        mat_row.pack(fill="x", pady=(4, 0))
+        ttk.Label(mat_row, text="材质",
+                  style=self._style("card_muted", "Card.Muted.TLabel")
+                  ).pack(side="left")
+        mat_chips = ttk.Frame(mat_row, style=self._style("card", "Card.TFrame"))
+        mat_chips.pack(side="left", fill="x", expand=True, padx=(3, 0))
+        self._paper_chips = {}
+        for key in PM.PAPER_MATERIAL_ORDER:
+            spec = PM.PAPER_MATERIALS[key]
+            b = tk.Button(mat_chips, text=spec["label"], bd=0, relief="flat",
+                          cursor="hand2", padx=2, pady=3,
+                          font=(self.font_family, 9), bg=_hex(spec["base"]),
+                          fg=_contrast_fg(spec["base"]),
+                          activebackground=_hex(spec["base"]),
+                          activeforeground=_contrast_fg(spec["base"]),
+                          highlightthickness=1,
+                          highlightbackground=self.pal.get("border", "#E7D9C2"),
+                          command=lambda k=key: self._on_paper_material(k))
+            b.pack(side="left", padx=(0, 3))
+            self._paper_chips[key] = b
+        self.paper_note = ttk.Label(
+            parent, text="", style=self._style("card_muted",
+                                              "Card.Muted.TLabel"),
+            wraplength=330)
+        self.paper_note.pack(anchor="w", pady=(2, 0))
+        self._update_style_chips()
+        self._sync_paper_controls()
+
         # ---- 输出：目录 / 文件名（窄栏里用图标按钮省地方）----
         out1 = ttk.Frame(parent, style=self._style("card", "Card.TFrame"))
         out1.pack(fill="x", pady=(6, 0))
@@ -1181,6 +1281,7 @@ class WorksheetWindow:
         ttk.Checkbutton(mode_row, text="答案写到新空白页",
                         variable=self.var_blank,
                         command=self._on_answer_mode_change).pack(side="left")
+        self._sync_paper_controls()
 
     def _collapsible(self, parent, title, open=False):
         """卡片内可折叠小节；返回内容容器。"""
@@ -1689,6 +1790,119 @@ class WorksheetWindow:
                     self.var_align.get()))
         self._schedule_live_preview()
 
+    # ------------------------------------------------------------ 笔色 / 纸张
+    def _on_ink_change(self, rgb):
+        try:
+            self.ink_rgb = tuple(max(0, min(255, int(v)))
+                                 for v in tuple(rgb)[:3])
+        except Exception:
+            return
+        self._update_style_chips()
+        name = next((lab for lab, val in INK_PRESETS
+                     if tuple(val) == self.ink_rgb), "")
+        self._after_style_change("笔色：%s（%s）" % (
+            ",".join(str(c) for c in self.ink_rgb), name or "自定义"))
+
+    def _on_paper_style_change(self):
+        label = str(self.var_paper_size.get())
+        self.paper_size = ("auto" if label == PAPER_FOLLOW_LABEL
+                           else label.split(" ")[0])
+        self.paper_landscape = bool(self.var_paper_land.get())
+        self._sync_paper_controls()
+        if self.paper_size == "auto":
+            msg = "纸张：跟随作业页尺寸 · %s" % self._paper_material_name()
+        else:
+            msg = "纸张：%s · %s · %s" % (
+                PM.paper_size_label(self.paper_size, self.paper_landscape),
+                "横向" if self.paper_landscape else "纵向",
+                self._paper_material_name())
+        self._after_style_change(msg)
+
+    def _on_paper_material(self, key):
+        if key not in PM.PAPER_MATERIALS:
+            return
+        self.paper_kind = key
+        self._sync_paper_controls()
+        self._after_style_change("纸张材质：%s" % self._paper_material_name())
+
+    def _paper_material_name(self):
+        return (PM.PAPER_MATERIALS.get(self.paper_kind)
+                or PM.PAPER_MATERIALS["clean"])["label"]
+
+    def _paper_cfg(self):
+        """传给 worksheet 的纸张设置；inline 模式不传。"""
+        return {"size": self.paper_size,
+                "landscape": bool(self.paper_landscape),
+                "material": self.paper_kind}
+
+    def _update_style_chips(self):
+        labels = {tuple(rgb): lab for lab, rgb in INK_PRESETS}
+        for rgb, btn in getattr(self, "_ink_chips", {}).items():
+            sel = tuple(rgb) == tuple(self.ink_rgb)
+            try:
+                btn.configure(
+                    text=("✓" + labels.get(tuple(rgb), "")) if sel
+                    else labels.get(tuple(rgb), ""),
+                    highlightthickness=2 if sel else 1,
+                    highlightbackground=(self.pal.get("accent")
+                                         if sel else self.pal.get("border")))
+            except Exception:
+                pass
+        for key, btn in getattr(self, "_paper_chips", {}).items():
+            sel = (key == self.paper_kind)
+            label = PM.PAPER_MATERIALS.get(key, {}).get("label", key)
+            try:
+                btn.configure(
+                    text=("✓" + label) if sel else label,
+                    highlightthickness=2 if sel else 1,
+                    highlightbackground=(self.pal.get("accent")
+                                         if sel else self.pal.get("border")))
+            except Exception:
+                pass
+
+    def _sync_paper_controls(self):
+        """纸张只在「答案写到新空白页」模式生效；其它模式置灰。"""
+        blank = self._answer_mode() == worksheet.ANSWER_MODE_BLANK
+        auto = (self.paper_size == "auto")
+        try:
+            self.paper_size_box.configure(
+                state="readonly" if blank else "disabled")
+        except Exception:
+            pass
+        try:
+            self.paper_land_check.configure(
+                state=("normal" if blank and not auto else "disabled"))
+        except Exception:
+            pass
+        for btn in getattr(self, "_paper_chips", {}).values():
+            try:
+                btn.configure(state="normal" if blank else "disabled")
+            except Exception:
+                pass
+        if not blank:
+            note = "纸张只用于「答案写到新空白页」；当前答案写回作业原页"
+        elif auto:
+            note = "跟随作业页尺寸，只替换纸张材质"
+        else:
+            note = "答案写在新插入的空白答题页（%s）" % PM.paper_size_label(
+                self.paper_size, self.paper_landscape)
+        try:
+            self.paper_note.configure(text=note)
+        except Exception:
+            pass
+
+    def _after_style_change(self, msg):
+        """笔色 / 纸张变化：清掉已生成预览，按新样式重刷实时预览。"""
+        self._update_style_chips()
+        self.generated_mode = False
+        self._generated_img = None
+        self._generated_page = 0
+        self._invalidate_live()
+        self.log(msg + "（预览已按新样式刷新）")
+        self._redraw_canvas()
+        self._update_status()
+        self._schedule_live_preview(True, 80)
+
     def _apply_rect(self):
         """「应用数值」：从高级里的 4 个输入框取答题区。"""
         q = self._selected_question()
@@ -1790,6 +2004,7 @@ class WorksheetWindow:
         self._rebuild_question_views()
         self._sync_editor_from_current()
         self._sync_select_control()
+        self._sync_paper_controls()
         self._invalidate_live()
         self._redraw_canvas()
         self._update_status()
@@ -1898,7 +2113,9 @@ class WorksheetWindow:
                  sorted((str(k), float(v)) for k, v in self.sizes.items()),
                  sorted((str(k), str(v)) for k, v in self.aligns.items()),
                  sorted((k, v) for k, v in rects.items()),
-                 self._answer_mode()],
+                 self._answer_mode(),
+                 list(self.ink_rgb),
+                 self.paper_size, bool(self.paper_landscape), self.paper_kind],
                 ensure_ascii=False, sort_keys=True, default=str)
         except Exception:
             return repr(sorted(a.items()))
@@ -1950,6 +2167,10 @@ class WorksheetWindow:
                     if overrides else None)
         except Exception:
             shim = None
+        ink = tuple(self.ink_rgb)
+        mode = self._answer_mode()
+        paper = (self._paper_cfg()
+                 if mode == worksheet.ANSWER_MODE_BLANK else None)
         self._live_busy = True
         self._live_sig = sig
 
@@ -1957,8 +2178,8 @@ class WorksheetWindow:
             try:
                 imgs, warns, cov = worksheet.preview_pages(
                     spec, answers, page_model=shim, only_page=page_idx,
-                    answer_mode=self._answer_mode(),
-                    preferred_sizes=self.sizes)
+                    answer_mode=mode,
+                    preferred_sizes=self.sizes, ink=ink, paper=paper)
                 self._live_queue.put((sig, imgs, warns, cov, None))
             except Exception as e:            # noqa: BLE001
                 self._live_queue.put((sig, {}, [], {}, e))
@@ -2959,10 +3180,13 @@ class WorksheetWindow:
             overrides = self._build_overrides(set(answers))
             shim = (make_page_model_shim(overrides)
                     if overrides else None)
+            mode = self._answer_mode()
             pdf_path, warnings, coverage = worksheet.render_answers(
                 self.spec, answers, out_pdf=out_pdf, page_model=shim,
-                answer_mode=self._answer_mode(),
-                preferred_sizes=self.sizes)
+                answer_mode=mode,
+                preferred_sizes=self.sizes, ink=tuple(self.ink_rgb),
+                paper=(self._paper_cfg()
+                       if mode == worksheet.ANSWER_MODE_BLANK else None))
         except Exception:
             tb = traceback.format_exc()
             self._set_busy(False)

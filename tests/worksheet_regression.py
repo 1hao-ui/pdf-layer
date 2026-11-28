@@ -96,6 +96,33 @@ def test_blank_answer_pages(tmp, spec):
     return pdf
 
 
+def test_blank_answer_paper_and_ink(tmp, spec):
+    """空白答题页可选纸张尺寸/材质，笔色能写进 PDF。"""
+    import numpy as np
+    out = os.path.join(tmp, "blank_style.pdf")
+    pdf, _warns, cov = worksheet.render_answers(
+        spec, {"1": "解：由图可知电流为2A。"}, out_pdf=out,
+        answer_mode=worksheet.ANSWER_MODE_BLANK, ink=(170, 42, 46),
+        paper={"size": "B5", "landscape": False, "material": "kraft"})
+    blank = cov.get("blank_pages") or {}
+    assert blank, "没有生成空白答题页"
+    page_idx = blank[min(blank)][0]
+    doc = fitz.open(pdf)
+    try:
+        pg = doc[page_idx]
+        assert abs(pg.rect.width - 498.9) < 0.6, pg.rect
+        assert abs(pg.rect.height - 708.7) < 0.6, pg.rect
+        pix = pg.get_pixmap(dpi=60)
+        arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
+            pix.height, pix.width, pix.n)[:, :, :3].astype(np.int16)
+        corner = arr[8, 8]
+        assert corner[0] > corner[1] > corner[2], "牛皮纸底色不对：%r" % (corner,)
+        red = (arr[:, :, 0] - arr[:, :, 1] > 80).sum()
+        assert red > 30, "红笔笔迹没有写进 PDF（红色像素 %d）" % red
+    finally:
+        doc.close()
+
+
 def test_long_answer_continues(tmp, spec):
     """一题特别长时应自动续页，而不是截断或报错。"""
     long_text = "解：" + ("这是很长的答案，用来验证空白页续页。" * 80)
@@ -266,6 +293,8 @@ def main():
         print("[ok] 插图参与划区：题目区含图、答题区避让")
         test_blank_answer_pages(tmp, fig_spec)
         print("[ok] 空白答题页：插入顺序与页数正确")
+        test_blank_answer_paper_and_ink(tmp, fig_spec)
+        print("[ok] 空白答题页：纸张尺寸/材质 + 笔色写进 PDF")
         test_long_answer_continues(tmp, fig_spec)
         print("[ok] 长答案：自动续页")
         test_inline_keeps_page_count(tmp, fig_spec)

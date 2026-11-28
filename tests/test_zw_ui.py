@@ -97,6 +97,36 @@ def main():
               app.var_outdir is not None and app.var_outname is not None
               and len(app.var_rect) == 4)
 
+        # ---- 笔色 / 纸张控件 ----
+        check("笔色色块 6 个", len(app._ink_chips) == 6, len(app._ink_chips))
+        check("纸张材质色块 6 个", len(app._paper_chips) == 6,
+              len(app._paper_chips))
+        check("纸张默认跟随作业页", app.paper_size == "auto", app.paper_size)
+        check("inline 模式纸张控件置灰",
+              str(app.paper_size_box.cget("state")) == "disabled",
+              app.paper_size_box.cget("state"))
+        app._on_ink_change((170, 42, 46))
+        check("笔色可选红色", app.ink_rgb == (170, 42, 46), app.ink_rgb)
+        app.var_blank.set(True)
+        app._on_answer_mode_change()
+        check("空白页模式纸张可选",
+              str(app.paper_size_box.cget("state")) == "readonly",
+              app.paper_size_box.cget("state"))
+        app.var_paper_size.set("B5  176×250")
+        app.var_paper_land.set(True)
+        app._on_paper_style_change()
+        check("纸张尺寸= B5 横向",
+              app.paper_size == "B5" and app.paper_landscape is True,
+              (app.paper_size, app.paper_landscape))
+        app._on_paper_material("kraft")
+        check("纸张材质=牛皮", app.paper_kind == "kraft", app.paper_kind)
+        check("选中色块打勾",
+              "✓" in app._ink_chips[(170, 42, 46)].cget("text")
+              and "✓" in app._paper_chips["kraft"].cget("text"))
+        sig = app._answer_signature({"1": "测试"})
+        check("预览签名含笔色/纸张",
+              "170" in sig and "kraft" in sig and "B5" in sig)
+
         # ---- 状态 ----
         app._update_status()
         check("状态栏有文案", bool(app.status_label.cget("text")))
