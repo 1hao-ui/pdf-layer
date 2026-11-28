@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import os
 
-# ⚠️ 部署后必须改这里。客户端会往 ACTIVATION_URL + "/api/activate" 发 POST。
-ACTIVATION_URL = "http://127.0.0.1:8787"
+# 线上激活服务（Cloudflare Pages，2026-11-28 部署）
+# 客户端会往 ACTIVATION_URL + "/api/activate" 发 POST。
+# 本地调试时用环境变量覆盖：set ZTI_ACTIVATION_URL=http://127.0.0.1:8787
+ACTIVATION_URL = "https://ziti-license.pages.dev"
 
 # 单次激活请求超时（秒）。网络差时宁可早点失败给出提示，也不要让启动界面卡住。
 TIMEOUT = 8.0

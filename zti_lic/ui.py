@@ -119,6 +119,15 @@ def _run_tk(status, app_version: str | None) -> bool:
     from . import _console
     _console.debug_log("_run_tk: enter (product=%r)" % status.product)
 
+    # 高分屏下先声明 DPI 感知，否则整个激活窗会被 Windows 位图放大（发虚）
+    try:
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except Exception:
+        try:
+            ctypes.windll.user32.SetProcessDPIAware()
+        except Exception:
+            pass
     root = tk.Tk()
     root.title("激活 · %s" % lic.product_display_name(status.product))
     root.resizable(False, False)
@@ -126,8 +135,14 @@ def _run_tk(status, app_version: str | None) -> bool:
     result = {"ok": False, "busy": False}
     machine_text = status.machine_code or machine.machine_code()
 
-    outer = tk.Frame(root, padx=18, pady=16)
+    sand = "#F6EDDD"
+    cream = "#FFFCF4"
+    ink = "#322C24"
+    accent = "#0C7F8B"
+    root.configure(bg=sand)
+    outer = tk.Frame(root, padx=16, pady=14, bg=sand)
     outer.pack(fill="both", expand=True)
+    _beach_header(outer)
 
     tk.Label(outer, text="本机机器码", anchor="w").pack(fill="x")
     code_var = tk.StringVar(value=machine_text)
@@ -260,10 +275,137 @@ def _run_tk(status, app_version: str | None) -> bool:
 
     root.bind("<Return>", do_activate)
     root.protocol("WM_DELETE_WINDOW", do_quit)
+
+    # 沙滩色：标签/输入框/按钮都跟着换，别留系统灰
+    def _sandify(w):
+        try:
+            if isinstance(w, (tk.Frame, tk.Label)):
+                w.configure(bg=sand)
+            elif isinstance(w, tk.Entry):
+                w.configure(bg=cream, fg=ink, relief="flat",
+                            highlightthickness=1,
+                            highlightbackground="#E7D9C2",
+                            highlightcolor=accent, insertbackground=ink)
+        except Exception:
+            pass
+        for ch in w.winfo_children():
+            _sandify(ch)
+
+    _sandify(root)
+    try:
+        for b in (copy_btn, file_btn):
+            b.configure(bg=cream, fg=ink, activebackground="#EAF6F4",
+                        activeforeground=ink, relief="flat", bd=0, pady=4,
+                        cursor="hand2")
+        activate_btn.configure(bg=accent, fg="white",
+                               activebackground="#0A6A74",
+                               activeforeground="white", relief="flat", bd=0,
+                               pady=4, padx=6, cursor="hand2")
+    except Exception:
+        pass
+
+    # 加了顶部横幅后按钮行变宽：按内容把窗口撑到够宽，别把「退出」挤出屏幕
     root.update_idletasks()
+    try:
+        w = max(520, root.winfo_reqwidth())
+        h = root.winfo_reqheight()
+        root.geometry("%dx%d" % (w, h))
+        root.update_idletasks()
+    except Exception:
+        pass
     _center(root)
     root.mainloop()
     return bool(result["ok"])
+
+
+def _beach_header(parent, height: int = 112) -> None:
+    """激活窗口顶部的一条海滩：太阳 / 海 / 沙 / 椰子树 / 贝壳。
+
+    自包含（只用 tkinter + math），不依赖主程序的 theme.py，打包进三个 exe
+    也不会缺依赖。椰子树用填充多边形画剪影，小尺寸下也认得出。
+    """
+    import math
+    import tkinter as tk
+
+    c = tk.Canvas(parent, height=height, bg="#FDE7C0",
+                  highlightthickness=0, bd=0)
+    c.pack(fill="x", pady=(0, 12))
+
+    def leaf(cx, cy, ang, ln, wd):
+        left, right = [], []
+        for i in range(11):
+            t = i / 10.0
+            a = ang - 0.55 * t * t
+            r = ln * t
+            x = cx + r * math.cos(a)
+            y = cy + r * math.sin(a) + 0.55 * ln * t * t
+            w = wd * (1.0 - t) ** 0.6
+            nx, ny = -math.sin(a), math.cos(a)
+            left.append((x + nx * w, y + ny * w))
+            right.append((x - nx * w, y - ny * w))
+        return left + right[::-1]
+
+    def draw(_event=None):
+        try:
+            w = max(280, c.winfo_width())
+            h = height
+            c.delete("all")
+            c.create_rectangle(0, 0, w, h * 0.50, fill="#FDE7C0", outline="")
+            # 太阳
+            sx, sy, sr = w * 0.82, h * 0.16, 15
+            c.create_oval(sx - sr, sy - sr, sx + sr, sy + sr,
+                          fill="#FFD27A", outline="")
+            # 海 + 浪
+            c.create_rectangle(0, h * 0.50, w, h * 0.70,
+                               fill="#8FD3CF", outline="")
+            c.create_line(0, h * 0.50, w, h * 0.50,
+                          fill="#FFFCF4", width=2)
+            for k in range(3):
+                pts = []
+                x = -10
+                while x <= w + 14:
+                    pts += [x, h * (0.555 + k * 0.045)
+                            + 1.6 * math.sin(x / 34.0 + k * 1.2)]
+                    x += 12
+                c.create_line(pts, fill="#4FAEAC", smooth=True)
+            # 沙
+            c.create_rectangle(0, h * 0.70, w, h, fill="#F1E4CF", outline="")
+            # 椰子树剪影
+            bx, by = w * 0.15, h * 0.90
+            cx, cy = bx + 5, by - 60
+            trunk = "#3A2E22"
+            c.create_line(bx, by, bx + 3, by - 30, cx, cy,
+                          fill=trunk, width=6, smooth=True)
+            for ang, ln, wd in ((-2.55, 36, 6.0), (-2.05, 40, 6.5),
+                                (-1.50, 38, 6.0), (-0.95, 34, 5.6),
+                                (0.55, 35, 5.4)):
+                c.create_polygon(leaf(cx, cy, ang, ln, wd),
+                                 fill=trunk, outline="", smooth=True)
+            for dx, dy in ((-3, 7), (6, 8)):
+                c.create_oval(cx + dx - 3.5, cy + dy - 3.5,
+                              cx + dx + 3.5, cy + dy + 3.5,
+                              fill=trunk, outline="")
+            # 贝壳 + 海星
+            for dx, dy, r in ((70, 8, 8), (96, 14, 6)):
+                c.create_arc(bx + dx - r, by + dy - r * 0.7,
+                             bx + dx + r, by + dy + r * 0.9,
+                             start=10, extent=160,
+                             fill="#F2A896", outline="#B97862")
+            c.create_polygon(
+                bx + 140, by + 2, bx + 146, by + 12, bx + 157, by + 12,
+                bx + 148, by + 20, bx + 152, by + 31,
+                bx + 140, by + 24, bx + 128, by + 31, bx + 132, by + 20,
+                bx + 123, by + 12, bx + 134, by + 12,
+                fill="#DE6A55", outline="#B97862")
+            # 水草
+            c.create_line(bx + 210, by + 20, bx + 214, by + 4,
+                          bx + 218, by + 20, fill="#5E8C5A",
+                          width=2, smooth=True)
+        except Exception:
+            pass
+
+    c.bind("<Configure>", lambda e: draw())
+    c.after(60, draw)
 
 
 def _center(window) -> None:
