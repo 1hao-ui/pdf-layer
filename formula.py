@@ -205,31 +205,10 @@ def _thin_formula_image(img, level):
     if img is None or img.mode != "RGBA" or level <= 0:
         return img
     try:
-        import numpy as np
-        from scipy import ndimage
-        from PIL import ImageFilter
+        import inkproc
+        return inkproc.thin_rgba(img, max(0.5, float(level) / 70.0))
     except Exception:
         return img
-    strength = max(0.5, float(level) / 70.0)        # 140 -> 2.0
-    a = np.asarray(img.getchannel("A")).astype(np.float32)
-    mask = a > 30
-    if not mask.any():
-        return img
-    dist = ndimage.distance_transform_edt(mask)
-    rad = ndimage.maximum_filter(dist, size=9)      # 局部笔画半径（px）
-    thick = rad >= max(1.6, 2.4 - 0.4 * strength)   # 只挑粗笔画
-    edge = (dist <= 1.4) & thick                    # 粗笔画的外沿
-    factor = np.where(edge, max(0.35, 1.0 - 0.25 * strength), 1.0)
-    a2 = np.clip(a * factor, 0, 255)
-    blurred = np.asarray(Image.fromarray(a2.astype(np.uint8), "L")
-                         .filter(ImageFilter.GaussianBlur(0.5))).astype(np.float32)
-    a2 = np.minimum(a, blurred)          # 不扩散到原墨迹之外（避免字高变大）
-    # 小字号（分式上下、上下角标）在缩略/打印时会因抗锯齿显得发灰：
-    # 整体补一点墨色（只加不超 255），让细笔画与主体一样清楚。
-    a2 = np.clip(a2 * 1.25, 0, 255)
-    out = img.copy()
-    out.putalpha(Image.fromarray(a2.astype(np.uint8), "L"))
-    return out
 
 
 def _box(latex, size_px, font_path, ink, math_font_path=None, display=False):

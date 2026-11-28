@@ -276,6 +276,39 @@ def test_unified_size_parameters():
         "4 套符号的数字中位高差太大：%r" % (medians,))
 
 
+def test_import_font_file():
+    """上传现成字体文件 → 登记 + 校准 + 设为当前。"""
+    from fontlib import importer
+    probe = importer.probe(HAN)
+    assert probe["ok"] and probe["kind"] == "han" and probe["han"] > 100
+    tmp = tempfile.mkdtemp(prefix="imp_")
+    old = os.environ.get("ZTIFONT_ROOT")
+    os.environ["ZTIFONT_ROOT"] = tmp
+    try:
+        m = importer.import_fonts([HAN], lib_id="imp-test", name="导入测试",
+                                  activate=True, write_calibration=False)
+        assert m["char_count"] > 100
+        assert os.path.exists(os.path.join(m["target_dir"], "pass1.ttf"))
+        assert os.path.exists(os.path.join(m["target_dir"], "字库.json"))
+        assert (registry.load().get("active") or {}).get("han") == "imp-test"
+        assert registry.active_font("han").endswith("pass1.ttf")
+        # 重复 id 要报错，避免悄悄覆盖
+        try:
+            importer.import_fonts([HAN], lib_id="imp-test",
+                                  write_calibration=False)
+        except FileExistsError:
+            pass
+        else:
+            raise AssertionError("重复 id 应当报错")
+        registry.unregister("imp-test", delete_files=True)
+    finally:
+        if old is None:
+            os.environ.pop("ZTIFONT_ROOT", None)
+        else:
+            os.environ["ZTIFONT_ROOT"] = old
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 # ---------------------------------------------------------------- 清理口径
 def test_no_third_party_fonts():
     fonts_dir = os.path.join(REPO, "fonts")
@@ -283,8 +316,14 @@ def test_no_third_party_fonts():
                  "MaShanZheng-Regular-merged.ttf",
                  "ZhiMangXing-Regular-merged.ttf"):
         assert not os.path.exists(os.path.join(fonts_dir, name)), name
+    bad = ("龙藏", "LongCang", "MaShan", "马善政", "ZhiMang", "志莽")
     for lib in registry.libraries():
-        assert lib.get("license") == "author", lib["id"]
+        # 内置库必须是作者亲笔；用户上传的标 user，但不能是已知第三方字体
+        assert lib.get("license") in ("author", "user"), lib["id"]
+        if lib.get("builtin"):
+            assert lib.get("license") == "author", lib["id"]
+        blob = (lib.get("name") or "") + " " + (lib.get("dir") or "")
+        assert not any(b.lower() in blob.lower() for b in bad), lib["id"]
 
 
 # ---------------------------------------------------------------- runner

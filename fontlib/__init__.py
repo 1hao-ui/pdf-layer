@@ -11,6 +11,7 @@ template.py  分页 A4 书写模板（任意字表、任意格大小、角标定
 intake.py    扫描件/数位板导出 → 网格对齐 → 自动阈值 → 逐格切字
 autotune.py  墨迹度量、自动参数建议、逐字微调、渲染校准（size_scale/adv_scale）
 builder.py   归一化后的字块 → 多套 glyf TTF + 报告 + 预览
+importer.py  直接导入现成字体文件（TTF/OTF/TTC）→ 登记 + 自动校准
 preview.py   1:1 效果示例（同段样文并排）
 registry.py  字体输出/字库索引.json 的读写、启用、回滚
 session.py   一次建库过程的可续传工程（session.json）
@@ -22,6 +23,6 @@ session.py   一次建库过程的可续传工程（session.json）
 __version__ = "1.0.0"
 
 __all__ = [
-    "charsets", "template", "intake", "autotune", "builder",
+    "charsets", "template", "intake", "autotune", "builder", "importer",
     "preview", "registry", "session",
 ]

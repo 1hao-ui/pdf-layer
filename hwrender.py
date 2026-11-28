@@ -159,33 +159,15 @@ def _thin_alpha_tile(img, amount):
     """把 RGBA 贴图按「笔画粗细自适应」调细（与公式层同一套口径）。
 
     只收粗笔画外沿；细笔画保持原样。amount：0=关闭，1=默认，越大越细。
+    像素运算在 inkproc.thin_rgba，和公式层共用一份，避免两边漂移。
     """
     if amount <= 0:
         return img
     try:
-        import numpy as np
-        from scipy import ndimage
-        from PIL import ImageFilter
+        import inkproc
+        return inkproc.thin_rgba(img, max(0.5, float(amount) * 2.0))
     except Exception:
         return img
-    strength = max(0.5, float(amount) * 2.0)
-    a = np.asarray(img.getchannel("A")).astype(np.float32)
-    mask = a > 30
-    if not mask.any():
-        return img
-    dist = ndimage.distance_transform_edt(mask)
-    rad = ndimage.maximum_filter(dist, size=9)
-    thick = rad >= max(1.6, 2.4 - 0.4 * strength)
-    edge = (dist <= 1.4) & thick
-    factor = np.where(edge, max(0.35, 1.0 - 0.25 * strength), 1.0)
-    a2 = np.clip(a * factor, 0, 255)
-    blurred = np.asarray(Image.fromarray(a2.astype(np.uint8), "L")
-                         .filter(ImageFilter.GaussianBlur(0.5))).astype(np.float32)
-    a2 = np.minimum(a, blurred)
-    a2 = np.clip(a2 * 1.25, 0, 255)
-    out = img.copy()
-    out.putalpha(Image.fromarray(a2.astype(np.uint8), "L"))
-    return out
 
 
 def _is_cjk(ch):
@@ -1369,22 +1351,28 @@ def _tokenize(s):
     return out
 
 
-def _shift_rows(img, dy):
-    if dy == 0:
-        return img
-    out = Image.new("RGBA", img.size, (0, 0, 0, 0))
-    out.alpha_composite(img, (0, -int(dy)))
-    return out
-
-
 def _sine_warp(img, amp=1.5, lam=300.0, phase=0.0):
+    """整行正弦弯曲：第 x 列整体上移 d(x) 像素（d 取整，超出画布的像素丢弃）。
+
+    实现要点：相邻列取整后多为同一位移，把它们合并成一段一次性合成。
+    逐列 crop+composite 与按「等位移连续段」合成在结果上逐像素等价
+    （合成到透明画布时每列互不影响），但 PIL 调用次数从 W 次降到
+    位移变化次数（通常个位数），整块渲染时间因此减半。
+    """
     if abs(amp) < 0.05:
         return img
     W, H = img.size
     out = Image.new("RGBA", (W, H), (0, 0, 0, 0))
-    for x in range(W):
-        d = int(round(amp * math.sin(2 * math.pi * x / lam + phase)))
-        out.alpha_composite(img.crop((x, 0, x + 1, H)), (x, d))
+    # 位移表达式与逐列版本逐字一致（不预先合并常数）：浮点舍入必须完全相同，
+    # 否则 sin 恰好落在 .5 边界时取整会差 1px。
+    d = int(round(amp * math.sin(phase)))
+    seg = 0
+    for x in range(1, W):
+        nx = int(round(amp * math.sin(2 * math.pi * x / lam + phase)))
+        if nx != d:
+            out.alpha_composite(img.crop((seg, 0, x, H)), (seg, d))
+            seg, d = x, nx
+    out.alpha_composite(img.crop((seg, 0, W, H)), (seg, d))
     return out
 
 

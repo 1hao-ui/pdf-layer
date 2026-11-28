@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
 """fontlab_gui.py — 字库工作台（自建字库的图形界面）。
 
-四个页签对应真实流程：
+页签对应真实流程：
 
-    字库        现有字库列表：启用 / 停用 / 重新校准 / 删除 / 打开目录
-    新建        选字（补缺字 / 标准字表 / 自定义）→ 生成可打印模板
-    识别       上传扫描图/PDF → 自动对齐切字 → 自动参数 → 逐字微调
+    字库        现有字库列表：启用 / 停用 / 重新校准 / 删除
+    新建 / 补字  已有字体文件可直接上传；没有就选字 → 出模板 → 手写 → 扫描
+    上传与识别  上传扫描图/PDF → 自动对齐切字 → 自动参数 → 逐字微调
     预览与生成  1:1 效果示例（与当前字库并排）→ 生成正式字库并启用
+
+另外提供 ``import_dialog()``：主界面顶栏「字库 → 上传字体文件」用的就是它。
 
 界面只做三件事：收集参数、调 ``fontlib`` 里的函数、把结果显示出来。
 真正的逻辑都在 ``fontlib/``，可以无头测试。
@@ -24,6 +26,219 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 
 from fontlib import charsets, registry, session as fsession        # noqa: E402
 from fontlib import autotune                                     # noqa: E402
+from fontlib import importer                                     # noqa: E402
+
+try:                                                             # noqa: E402
+    import theme as _theme
+except Exception:                                                # pragma: no cover
+    _theme = None
+
+
+class _ImportDialog:
+    def __init__(self, master, on_done=None, initial_paths=None):
+        self.master = master
+        self.on_done = on_done
+        self.paths = [p for p in (initial_paths or []) if p]
+        self.probes = []
+        self._preview_img = None
+        self._busy = False
+        self._q = __import__("queue").Queue()
+
+        self.win = tk.Toplevel(master)
+        self.win.title("上传字体文件")
+        self.win.transient(master)
+        try:
+            self.win.geometry("660x560")
+            self.win.minsize(560, 460)
+        except Exception:
+            pass
+
+        head = ttk.Frame(self.win, padding=(14, 12, 14, 4))
+        head.pack(fill="x")
+        ttk.Label(head, text="上传自己的字体文件",
+                  font=("Microsoft YaHei UI", 13, "bold")).pack(anchor="w")
+        ttk.Label(
+            head, foreground="#6b7280", wraplength=600, justify="left",
+            text="支持 TTF / OTF / TTC（字嗨等 App 导出的手写字体、从别的机器"
+                 "拷来的字库都行）。导入后会自动判断是汉字库还是符号库、"
+                 "算好字号与字距校准，并登记到字库列表。\n"
+                 "请只导入你自己有权使用的字体。").pack(anchor="w", pady=(4, 0))
+
+        tools = ttk.Frame(self.win, padding=(14, 6))
+        tools.pack(fill="x")
+        ttk.Button(tools, text="选择字体文件…", command=self._add).pack(side="left")
+        ttk.Button(tools, text="移除选中", command=self._remove).pack(
+            side="left", padx=(6, 0))
+        self.lbl_count = ttk.Label(tools, text="尚未选择文件",
+                                   foreground="#6b7280")
+        self.lbl_count.pack(side="left", padx=10)
+
+        mid = ttk.Frame(self.win, padding=(14, 0))
+        mid.pack(fill="both", expand=True)
+        self.listbox = tk.Listbox(mid, height=5, exportselection=False)
+        self.listbox.pack(fill="x")
+        self.info = tk.Text(mid, height=7, wrap="word", bd=0,
+                            background="#f6f8fa", foreground="#374151")
+        self.info.pack(fill="x", pady=(6, 0))
+        self.info.configure(state="disabled")
+
+        form = ttk.Frame(self.win, padding=(14, 8))
+        form.pack(fill="x")
+        ttk.Label(form, text="字库名称").grid(row=0, column=0, sticky="w")
+        self.var_name = tk.StringVar(value="")
+        ttk.Entry(form, textvariable=self.var_name, width=26).grid(
+            row=0, column=1, sticky="w", padx=(6, 16))
+        ttk.Label(form, text="字库 id").grid(row=0, column=2, sticky="w")
+        self.var_id = tk.StringVar(value="")
+        ttk.Entry(form, textvariable=self.var_id, width=18).grid(
+            row=0, column=3, sticky="w", padx=6)
+        self.var_activate = tk.BooleanVar(value=True)
+        ttk.Checkbutton(form, text="导入后设为当前字库",
+                        variable=self.var_activate).grid(
+            row=1, column=0, columnspan=4, sticky="w", pady=(8, 0))
+
+        self.preview_lbl = ttk.Label(self.win, text="", anchor="center")
+        self.preview_lbl.pack(fill="both", expand=True, padx=14, pady=(4, 0))
+
+        bottom = ttk.Frame(self.win, padding=(14, 8, 14, 12))
+        bottom.pack(fill="x", side="bottom")
+        self.status = ttk.Label(bottom, text="", foreground="#6b7280")
+        self.status.pack(side="left")
+        ttk.Button(bottom, text="关闭", command=self.close).pack(side="right")
+        self.btn_import = ttk.Button(bottom, text="导入", command=self._import,
+                                     style="Accent.TButton")
+        self.btn_import.pack(side="right", padx=(0, 6))
+
+        if self.paths:
+            self._probe()
+        self.win.protocol("WM_DELETE_WINDOW", self.close)
+
+    # ---- 选文件
+    def _add(self):
+        ps = filedialog.askopenfilenames(
+            parent=self.win,
+            title="选择字体文件（多个文件 = 同一字库的多遍，按主→副顺序）",
+            filetypes=[("字体文件", "*.ttf *.otf *.ttc *.otc"),
+                       ("全部", "*.*")])
+        if not ps:
+            return
+        for p in ps:
+            if p not in self.paths:
+                self.paths.append(p)
+        self._probe()
+
+    def _remove(self):
+        sel = list(self.listbox.curselection())
+        if not sel:
+            return
+        for i in reversed(sel):
+            if 0 <= i < len(self.paths):
+                self.paths.pop(i)
+        self._probe()
+
+    def _probe(self):
+        self.listbox.delete(0, "end")
+        for p in self.paths:
+            self.listbox.insert("end", "  " + os.path.basename(p))
+        self.probes = importer.probe_all(self.paths) if self.paths else []
+        self.lbl_count.configure(text="已选 %d 个文件" % len(self.paths)
+                                 if self.paths else "尚未选择文件")
+        self.info.configure(state="normal")
+        self.info.delete("1.0", "end")
+        ok = [p for p in self.probes if p["ok"]]
+        for p in self.probes:
+            if p["ok"]:
+                self.info.insert("end", "✔ %s\n    字体名：%s\n    字符 %d"
+                                        "（汉字 %d / ASCII %d）  字形 %d  upem %d\n"
+                                        "    判断：%s\n" % (
+                                            os.path.basename(p["path"]),
+                                            p["name"], p["chars"], p["han"],
+                                            p["ascii"], p["glyphs"], p["upem"],
+                                            "汉字库" if p["kind"] == "han"
+                                            else "符号库"))
+            else:
+                self.info.insert("end", "✘ %s：%s\n" % (
+                    os.path.basename(p.get("path", "")), p.get("error")))
+        self.info.configure(state="disabled")
+        if ok and not self.var_name.get():
+            self.var_name.set(ok[0]["name"])
+            self.var_id.set(importer.slug(ok[0]["name"]))
+        self.btn_import.configure(state="normal" if ok else "disabled")
+
+    # ---- 导入
+    def _import(self):
+        if self._busy or not self.paths:
+            return
+        self._busy = True
+        self.btn_import.configure(state="disabled")
+        self.status.configure(text="正在导入并校准…")
+        self.win.config(cursor="watch")
+        name = self.var_name.get().strip() or None
+        lib_id = self.var_id.get().strip() or None
+        act = self.var_activate.get()
+
+        def work():
+            try:
+                res = importer.import_fonts(self.paths, lib_id=lib_id,
+                                            name=name, activate=act)
+                self._q.put((res, None))
+            except Exception as e:      # noqa: BLE001
+                self._q.put((None, e))
+
+        threading.Thread(target=work, daemon=True).start()
+        self.win.after(150, self._poll)
+
+    def _poll(self):
+        import queue as _q
+        try:
+            res, err = self._q.get_nowait()
+        except _q.Empty:
+            self.win.after(150, self._poll)
+            return
+        self._busy = False
+        self.win.config(cursor="")
+        if err is not None:
+            self.status.configure(text="导入失败")
+            self.btn_import.configure(state="normal")
+            messagebox.showerror("上传字体文件", str(err), parent=self.win)
+            return
+        self.status.configure(
+            text="已导入「%s」：%d 字，%s%s" % (
+                res["name"], res["char_count"],
+                "汉字库" if res["kind"] == "han" else "符号库",
+                "（已设为当前）" if self.var_activate.get() else ""))
+        self.btn_import.configure(text="已导入", state="disabled")
+        self._show_preview(res.get("preview"))
+        try:
+            if self.on_done:
+                self.on_done()
+        except Exception:
+            pass
+
+    def _show_preview(self, path):
+        if not path or not os.path.exists(path):
+            return
+        from PIL import Image, ImageTk
+        try:
+            im = Image.open(path)
+        except Exception:
+            return
+        maxw = max(320, self.win.winfo_width() - 60)
+        if im.width > maxw:
+            im = im.resize((maxw, int(im.height * maxw / im.width)),
+                           Image.LANCZOS)
+        if im.height > 220:
+            im = im.resize((int(im.width * 220 / im.height), 220),
+                           Image.LANCZOS)
+        self._preview_img = ImageTk.PhotoImage(im)
+        self.preview_lbl.configure(image=self._preview_img,
+                                   text="导入后的字形总览")
+
+    def close(self):
+        try:
+            self.win.destroy()
+        except Exception:
+            pass
 
 
 def open_window(master, on_close=None, prefill_text=""):
@@ -62,6 +277,8 @@ class FontLabWindow:
         self._glyph_img = None
         self._busy = False
         self._build_ui()
+        if not hasattr(self, "_beach"):
+            self._beach = None
         self.refresh_libs()
         if self.session:
             self._bind_session(self.session)
@@ -75,6 +292,11 @@ class FontLabWindow:
     # ------------------------------------------------------------ 界面
     def _build_ui(self):
         self.win = tk.Toplevel(self.master)
+        if _theme is not None:
+            try:
+                _theme.apply_theme(self.win, dark=False)
+            except Exception:
+                pass
         self.win.title("字库工作台 — 自建手写库")
         try:
             sw = self.win.winfo_screenwidth()
@@ -88,6 +310,18 @@ class FontLabWindow:
 
         head = ttk.Frame(self.win, padding=(12, 8))
         head.pack(fill="x")
+        try:
+            dpi = max(1.0, float(self.win.winfo_fpixels("1i")) / 96.0)
+        except Exception:
+            dpi = 1.0
+        if _theme is not None and getattr(_theme, "BeachStrip", None):
+            try:
+                self._beach = _theme.BeachStrip(
+                    self.win, palette=dict(_theme.PALETTE), dpi=dpi,
+                    height=72)
+                self._beach.pack(fill="x")
+            except Exception:
+                self._beach = None
         ttk.Label(head, text="字库工作台",
                   font=("Microsoft YaHei UI", 14, "bold")).pack(side="left")
         ttk.Label(head, text="选字 → 打印模板 → 手写 → 上传 → 自动识别 → 微调 → 建库",
@@ -149,6 +383,16 @@ class FontLabWindow:
 
     # ---- ① 新建
     def _build_new_tab(self, p):
+        # 已有字体文件的人不用走「选字→模板→扫描」，直接上传
+        imp = ttk.LabelFrame(p, text="已有字体文件（TTF / OTF / TTC）？", padding=8)
+        imp.pack(fill="x", pady=(0, 10))
+        ttk.Label(imp, foreground="#6b7280", wraplength=690, justify="left",
+                  text="字嗨等 App 导出的手写字体、从旧电脑拷来的字库，"
+                       "可以直接上传：自动识别汉字库/符号库、自动校准字号与字距。"
+                  ).pack(anchor="w")
+        ttk.Button(imp, text="上传字体文件…", command=self._import_font,
+                   style="TButton").pack(anchor="w", pady=(6, 0))
+
         row = ttk.Frame(p)
         row.pack(fill="x")
         ttk.Label(row, text="字库名称").pack(side="left")
@@ -467,6 +711,16 @@ class FontLabWindow:
         except Exception as e:      # noqa: BLE001
             self._err(e)
 
+    # ------------------------------------------------------------ 上传字体
+    def _import_font(self):
+        """直接上传现成字体文件（不写模板、不扫描）。"""
+        return import_dialog(self.win, on_done=self._after_import)
+
+    def _after_import(self):
+        self.refresh_libs()
+        self._notify()
+        self.status.configure(text="字体已导入，可点左侧「设为当前」切换")
+
     def _recalibrate_lib(self):
         lid = self._sel_lib()
         lib = registry.get(lid) if lid else None
@@ -782,6 +1036,11 @@ class FontLabWindow:
 
     # ------------------------------------------------------------ 关闭
     def close(self):
+        try:
+            if getattr(self, "_beach", None) is not None:
+                self._beach.stop()
+        except Exception:
+            pass
         try:
             self.master._fontlab_win = None
         except Exception:

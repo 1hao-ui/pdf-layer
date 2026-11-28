@@ -188,6 +188,26 @@ def cmd_preview(args):
     return 0
 
 
+def cmd_import(args):
+    from fontlib import importer
+    paths = _expand(args.files)
+    if not paths:
+        print("没有匹配到字体文件")
+        return 2
+    m = importer.import_fonts(paths, lib_id=args.id or None,
+                              name=args.name or None,
+                              activate=not args.no_activate)
+    print("已导入「%s」→ %s" % (m["name"], m["target_dir"]))
+    print("  %d 字（%s）" % (m["char_count"],
+                             "汉字库" if m["kind"] == "han" else "符号库"))
+    for p, v in m.get("calibration", {}).items():
+        print("  %s  size_scale=%.4f  adv_scale=%.4f"
+              % (p, v["size_scale"], v["adv_scale"]))
+    if m.get("preview"):
+        print("  字形总览 ->", m["preview"])
+    return 0
+
+
 def cmd_activate(args):
     registry.set_active("han", args.id)
     print("当前汉字库 =", args.id)
@@ -272,6 +292,14 @@ def main(argv=None):
     p.add_argument("--size", type=float, default=12.4)
     p.add_argument("--work-root", default="")
     p.set_defaults(func=cmd_preview)
+
+    p = sub.add_parser("import-font", help="上传现成字体文件（TTF/OTF/TTC）")
+    p.add_argument("files", nargs="+",
+                   help="字体文件，按主→副顺序（多个 = 多遍）")
+    p.add_argument("--id", default="", help="字库 id / 目录名")
+    p.add_argument("--name", default="", help="显示名")
+    p.add_argument("--no-activate", action="store_true")
+    p.set_defaults(func=cmd_import)
 
     p = sub.add_parser("activate", help="切换当前汉字库")
     p.add_argument("id")

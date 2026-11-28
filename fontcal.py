@@ -468,6 +468,8 @@ def recalibrate_all(save=True, note=None):
 _cache = None
 # 预览用的临时校准值：{cal_key: params}，不落盘，params_for 优先查它。
 _overrides = {}
+# params_for 的记忆化：{绝对路径: (校准表对象, 参数)}；表一变就整条失效。
+_params_cache = {}
 
 
 def set_override(path, params):
@@ -495,6 +497,7 @@ def _cache_reset():
     _glyph_cache = None
     _cmap_cache.clear()
     _auto_cache.clear()
+    _params_cache.clear()
     _ink_h_cache.clear()
     _pen_cache.clear()
 
@@ -730,16 +733,24 @@ def params_for(path):
 
     顺序：预览临时值 → 「项目相对路径」查表 → basename 查表（兼容旧表）
     → 表里没有就按统一目标现场估（_auto_params），不会静默回落 1.0。
+
+    结果按绝对路径记忆化：排版时每画一个字都要问一次，而 Windows 下
+    abspath/relpath 的规范化开销比查表本身还大。缓存项绑定当前校准表对象
+    （`_cache`），换表/重载/注入预览值都会自然失效，不会读到旧值。
     """
     if not path:
         return dict(DEFAULTS)
+    ap = os.path.abspath(path)
     # 预览用的临时值优先（不写盘，退出/清 cache 即失效）
-    ov = _overrides.get(os.path.abspath(path))
+    ov = _overrides.get(ap)
     if ov is not None:
         p = dict(DEFAULTS)
         p.update({kk: vv for kk, vv in ov.items() if kk in DEFAULTS})
         return p
     tab = load()
+    hit = _params_cache.get(ap)
+    if hit is not None and hit[0] is tab:
+        return dict(hit[1])
     got = None
     for k in _lookup_keys(path):
         if k in tab:
@@ -749,7 +760,8 @@ def params_for(path):
         return _auto_params(path)
     p = dict(DEFAULTS)
     p.update({k: v for k, v in got.items() if k in DEFAULTS})
-    return p
+    _params_cache[ap] = (tab, p)
+    return dict(p)
 
 
 def finish_tile(img, ox, oy, cal):
